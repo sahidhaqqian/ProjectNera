@@ -389,12 +389,12 @@ fn attach_bone_colliders(
 fn update_click_through(
     environment: Res<DesktopEnvironment>,
     mut interaction: ResMut<DesktopPetInteraction>,
-    mut window_query: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
+    mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     colliders_query: Query<(&GlobalTransform, &NeraCollider)>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
-    let Ok((window, mut cursor_options)) = window_query.single_mut() else { return };
+    let Ok( mut cursor_options) = window_query.single_mut() else { return };
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
     let mut hovering = false;

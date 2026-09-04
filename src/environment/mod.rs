@@ -1,3 +1,5 @@
+mod window_discovery;
+
 use bevy::{
     prelude::*,
     window::PrimaryWindow,
@@ -5,6 +7,7 @@ use bevy::{
 
 use crate::platform::{
     self,
+    DesktopWindow,
     MonitorInfo,
     NativeWindowHandle,
     PhysicalRect,
@@ -16,20 +19,30 @@ use crate::platform::{
 
 #[derive(Resource, Debug)]
 pub struct DesktopEnvironment {
-    /// Native HWND milik Nera.
+    // -------------------------------------------------------------------------
+    // Nera
+    // -------------------------------------------------------------------------
+
     pub nera_hwnd: Option<NativeWindowHandle>,
-
-    /// Posisi + ukuran native window Nera dalam physical screen pixels.
     pub nera_rect: Option<PhysicalRect>,
-
-    /// DPI native window saat ini.
     pub nera_dpi: u32,
-
-    /// DPI / 96.
     pub nera_scale_factor: f64,
 
-    /// Monitor yang sekarang ditempati Nera.
+    // -------------------------------------------------------------------------
+    // Monitor
+    // -------------------------------------------------------------------------
+
     pub monitor: Option<MonitorInfo>,
+
+    // -------------------------------------------------------------------------
+    // Desktop Windows
+    // -------------------------------------------------------------------------
+
+    /// Snapshot candidate windows hasil EnumWindows.
+    pub discovered_windows: Vec<DesktopWindow>,
+
+    /// Window valid yang saat ini berada di bawah cursor.
+    pub window_under_cursor: Option<NativeWindowHandle>,
 }
 
 impl Default for DesktopEnvironment {
@@ -40,6 +53,9 @@ impl Default for DesktopEnvironment {
             nera_dpi: platform::BASE_DPI,
             nera_scale_factor: 1.0,
             monitor: None,
+
+            discovered_windows: Vec::new(),
+            window_under_cursor: None,
         }
     }
 }
@@ -52,8 +68,23 @@ pub struct DesktopEnvironmentPlugin;
 
 impl Plugin for DesktopEnvironmentPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DesktopEnvironment>()
-            .add_systems(First, sync_desktop_environment);
+        app
+            .init_resource::<DesktopEnvironment>()
+            .init_resource::<
+                window_discovery::WindowDiscoveryTimer
+            >()
+            .add_systems(
+                First,
+                sync_desktop_environment,
+            )
+            .add_systems(
+                PreUpdate,
+                (
+                    window_discovery::refresh_window_snapshot,
+                    window_discovery::update_window_under_cursor,
+                )
+                    .chain(),
+            );
     }
 }
 

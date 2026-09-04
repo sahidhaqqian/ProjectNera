@@ -13,27 +13,52 @@ use raw_window_handle::{
     RawWindowHandle,
 };
 
+use windows::core::BOOL;
+
 use windows::Win32::{
     Foundation::{
         HWND,
+        LPARAM,
         POINT,
         RECT,
     },
-    Graphics::Gdi::{
-        GetMonitorInfoW,
-        MonitorFromWindow,
-        MONITORINFO,
-        MONITOR_DEFAULTTONEAREST,
+
+    Graphics::{
+        Dwm::{
+            DwmGetWindowAttribute,
+            DWMWA_CLOAKED,
+        },
+
+        Gdi::{
+            GetMonitorInfoW,
+            MonitorFromWindow,
+            MONITORINFO,
+            MONITOR_DEFAULTTONEAREST,
+        },
     },
+
     UI::{
         HiDpi::GetDpiForWindow,
+
         WindowsAndMessaging::{
+            EnumWindows,
+            GA_ROOT,
+            GetAncestor,
+            GetClassNameW,
             GetCursorPos,
+            GetShellWindow,
+            GetWindowLongPtrW,
             GetWindowRect,
+            GetWindowTextW,
+            GWL_EXSTYLE,
+            IsWindow,
+            IsWindowVisible,
             SetWindowPos,
+            WindowFromPoint,
             SWP_NOACTIVATE,
             SWP_NOSIZE,
             SWP_NOZORDER,
+            WS_EX_TOOLWINDOW,
         },
     },
 };
@@ -104,11 +129,11 @@ impl PhysicalRect {
         self.bottom - self.top
     }
 
-    pub const fn origin(self) -> PhysicalPoint {
-        PhysicalPoint {
-            x: self.left,
-            y: self.top,
-        }
+    pub const fn contains(self, point: PhysicalPoint) -> bool {
+        point.x >= self.left
+            && point.x < self.right
+            && point.y >= self.top
+            && point.y < self.bottom
     }
 }
 
@@ -137,6 +162,20 @@ pub struct MonitorInfo {
 
     pub is_primary: bool,
 }
+
+
+// -----------------------------------------------------------------------------
+// Desktop Windows
+// -----------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct DesktopWindow {
+    pub handle: NativeWindowHandle,
+    pub rect: PhysicalRect,
+    pub title: String,
+    pub class_name: String,
+}
+
 
 // -----------------------------------------------------------------------------
 // HWND Acquisition
@@ -195,6 +234,307 @@ pub fn window_rect(handle: NativeWindowHandle) -> Option<PhysicalRect> {
     Some(rect.into())
 }
 
+
+// -----------------------------------------------------------------------------
+// Window Discovery
+// -----------------------------------------------------------------------------
+
+struct EnumWindowsContext {
+    nera_hwnd: NativeWindowHandle,
+    windows: Vec<DesktopWindow>,
+}
+
+fn native_handle_from_hwnd(hwnd: HWND) -> NativeWindowHandle {
+    NativeWindowHandle::from_raw(hwnd.0 as isize)
+}
+
+fn window_title(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 512];
+
+    let length = unsafe {
+        GetWindowTextW(
+            hwnd,
+            &mut buffer,
+        )
+    };
+
+    if length <= 0 {
+        return String::new();
+    }
+
+    String::from_utf16_lossy(
+        &buffer[..length as usize],
+    )
+}
+
+fn window_class_name(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 256];
+
+    let length = unsafe {
+        GetClassNameW(
+            hwnd,
+            &mut buffer,
+        )
+    };
+
+    if length <= 0 {
+        return String::new();
+    }
+
+    String::from_utf16_lossy(
+        &buffer[..length as usize],
+    )
+}
+
+fn is_window_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked: u32 = 0;
+
+    let result = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+
+    result.is_ok() && cloaked != 0
+}
+
+fn is_system_window_class(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "DV2ControlHost"
+            | "SysShadow"
+            | "tooltips_class32"
+    )
+}
+
+fn is_window_candidate(
+    hwnd: HWND,
+    nera_hwnd: NativeWindowHandle,
+) -> bool {
+    // Null / invalid HWND.
+    if hwnd.0.is_null() {
+        return false;
+    }
+
+    // Jangan pernah anggap Nera sendiri sebagai target.
+    if hwnd == nera_hwnd.hwnd() {
+        return false;
+    }
+
+    // HWND masih hidup?
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return false;
+    }
+
+    // Window harus visible.
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return false;
+    }
+
+    // Jangan ambil shell desktop.
+    let shell_window = unsafe {
+        GetShellWindow()
+    };
+
+    if hwnd == shell_window {
+        return false;
+    }
+
+    // Kita cuma mau root top-level window.
+    let root = unsafe {
+        GetAncestor(
+            hwnd,
+            GA_ROOT,
+        )
+    };
+
+    if root != hwnd {
+        return false;
+    }
+
+    // Skip UWP/internal windows yang sedang cloaked.
+    if is_window_cloaked(hwnd) {
+        return false;
+    }
+
+    // Skip utility/tool windows.
+    let ex_style = unsafe {
+        GetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+        )
+    } as u32;
+
+    if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
+        return false;
+    }
+
+    let class_name =
+        window_class_name(hwnd);
+
+    if is_system_window_class(&class_name) {
+        return false;
+    }
+
+    let handle =
+        native_handle_from_hwnd(hwnd);
+
+    let Some(rect) =
+        window_rect(handle)
+    else {
+        return false;
+    };
+
+    // Minimized/invalid/internal windows kadang menghasilkan
+    // geometry yang tidak berguna.
+    if rect.width() <= 1
+        || rect.height() <= 1
+    {
+        return false;
+    }
+
+    true
+}
+
+fn desktop_window_from_hwnd(
+    hwnd: HWND,
+    nera_hwnd: NativeWindowHandle,
+) -> Option<DesktopWindow> {
+    if !is_window_candidate(
+        hwnd,
+        nera_hwnd,
+    ) {
+        return None;
+    }
+
+    let handle =
+        native_handle_from_hwnd(hwnd);
+
+    let rect =
+        window_rect(handle)?;
+
+    Some(DesktopWindow {
+        handle,
+        rect,
+        title: window_title(hwnd),
+        class_name: window_class_name(hwnd),
+    })
+}
+
+unsafe extern "system" fn enum_windows_proc(
+    hwnd: HWND,
+    lparam: LPARAM,
+) -> BOOL {
+    let context = unsafe {
+        &mut *(lparam.0 as *mut EnumWindowsContext)
+    };
+
+    if let Some(window) =
+        desktop_window_from_hwnd(
+            hwnd,
+            context.nera_hwnd,
+        )
+    {
+        context.windows.push(window);
+    }
+
+    BOOL::from(true)
+}
+
+pub fn enumerate_windows(
+    nera_hwnd: NativeWindowHandle,
+) -> windows::core::Result<Vec<DesktopWindow>> {
+    let mut context =
+        EnumWindowsContext {
+            nera_hwnd,
+            windows: Vec::new(),
+        };
+
+    unsafe {
+        EnumWindows(
+            Some(enum_windows_proc),
+            LPARAM(
+                (&mut context as *mut EnumWindowsContext)
+                    as isize,
+            ),
+        )?;
+    }
+
+    Ok(context.windows)
+}
+
+fn direct_window_at_point(
+    point: PhysicalPoint,
+    nera_hwnd: NativeWindowHandle,
+) -> Option<NativeWindowHandle> {
+    let hwnd = unsafe {
+        WindowFromPoint(
+            POINT {
+                x: point.x,
+                y: point.y,
+            },
+        )
+    };
+
+    if hwnd.0.is_null() {
+        return None;
+    }
+
+    let root = unsafe {
+        GetAncestor(
+            hwnd,
+            GA_ROOT,
+        )
+    };
+
+    if root.0.is_null() {
+        return None;
+    }
+
+    if !is_window_candidate(
+        root,
+        nera_hwnd,
+    ) {
+        return None;
+    }
+
+    Some(native_handle_from_hwnd(root))
+}
+
+pub fn window_at_point(
+    point: PhysicalPoint,
+    nera_hwnd: NativeWindowHandle,
+    windows: &[DesktopWindow],
+) -> Option<NativeWindowHandle> {
+    // Fast/native path.
+    if let Some(handle) =
+        direct_window_at_point(
+            point,
+            nera_hwnd,
+        )
+    {
+        return Some(handle);
+    }
+
+    // Fallback:
+    //
+    // Kalau WindowFromPoint menemukan Nera sendiri,
+    // cari candidate berikutnya dari snapshot desktop.
+    windows
+        .iter()
+        .find(|window| {
+            window.handle != nera_hwnd
+                && window.rect.contains(point)
+        })
+        .map(|window| window.handle)
+}
 /// Pindahkan window tanpa:
 ///
 /// - resize
