@@ -1,3 +1,12 @@
+mod environment;
+mod platform;
+
+use environment::{
+    DesktopEnvironment,
+    DesktopEnvironmentPlugin,
+};
+
+
 use std::{
     num::NonZeroU32,
     time::Duration,
@@ -22,11 +31,6 @@ use bevy::{
 
 use bevy_vrm1::prelude::*;
 
-#[cfg(target_os = "windows")]
-use windows::Win32::{
-    Foundation::POINT,
-    UI::WindowsAndMessaging::GetCursorPos,
-};
 
 // -----------------------------------------------------------------------------
 // Nera - Phase 2 (Final: Manual Drag + LookAt + Analytic Bone Colliders)
@@ -120,7 +124,7 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins((VrmPlugin, VrmaPlugin))
+        .add_plugins((VrmPlugin, VrmaPlugin,DesktopEnvironmentPlugin,))
         .insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
         .add_systems(
@@ -220,41 +224,73 @@ fn play_idle_animation(trigger: On<LoadedVrma>, mut commands: Commands) {
 
 #[cfg(target_os = "windows")]
 fn update_look_at_target(
+    environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
 ) {
-    let Some(window) = window_query.iter().next() else { return };
-    let Some(mut target_transform) = target_query.iter_mut().next() else { return };
-    let Some(cursor_pos) = cursor_position_in_window(window) else { return };
+    let Some(window) =
+        window_query.iter().next()
+    else {
+        return;
+    };
 
-    let map_x = (cursor_pos.x / window.resolution.width() - 0.5) * 4.0;
-    let map_y = (0.5 - cursor_pos.y / window.resolution.height()) * 4.0 + 0.5;
+    let Some(mut target_transform) =
+        target_query.iter_mut().next()
+    else {
+        return;
+    };
 
-    target_transform.translation = Vec3::new(map_x, map_y, 2.0);
+    let Some(cursor_pos) =
+        cursor_position_in_nera_window(&environment)
+    else {
+        return;
+    };
+
+    let map_x =
+        (cursor_pos.x / window.resolution.width() - 0.5)
+            * 4.0;
+
+    let map_y =
+        (0.5 - cursor_pos.y / window.resolution.height())
+            * 4.0
+            + 0.5;
+
+    target_transform.translation =
+        Vec3::new(map_x, map_y, 2.0);
 }
 
 // -----------------------------------------------------------------------------
 // Windows Cursor & Mathematics
 // -----------------------------------------------------------------------------
 
-#[cfg(target_os = "windows")]
-fn global_cursor_position() -> Option<IVec2> {
-    let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point).ok()?; }
-    Some(IVec2::new(point.x, point.y))
-}
+
 
 #[cfg(target_os = "windows")]
-fn cursor_position_in_window(window: &Window) -> Option<Vec2> {
-    let global_cursor = global_cursor_position()?;
-    let WindowPosition::At(window_position) = window.position else { return None };
+fn cursor_position_in_nera_window(
+    environment: &DesktopEnvironment,
+) -> Option<Vec2> {
+    let global_cursor =
+        platform::global_cursor_position()?;
 
-    let local_physical = global_cursor - window_position;
-    let scale_factor = window.scale_factor();
+    let rect =
+        environment.nera_rect?;
+
+    let local_x =
+        global_cursor.x - rect.left;
+
+    let local_y =
+        global_cursor.y - rect.top;
+
+    let scale =
+        environment.nera_scale_factor as f32;
+
+    if scale <= 0.0 {
+        return None;
+    }
 
     Some(Vec2::new(
-        local_physical.x as f32 / scale_factor,
-        local_physical.y as f32 / scale_factor,
+        local_x as f32 / scale,
+        local_y as f32 / scale,
     ))
 }
 
@@ -351,6 +387,7 @@ fn attach_bone_colliders(
 
 #[cfg(target_os = "windows")]
 fn update_click_through(
+    environment: Res<DesktopEnvironment>,
     mut interaction: ResMut<DesktopPetInteraction>,
     mut window_query: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
@@ -362,7 +399,7 @@ fn update_click_through(
 
     let mut hovering = false;
 
-    if let Some(cursor_pos) = cursor_position_in_window(window) {
+    if let Some(cursor_pos) = cursor_position_in_nera_window(&environment) {
         if let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) {
             let ray_origin = ray.origin;
             let ray_dir = ray.direction.into();
@@ -415,25 +452,62 @@ fn update_click_through(
 // Window Dragging
 // -----------------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 fn drag_nera_window(
     mouse: Res<ButtonInput<MouseButton>>,
     mut interaction: ResMut<DesktopPetInteraction>,
-    mut window_query: Query<&mut Window, With<PrimaryWindow>>,
+    mut environment: ResMut<DesktopEnvironment>,
 ) {
-    let Ok(mut window) = window_query.single_mut() else { return };
-    let Some(global_cursor) = global_cursor_position() else { return };
+    let Some(hwnd) =
+        environment.nera_hwnd
+    else {
+        return;
+    };
 
-    if interaction.hovering_nera && mouse.just_pressed(MouseButton::Left) {
-        if let WindowPosition::At(window_pos) = window.position {
-            interaction.drag_offset = Some(global_cursor - window_pos);
+    let Some(global_cursor) =
+        platform::global_cursor_position()
+    else {
+        return;
+    };
+
+    // Start drag.
+    if interaction.hovering_nera
+        && mouse.just_pressed(MouseButton::Left)
+    {
+        if let Some(rect) = environment.nera_rect {
+            interaction.drag_offset =
+                Some(IVec2::new(
+                    global_cursor.x - rect.left,
+                    global_cursor.y - rect.top,
+                ));
         }
     }
 
+    // Stop drag.
     if mouse.just_released(MouseButton::Left) {
         interaction.drag_offset = None;
     }
 
-    if let Some(offset) = interaction.drag_offset {
-        window.position = WindowPosition::At(global_cursor - offset);
+    // Native window movement.
+    if let Some(offset) =
+        interaction.drag_offset
+    {
+        let new_position =
+            platform::PhysicalPoint::new(
+                global_cursor.x - offset.x,
+                global_cursor.y - offset.y,
+            );
+
+        if platform::move_window(
+            hwnd,
+            new_position,
+        )
+        .is_ok()
+        {
+            // Update segera agar cursor/LookAt tidak
+            // menunggu sync frame berikutnya.
+            environment.nera_rect =
+                platform::window_rect(hwnd);
+        }
     }
 }

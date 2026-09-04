@@ -1,0 +1,110 @@
+use bevy::{
+    prelude::*,
+    window::PrimaryWindow,
+};
+
+use crate::platform::{
+    self,
+    MonitorInfo,
+    NativeWindowHandle,
+    PhysicalRect,
+};
+
+// -----------------------------------------------------------------------------
+// Desktop Environment
+// -----------------------------------------------------------------------------
+
+#[derive(Resource, Debug)]
+pub struct DesktopEnvironment {
+    /// Native HWND milik Nera.
+    pub nera_hwnd: Option<NativeWindowHandle>,
+
+    /// Posisi + ukuran native window Nera dalam physical screen pixels.
+    pub nera_rect: Option<PhysicalRect>,
+
+    /// DPI native window saat ini.
+    pub nera_dpi: u32,
+
+    /// DPI / 96.
+    pub nera_scale_factor: f64,
+
+    /// Monitor yang sekarang ditempati Nera.
+    pub monitor: Option<MonitorInfo>,
+}
+
+impl Default for DesktopEnvironment {
+    fn default() -> Self {
+        Self {
+            nera_hwnd: None,
+            nera_rect: None,
+            nera_dpi: platform::BASE_DPI,
+            nera_scale_factor: 1.0,
+            monitor: None,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Plugin
+// -----------------------------------------------------------------------------
+
+pub struct DesktopEnvironmentPlugin;
+
+impl Plugin for DesktopEnvironmentPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<DesktopEnvironment>()
+            .add_systems(First, sync_desktop_environment);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Synchronization
+// -----------------------------------------------------------------------------
+
+fn sync_desktop_environment(world: &mut World) {
+    let primary_window_entity = {
+        let mut query =
+            world.query_filtered::<Entity, With<PrimaryWindow>>();
+
+        query.iter(world).next()
+    };
+
+    let Some(primary_window_entity) = primary_window_entity else {
+        return;
+    };
+
+    let current_handle = world
+        .resource::<DesktopEnvironment>()
+        .nera_hwnd;
+
+    let handle = if let Some(handle) = current_handle {
+        handle
+    } else {
+        let Some(handle) =
+            platform::native_window_handle(primary_window_entity)
+        else {
+            return;
+        };
+
+        info!(
+            "Nera native HWND acquired: 0x{:X}",
+            handle.as_raw() as usize
+        );
+
+        handle
+    };
+
+    let rect = platform::window_rect(handle);
+    let dpi = platform::dpi_for_window(handle);
+    let monitor = platform::monitor_info(handle);
+    let scale_factor = platform::dpi_scale_factor(dpi);
+
+    let mut environment =
+        world.resource_mut::<DesktopEnvironment>();
+
+    environment.nera_hwnd = Some(handle);
+    environment.nera_rect = rect;
+    environment.nera_dpi = dpi;
+    environment.nera_scale_factor = scale_factor;
+    environment.monitor = monitor;
+}

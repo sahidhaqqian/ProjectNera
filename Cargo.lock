@@ -2910,6 +2910,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_vrm1",
+ "raw-window-handle",
  "windows 0.62.2",
 ]
 
