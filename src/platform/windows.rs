@@ -51,6 +51,7 @@ use windows::Win32::{
             GetWindowRect,
             GetWindowTextW,
             GWL_EXSTYLE,
+            IsIconic,
             IsWindow,
             IsWindowVisible,
             SetWindowPos,
@@ -93,6 +94,20 @@ impl NativeWindowHandle {
 
     fn hwnd(self) -> HWND {
         HWND(self.0 as *mut c_void)
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NativeMonitorHandle(isize);
+
+impl NativeMonitorHandle {
+    pub const fn from_raw(raw: isize) -> Self {
+        Self(raw)
+    }
+
+    pub const fn as_raw(self) -> isize {
+        self.0
     }
 }
 
@@ -154,12 +169,9 @@ impl From<RECT> for PhysicalRect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MonitorInfo {
-    /// Seluruh area monitor.
+    pub handle: NativeMonitorHandle,
     pub bounds: PhysicalRect,
-
-    /// Area usable setelah taskbar/system UI dikurangi.
     pub work_area: PhysicalRect,
-
     pub is_primary: bool,
 }
 
@@ -559,6 +571,29 @@ pub fn move_window(
     }
 }
 
+
+pub fn is_window_alive(
+    handle: NativeWindowHandle,
+) -> bool {
+    unsafe {
+        IsWindow(
+            Some(handle.hwnd()),
+        )
+        .as_bool()
+    }
+}
+
+pub fn is_window_minimized(
+    handle: NativeWindowHandle,
+) -> bool {
+    unsafe {
+        IsIconic(
+            handle.hwnd(),
+        )
+        .as_bool()
+    }
+}
+
 // -----------------------------------------------------------------------------
 // DPI
 // -----------------------------------------------------------------------------
@@ -616,6 +651,9 @@ pub fn monitor_info(handle: NativeWindowHandle) -> Option<MonitorInfo> {
     }
 
     Some(MonitorInfo {
+        handle: NativeMonitorHandle::from_raw(
+            monitor.0 as isize,
+        ),
         bounds: info.rcMonitor.into(),
         work_area: info.rcWork.into(),
         is_primary: (info.dwFlags & MONITOR_PRIMARY_FLAG) != 0,

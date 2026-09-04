@@ -1,4 +1,7 @@
 mod window_discovery;
+mod window_tracking;
+
+pub use window_tracking::TrackedWindow;
 
 use bevy::{
     prelude::*,
@@ -35,14 +38,17 @@ pub struct DesktopEnvironment {
     pub monitor: Option<MonitorInfo>,
 
     // -------------------------------------------------------------------------
-    // Desktop Windows
+    // Window Discovery
     // -------------------------------------------------------------------------
 
-    /// Snapshot candidate windows hasil EnumWindows.
     pub discovered_windows: Vec<DesktopWindow>,
-
-    /// Window valid yang saat ini berada di bawah cursor.
     pub window_under_cursor: Option<NativeWindowHandle>,
+
+    // -------------------------------------------------------------------------
+    // Window Tracking
+    // -------------------------------------------------------------------------
+
+    pub target_window: Option<TrackedWindow>,
 }
 
 impl Default for DesktopEnvironment {
@@ -56,6 +62,7 @@ impl Default for DesktopEnvironment {
 
             discovered_windows: Vec::new(),
             window_under_cursor: None,
+            target_window: None,
         }
     }
 }
@@ -82,6 +89,9 @@ impl Plugin for DesktopEnvironmentPlugin {
                 (
                     window_discovery::refresh_window_snapshot,
                     window_discovery::update_window_under_cursor,
+
+                    window_tracking::acquire_target_from_cursor,
+                    window_tracking::track_target_window,
                 )
                     .chain(),
             );
