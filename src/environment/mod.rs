@@ -55,7 +55,7 @@ pub struct DesktopEnvironment {
     pub target_window: Option<TrackedWindow>,
 
     // Z order
-    pub z_order:ZOrderState,
+    pub z_order: ZOrderState,
 }
 
 impl Default for DesktopEnvironment {
@@ -85,7 +85,7 @@ impl Plugin for DesktopEnvironmentPlugin {
     fn build(&self, app: &mut App) {
         app
             .init_resource::<DesktopEnvironment>()
-            .init_resource::< window_discovery::WindowDiscoveryTimer>()
+            .init_resource::<window_discovery::WindowDiscoveryTimer>()
             .init_resource::<z_order::ZOrderTimer>()
             .add_systems(First,sync_desktop_environment,)
             .add_systems(
