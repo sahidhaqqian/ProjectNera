@@ -1,11 +1,17 @@
 mod window_discovery;
 mod window_tracking;
 mod z_order;
+mod taskbar;
 
 pub use window_tracking::TrackedWindow;
 
 pub use z_order::ZOrderState;
 
+pub use taskbar::{
+    TaskbarEdge,
+    TaskbarInfo,
+    TaskbarState,
+};
 
 use bevy::{
     prelude::*,
@@ -56,6 +62,8 @@ pub struct DesktopEnvironment {
 
     // Z order
     pub z_order: ZOrderState,
+    // taskbar
+    pub taskbar: TaskbarState,
 }
 
 impl Default for DesktopEnvironment {
@@ -71,6 +79,7 @@ impl Default for DesktopEnvironment {
             window_under_cursor: None,
             target_window: None,
             z_order: ZOrderState::default(),
+            taskbar: TaskbarState::default(),
         }
     }
 }
@@ -88,6 +97,7 @@ impl Plugin for DesktopEnvironmentPlugin {
             .init_resource::<window_discovery::WindowDiscoveryTimer>()
             .init_resource::<z_order::ZOrderTimer>()
             .add_systems(First,sync_desktop_environment,)
+            .init_resource::<taskbar::TaskbarTimer>()
             .add_systems(
                 PreUpdate,
                 (
@@ -97,6 +107,8 @@ impl Plugin for DesktopEnvironmentPlugin {
                     window_tracking::acquire_target_from_cursor,
                     window_tracking::track_target_window,
                     z_order::update_z_order,
+                    taskbar::refresh_taskbars,
+
                 )
                     .chain(),
             );

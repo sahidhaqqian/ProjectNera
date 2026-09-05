@@ -30,6 +30,9 @@ use windows::Win32::{
         },
 
         Gdi::{
+            EnumDisplayMonitors,
+            HDC,
+            HMONITOR,
             GetMonitorInfoW,
             MonitorFromWindow,
             MONITORINFO,
@@ -770,14 +773,12 @@ pub fn logical_to_physical(value: f64, dpi: u32) -> f64 {
 // -----------------------------------------------------------------------------
 // Monitor Information
 // -----------------------------------------------------------------------------
-
-pub fn monitor_info(handle: NativeWindowHandle) -> Option<MonitorInfo> {
-    let monitor = unsafe {
-        MonitorFromWindow(
-            handle.hwnd(),
-            MONITOR_DEFAULTTONEAREST,
-        )
-    };
+fn monitor_info_from_hmonitor(
+    monitor: HMONITOR,
+) -> Option<MonitorInfo> {
+    if monitor.0.is_null() {
+        return None;
+    }
 
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
@@ -799,8 +800,82 @@ pub fn monitor_info(handle: NativeWindowHandle) -> Option<MonitorInfo> {
         handle: NativeMonitorHandle::from_raw(
             monitor.0 as isize,
         ),
+
         bounds: info.rcMonitor.into(),
+
         work_area: info.rcWork.into(),
-        is_primary: (info.dwFlags & MONITOR_PRIMARY_FLAG) != 0,
+
+        is_primary:
+            (info.dwFlags & MONITOR_PRIMARY_FLAG) != 0,
     })
 }
+
+pub fn monitor_info(
+    handle: NativeWindowHandle,
+) -> Option<MonitorInfo> {
+    let monitor = unsafe {
+        MonitorFromWindow(
+            handle.hwnd(),
+            MONITOR_DEFAULTTONEAREST,
+        )
+    };
+
+    monitor_info_from_hmonitor(monitor)
+}
+
+// -----------------------------------------------------------------------------
+// Monitor Enumeration
+// -----------------------------------------------------------------------------
+
+struct EnumMonitorsContext {
+    monitors: Vec<MonitorInfo>,
+}
+
+unsafe extern "system" fn enum_monitors_proc(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> BOOL {
+    let context = unsafe {
+        &mut *(
+            lparam.0
+                as *mut EnumMonitorsContext
+        )
+    };
+
+    if let Some(info) =
+        monitor_info_from_hmonitor(
+            monitor,
+        )
+    {
+        context.monitors.push(info);
+    }
+
+    BOOL::from(true)
+}
+
+pub fn enumerate_monitors() -> Vec<MonitorInfo> {
+    let mut context = EnumMonitorsContext {
+        monitors: Vec::new(),
+    };
+
+    let success = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(enum_monitors_proc),
+            LPARAM(
+                (&mut context as *mut EnumMonitorsContext)
+                    as isize,
+            ),
+        )
+    };
+
+    if !success.as_bool() {
+        return Vec::new();
+    }
+
+    context.monitors
+}
+
