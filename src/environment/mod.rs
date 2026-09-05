@@ -1,7 +1,11 @@
 mod window_discovery;
 mod window_tracking;
+mod z_order;
 
 pub use window_tracking::TrackedWindow;
+
+pub use z_order::ZOrderState;
+
 
 use bevy::{
     prelude::*,
@@ -49,6 +53,9 @@ pub struct DesktopEnvironment {
     // -------------------------------------------------------------------------
 
     pub target_window: Option<TrackedWindow>,
+
+    // Z order
+    pub z_order:ZOrderState,
 }
 
 impl Default for DesktopEnvironment {
@@ -63,6 +70,7 @@ impl Default for DesktopEnvironment {
             discovered_windows: Vec::new(),
             window_under_cursor: None,
             target_window: None,
+            z_order: ZOrderState::default(),
         }
     }
 }
@@ -77,13 +85,9 @@ impl Plugin for DesktopEnvironmentPlugin {
     fn build(&self, app: &mut App) {
         app
             .init_resource::<DesktopEnvironment>()
-            .init_resource::<
-                window_discovery::WindowDiscoveryTimer
-            >()
-            .add_systems(
-                First,
-                sync_desktop_environment,
-            )
+            .init_resource::< window_discovery::WindowDiscoveryTimer>()
+            .init_resource::<z_order::ZOrderTimer>()
+            .add_systems(First,sync_desktop_environment,)
             .add_systems(
                 PreUpdate,
                 (
@@ -92,6 +96,7 @@ impl Plugin for DesktopEnvironmentPlugin {
 
                     window_tracking::acquire_target_from_cursor,
                     window_tracking::track_target_window,
+                    z_order::update_z_order,
                 )
                     .chain(),
             );

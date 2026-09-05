@@ -41,6 +41,9 @@ use windows::Win32::{
         HiDpi::GetDpiForWindow,
 
         WindowsAndMessaging::{
+            GetWindow,
+            GW_HWNDPREV,
+            GW_HWNDNEXT,
             EnumWindows,
             GA_ROOT,
             GetAncestor,
@@ -140,6 +143,16 @@ impl PhysicalRect {
         self.right - self.left
     }
 
+    pub const fn intersects(
+    self,
+    other: PhysicalRect,
+    ) -> bool {
+        self.left < other.right
+            && self.right > other.left
+            && self.top < other.bottom
+            && self.bottom > other.top
+    }
+
     pub const fn height(self) -> i32 {
         self.bottom - self.top
     }
@@ -188,6 +201,12 @@ pub struct DesktopWindow {
     pub class_name: String,
 }
 
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZOrderWindow {
+    pub handle: NativeWindowHandle,
+    pub rect: PhysicalRect,
+}
 
 // -----------------------------------------------------------------------------
 // HWND Acquisition
@@ -547,6 +566,132 @@ pub fn window_at_point(
         })
         .map(|window| window.handle)
 }
+
+
+// -----------------------------------------------------------------------------
+// Z-Order
+// -----------------------------------------------------------------------------
+
+const MAX_Z_ORDER_SCAN: usize = 256;
+
+fn z_order_window_from_hwnd(
+    hwnd: HWND,
+    nera_hwnd: NativeWindowHandle,
+) -> Option<ZOrderWindow> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+
+    if hwnd == nera_hwnd.hwnd() {
+        return None;
+    }
+
+    if !is_window_candidate(
+        hwnd,
+        nera_hwnd,
+    ) {
+        return None;
+    }
+
+    let handle =
+        native_handle_from_hwnd(hwnd);
+
+    // Minimized window tidak mungkin secara visual
+    // menutupi target.
+    if is_window_minimized(handle) {
+        return None;
+    }
+
+    let rect =
+        window_rect(handle)?;
+
+    Some(ZOrderWindow {
+        handle,
+        rect,
+    })
+}
+
+
+pub fn windows_above_target(
+    target: NativeWindowHandle,
+    nera_hwnd: NativeWindowHandle,
+) -> Vec<ZOrderWindow> {
+    let mut result = Vec::new();
+
+    let mut current =
+        target.hwnd();
+
+    for _ in 0..MAX_Z_ORDER_SCAN {
+        let Ok(next) = (unsafe {
+            GetWindow(
+                current,
+                GW_HWNDPREV,
+            )
+        }) else {
+            break;
+        };
+
+        if next.0.is_null()
+            || next == current
+        {
+            break;
+        }
+
+        current = next;
+
+        if let Some(window) =
+            z_order_window_from_hwnd(
+                next,
+                nera_hwnd,
+            )
+        {
+            result.push(window);
+        }
+    }
+
+    result
+}
+
+pub fn window_below_target(
+    target: NativeWindowHandle,
+    nera_hwnd: NativeWindowHandle,
+) -> Option<ZOrderWindow> {
+    let mut current =
+        target.hwnd();
+
+    for _ in 0..MAX_Z_ORDER_SCAN {
+        let Ok(next) = (unsafe {
+            GetWindow(
+                current,
+                GW_HWNDNEXT,
+            )
+        }) else {
+            break;
+        };
+
+        if next.0.is_null()
+            || next == current
+        {
+            break;
+        }
+
+        current = next;
+
+        if let Some(window) =
+            z_order_window_from_hwnd(
+                next,
+                nera_hwnd,
+            )
+        {
+            return Some(window);
+        }
+    }
+
+    None
+}
+
+
+
 /// Pindahkan window tanpa:
 ///
 /// - resize
