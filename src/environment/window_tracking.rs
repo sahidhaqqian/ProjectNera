@@ -30,6 +30,9 @@ pub struct TrackedWindow {
     /// Window sedang minimized.
     pub minimized: bool,
 
+    /// Window sedang DWM-cloaked, biasanya karena berada di virtual desktop lain.
+    pub cloaked: bool,
+
     /// Posisi berubah pada update ini.
     pub moved: bool,
 
@@ -60,6 +63,7 @@ impl TrackedWindow {
 
             alive: true,
             minimized: false,
+            cloaked: false,
 
             moved: false,
             resized: false,
@@ -92,7 +96,9 @@ impl DesktopEnvironment {
         //
         // Window yang SUDAH menjadi target boleh kemudian minimized;
         // itu ditangani oleh tracking system.
-        if platform::is_window_minimized(handle) {
+        if platform::is_window_minimized(handle)
+            || platform::is_window_cloaked(handle)
+        {
             return false;
         }
 
@@ -116,50 +122,6 @@ impl DesktopEnvironment {
             );
 
         true
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Temporary Phase 3.3 Target Acquisition
-// -----------------------------------------------------------------------------
-
-pub(super) fn acquire_target_from_cursor(
-    mut environment: ResMut<DesktopEnvironment>,
-) {
-    // Kalau sudah punya target yang masih hidup,
-    // JANGAN ganti hanya karena cursor pindah.
-    if environment
-        .target_window
-        .as_ref()
-        .is_some_and(|target| target.alive)
-    {
-        return;
-    }
-
-    let Some(handle) =
-        environment.window_under_cursor
-    else {
-        return;
-    };
-
-    // Ambil nama hanya untuk logging.
-    let target_name = environment
-        .discovered_windows
-        .iter()
-        .find(|window| {
-            window.handle == handle
-        })
-        .map(|window| window.title.clone())
-        .unwrap_or_else(|| {
-            "<unknown>".to_string()
-        });
-
-    if environment.track_window(handle) {
-        info!(
-            "Tracking target acquired: {:?} | title={}",
-            handle,
-            target_name,
-        );
     }
 }
 
@@ -198,6 +160,7 @@ pub(super) fn track_target_window(
     ) {
         target.alive = false;
         target.minimized = false;
+        target.cloaked = false;
 
         info!(
             "Tracked window closed: {:?}",
@@ -235,11 +198,39 @@ pub(super) fn track_target_window(
         }
     }
 
+    // -------------------------------------------------------------------------
+    // DWM cloaking / Virtual Desktop
+    // -------------------------------------------------------------------------
+
+    let was_cloaked =
+        target.cloaked;
+
+    let cloaked =
+        platform::is_window_cloaked(
+            target.handle,
+        );
+
+    target.cloaked = cloaked;
+
+    if cloaked != was_cloaked {
+        if cloaked {
+            info!(
+                "Tracked window cloaked (likely another virtual desktop): {:?}",
+                target.handle,
+            );
+        } else {
+            info!(
+                "Tracked window uncloaked: {:?}",
+                target.handle,
+            );
+        }
+    }
+
     // Jangan update rect ketika minimized.
     //
     // Kita pertahankan rect normal terakhir supaya Nera
     // tidak tiba-tiba bergerak ke koordinat minimized/icon.
-    if minimized {
+    if minimized || cloaked {
         return;
     }
 

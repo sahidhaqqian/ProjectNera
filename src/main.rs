@@ -7,8 +7,8 @@ mod tray;
 use environment::{
     DesktopEnvironment,
     DesktopEnvironmentPlugin,
+    PlacementState,
 };
-
 
 use std::{
     num::NonZeroU32,
@@ -66,6 +66,10 @@ use tray::TrayPlugin;
 
 const VRM_PATH: &str = "vrm/nera.vrm";
 const IDLE_VRMA_PATH: &str = "animations/idle.vrma";
+
+/// VrmBone `foot` is located around the ankle; shift the sitting support
+/// plane down to the visible sole in logical window pixels.
+const FOOT_SOLE_OFFSET_LOGICAL: f32 = 12.0;
 
 // -----------------------------------------------------------------------------
 // Resources & Components
@@ -147,6 +151,7 @@ fn main() {
             (
                 attach_bone_colliders,
                 update_look_at_target,
+                update_support_anchor,
                 drag_nera_window,
             )
                 .chain(),
@@ -303,6 +308,64 @@ fn cursor_position_in_nera_window(
         local_x as f32 / scale,
         local_y as f32 / scale,
     ))
+}
+
+
+
+// -----------------------------------------------------------------------------
+// Phase 4 support / foot anchor
+// -----------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+fn update_support_anchor(
+    interaction: Res<DesktopPetInteraction>,
+    mut environment: ResMut<DesktopEnvironment>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    bone_query: Query<(&VrmBone, &GlobalTransform)>,
+) {
+    // Once attached OR while a drag is in progress, freeze the landing anchor.
+    // The idle animation may keep moving the feet, but one physical drag should
+    // have one deterministic support point from press until release.
+    if environment.placement != PlacementState::Free
+        || interaction.drag_offset.is_some()
+    {
+        return;
+    }
+
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+
+    let mut feet = Vec::with_capacity(2);
+
+    for (bone, transform) in &bone_query {
+        if !matches!(bone.as_str(), "leftFoot" | "rightFoot") {
+            continue;
+        }
+
+        if let Ok(viewport) = camera.world_to_viewport(
+            camera_transform,
+            transform.translation(),
+        ) {
+            feet.push(viewport);
+        }
+    }
+
+    if feet.is_empty() {
+        return;
+    }
+
+    let x = feet.iter().map(|point| point.x).sum::<f32>() / feet.len() as f32;
+
+    // Use the lowest visible foot as the support plane. VrmBone `foot` is
+    // around the ankle, so add a small logical-pixel sole offset.
+    let y = feet
+        .iter()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        + FOOT_SOLE_OFFSET_LOGICAL;
+
+    environment.set_support_anchor(Vec2::new(x, y));
 }
 
 fn ray_intersects_sphere(ray_origin: Vec3, ray_dir: Vec3, center: Vec3, radius: f32) -> bool {
@@ -469,56 +532,50 @@ fn drag_nera_window(
     mut interaction: ResMut<DesktopPetInteraction>,
     mut environment: ResMut<DesktopEnvironment>,
 ) {
-    let Some(hwnd) =
-        environment.nera_hwnd
-    else {
+    let Some(hwnd) = environment.nera_hwnd else {
         return;
     };
 
-    let Some(global_cursor) =
-        platform::global_cursor_position()
-    else {
+    let Some(global_cursor) = platform::global_cursor_position() else {
         return;
     };
 
-    // Start drag.
-    if interaction.hovering_nera
-        && mouse.just_pressed(MouseButton::Left)
-    {
+    // Start drag. Any existing window/taskbar attachment is broken first.
+    if interaction.hovering_nera && mouse.just_pressed(MouseButton::Left) {
         if let Some(rect) = environment.nera_rect {
-            interaction.drag_offset =
-                Some(IVec2::new(
-                    global_cursor.x - rect.left,
-                    global_cursor.y - rect.top,
-                ));
+            environment.begin_nera_drag();
+
+            interaction.drag_offset = Some(IVec2::new(
+                global_cursor.x - rect.left,
+                global_cursor.y - rect.top,
+            ));
         }
     }
 
-    // Stop drag.
-    if mouse.just_released(MouseButton::Left) {
-        interaction.drag_offset = None;
+    // Native window movement. Keep this before release handling so the final
+    // mouse position is included in landing/snap detection.
+    if let Some(offset) = interaction.drag_offset {
+        let new_position = platform::PhysicalPoint::new(
+            global_cursor.x - offset.x,
+            global_cursor.y - offset.y,
+        );
+
+        if platform::move_window(hwnd, new_position).is_ok() {
+            // Update immediately so cursor/LookAt and Phase 4 snap math do not
+            // wait for the next First-stage native synchronization.
+            environment.nera_rect = platform::window_rect(hwnd);
+        }
     }
 
-    // Native window movement.
-    if let Some(offset) =
-        interaction.drag_offset
-    {
-        let new_position =
-            platform::PhysicalPoint::new(
-                global_cursor.x - offset.x,
-                global_cursor.y - offset.y,
-            );
+    // Release => choose support surface from Nera's landing point. Cursor-based
+    // target acquisition from Phase 3 is intentionally no longer involved.
+    if mouse.just_released(MouseButton::Left) {
+        let was_dragging = interaction.drag_offset.take().is_some();
 
-        if platform::move_window(
-            hwnd,
-            new_position,
-        )
-        .is_ok()
-        {
-            // Update segera agar cursor/LookAt tidak
-            // menunggu sync frame berikutnya.
-            environment.nera_rect =
-                platform::window_rect(hwnd);
+        if was_dragging {
+            if !environment.finish_nera_drag() {
+                debug!("Nera released without a snap target");
+            }
         }
     }
 }

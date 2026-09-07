@@ -27,6 +27,7 @@ use windows::Win32::{
         Dwm::{
             DwmGetWindowAttribute,
             DWMWA_CLOAKED,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
         },
 
         Gdi::{
@@ -46,7 +47,6 @@ use windows::Win32::{
         WindowsAndMessaging::{
             GetWindow,
             GW_HWNDPREV,
-            GW_HWNDNEXT,
             EnumWindows,
             GA_ROOT,
             GetAncestor,
@@ -55,7 +55,6 @@ use windows::Win32::{
             GetShellWindow,
             GetWindowLongPtrW,
             GetWindowRect,
-            GetWindowTextW,
             GWL_EXSTYLE,
             IsIconic,
             IsWindow,
@@ -63,9 +62,12 @@ use windows::Win32::{
             SetWindowPos,
             WindowFromPoint,
             SWP_NOACTIVATE,
+            SWP_NOMOVE,
             SWP_NOSIZE,
             SWP_NOZORDER,
+            HWND_NOTOPMOST,
             WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST,
         },
     },
 };
@@ -146,16 +148,6 @@ impl PhysicalRect {
         self.right - self.left
     }
 
-    pub const fn intersects(
-    self,
-    other: PhysicalRect,
-    ) -> bool {
-        self.left < other.right
-            && self.right > other.left
-            && self.top < other.bottom
-            && self.bottom > other.top
-    }
-
     pub const fn height(self) -> i32 {
         self.bottom - self.top
     }
@@ -198,15 +190,6 @@ pub struct MonitorInfo {
 
 #[derive(Clone, Debug)]
 pub struct DesktopWindow {
-    pub handle: NativeWindowHandle,
-    pub rect: PhysicalRect,
-    pub title: String,
-    pub class_name: String,
-}
-
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ZOrderWindow {
     pub handle: NativeWindowHandle,
     pub rect: PhysicalRect,
 }
@@ -259,6 +242,29 @@ pub fn global_cursor_position() -> Option<PhysicalPoint> {
 // -----------------------------------------------------------------------------
 
 pub fn window_rect(handle: NativeWindowHandle) -> Option<PhysicalRect> {
+    // Prefer what the user actually sees. GetWindowRect can include invisible
+    // resize borders on modern Windows, which makes a desktop pet appear to
+    // hover a few pixels above the title bar when snapping to `rect.top`.
+    let mut visible_rect = RECT::default();
+
+    let visible_result = unsafe {
+        DwmGetWindowAttribute(
+            handle.hwnd(),
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&mut visible_rect as *mut RECT).cast(),
+            size_of::<RECT>() as u32,
+        )
+    };
+
+    if visible_result.is_ok()
+        && visible_rect.right > visible_rect.left
+        && visible_rect.bottom > visible_rect.top
+    {
+        return Some(visible_rect.into());
+    }
+
+    // DWM attributes are not guaranteed for every HWND. Fall back to the
+    // classic API rather than making window discovery/tracking fail.
     let mut rect = RECT::default();
 
     unsafe {
@@ -282,25 +288,6 @@ fn native_handle_from_hwnd(hwnd: HWND) -> NativeWindowHandle {
     NativeWindowHandle::from_raw(hwnd.0 as isize)
 }
 
-fn window_title(hwnd: HWND) -> String {
-    let mut buffer = [0u16; 512];
-
-    let length = unsafe {
-        GetWindowTextW(
-            hwnd,
-            &mut buffer,
-        )
-    };
-
-    if length <= 0 {
-        return String::new();
-    }
-
-    String::from_utf16_lossy(
-        &buffer[..length as usize],
-    )
-}
-
 fn window_class_name(hwnd: HWND) -> String {
     let mut buffer = [0u16; 256];
 
@@ -320,7 +307,7 @@ fn window_class_name(hwnd: HWND) -> String {
     )
 }
 
-fn is_window_cloaked(hwnd: HWND) -> bool {
+fn is_hwnd_cloaked(hwnd: HWND) -> bool {
     let mut cloaked: u32 = 0;
 
     let result = unsafe {
@@ -333,6 +320,12 @@ fn is_window_cloaked(hwnd: HWND) -> bool {
     };
 
     result.is_ok() && cloaked != 0
+}
+
+/// True when DWM currently hides this window while keeping the HWND alive.
+/// This commonly happens when the window belongs to another virtual desktop.
+pub fn is_window_cloaked(handle: NativeWindowHandle) -> bool {
+    is_hwnd_cloaked(handle.hwnd())
 }
 
 fn is_system_window_class(class_name: &str) -> bool {
@@ -394,7 +387,7 @@ fn is_window_candidate(
     }
 
     // Skip UWP/internal windows yang sedang cloaked.
-    if is_window_cloaked(hwnd) {
+    if is_hwnd_cloaked(hwnd) {
         return false;
     }
 
@@ -457,8 +450,6 @@ fn desktop_window_from_hwnd(
     Some(DesktopWindow {
         handle,
         rect,
-        title: window_title(hwnd),
-        class_name: window_class_name(hwnd),
     })
 }
 
@@ -571,130 +562,6 @@ pub fn window_at_point(
 }
 
 
-// -----------------------------------------------------------------------------
-// Z-Order
-// -----------------------------------------------------------------------------
-
-const MAX_Z_ORDER_SCAN: usize = 256;
-
-fn z_order_window_from_hwnd(
-    hwnd: HWND,
-    nera_hwnd: NativeWindowHandle,
-) -> Option<ZOrderWindow> {
-    if hwnd.0.is_null() {
-        return None;
-    }
-
-    if hwnd == nera_hwnd.hwnd() {
-        return None;
-    }
-
-    if !is_window_candidate(
-        hwnd,
-        nera_hwnd,
-    ) {
-        return None;
-    }
-
-    let handle =
-        native_handle_from_hwnd(hwnd);
-
-    // Minimized window tidak mungkin secara visual
-    // menutupi target.
-    if is_window_minimized(handle) {
-        return None;
-    }
-
-    let rect =
-        window_rect(handle)?;
-
-    Some(ZOrderWindow {
-        handle,
-        rect,
-    })
-}
-
-
-pub fn windows_above_target(
-    target: NativeWindowHandle,
-    nera_hwnd: NativeWindowHandle,
-) -> Vec<ZOrderWindow> {
-    let mut result = Vec::new();
-
-    let mut current =
-        target.hwnd();
-
-    for _ in 0..MAX_Z_ORDER_SCAN {
-        let Ok(next) = (unsafe {
-            GetWindow(
-                current,
-                GW_HWNDPREV,
-            )
-        }) else {
-            break;
-        };
-
-        if next.0.is_null()
-            || next == current
-        {
-            break;
-        }
-
-        current = next;
-
-        if let Some(window) =
-            z_order_window_from_hwnd(
-                next,
-                nera_hwnd,
-            )
-        {
-            result.push(window);
-        }
-    }
-
-    result
-}
-
-pub fn window_below_target(
-    target: NativeWindowHandle,
-    nera_hwnd: NativeWindowHandle,
-) -> Option<ZOrderWindow> {
-    let mut current =
-        target.hwnd();
-
-    for _ in 0..MAX_Z_ORDER_SCAN {
-        let Ok(next) = (unsafe {
-            GetWindow(
-                current,
-                GW_HWNDNEXT,
-            )
-        }) else {
-            break;
-        };
-
-        if next.0.is_null()
-            || next == current
-        {
-            break;
-        }
-
-        current = next;
-
-        if let Some(window) =
-            z_order_window_from_hwnd(
-                next,
-                nera_hwnd,
-            )
-        {
-            return Some(window);
-        }
-    }
-
-    None
-}
-
-
-
 /// Pindahkan window tanpa:
 ///
 /// - resize
@@ -715,6 +582,62 @@ pub fn move_window(
             0,
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+}
+
+
+/// Keep Nera immediately above a normal target window without making Nera
+/// globally topmost. Windows that are already above the target remain above
+/// Nera, which gives Phase 4 natural desktop occlusion.
+pub fn place_window_directly_above(
+    nera: NativeWindowHandle,
+    target: NativeWindowHandle,
+) -> windows::core::Result<()> {
+    if nera == target {
+        return Ok(());
+    }
+
+    let nera_hwnd = nera.hwnd();
+    let target_hwnd = target.hwnd();
+
+    // WindowLevel::Normal is the Bevy-side source of truth, but the native
+    // style can lag by a frame after toggling Always On Top. Explicitly cross
+    // the topmost/non-topmost boundary before doing target-relative ordering.
+    let ex_style = unsafe { GetWindowLongPtrW(nera_hwnd, GWL_EXSTYLE) } as u32;
+
+    if (ex_style & WS_EX_TOPMOST.0) != 0 {
+        unsafe {
+            SetWindowPos(
+                nera_hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )?;
+        }
+    }
+
+    let above = unsafe { GetWindow(target_hwnd, GW_HWNDPREV) }
+        .ok()
+        .filter(|hwnd| !hwnd.0.is_null());
+
+    // If Nera is already the immediate predecessor, the relation is correct.
+    if above == Some(nera_hwnd) {
+        return Ok(());
+    }
+
+    unsafe {
+        SetWindowPos(
+            nera_hwnd,
+            above,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
     }
 }
@@ -760,14 +683,6 @@ pub fn dpi_for_window(handle: NativeWindowHandle) -> u32 {
 
 pub fn dpi_scale_factor(dpi: u32) -> f64 {
     dpi as f64 / BASE_DPI as f64
-}
-
-pub fn physical_to_logical(value: f64, dpi: u32) -> f64 {
-    value / dpi_scale_factor(dpi)
-}
-
-pub fn logical_to_physical(value: f64, dpi: u32) -> f64 {
-    value * dpi_scale_factor(dpi)
 }
 
 // -----------------------------------------------------------------------------

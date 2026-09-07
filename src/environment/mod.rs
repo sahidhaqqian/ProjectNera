@@ -1,17 +1,17 @@
 mod window_discovery;
 mod window_tracking;
-mod z_order;
 mod taskbar;
+mod sitting;
 
 pub use window_tracking::TrackedWindow;
-
-pub use z_order::ZOrderState;
 
 pub use taskbar::{
     TaskbarEdge,
     TaskbarInfo,
     TaskbarState,
 };
+
+pub use sitting::PlacementState;
 
 use bevy::{
     prelude::*,
@@ -41,6 +41,10 @@ pub struct DesktopEnvironment {
     pub nera_dpi: u32,
     pub nera_scale_factor: f64,
 
+    /// Local logical-pixel support point projected from Nera's feet.
+    /// Converted to physical pixels using the current monitor DPI on demand.
+    pub support_anchor_logical: Option<Vec2>,
+
     // -------------------------------------------------------------------------
     // Monitor
     // -------------------------------------------------------------------------
@@ -52,7 +56,6 @@ pub struct DesktopEnvironment {
     // -------------------------------------------------------------------------
 
     pub discovered_windows: Vec<DesktopWindow>,
-    pub window_under_cursor: Option<NativeWindowHandle>,
 
     // -------------------------------------------------------------------------
     // Window Tracking
@@ -60,10 +63,21 @@ pub struct DesktopEnvironment {
 
     pub target_window: Option<TrackedWindow>,
 
-    // Z order
-    pub z_order: ZOrderState,
-    // taskbar
+    // -------------------------------------------------------------------------
+    // Taskbar
+    // -------------------------------------------------------------------------
+
     pub taskbar: TaskbarState,
+
+    // -------------------------------------------------------------------------
+    // Phase 4 - Sitting / attachment
+    // -------------------------------------------------------------------------
+
+    pub placement: PlacementState,
+
+    /// True while Phase 4 hides Nera because the attached target is temporarily
+    /// unavailable (minimized or DWM-cloaked on another virtual desktop).
+    pub hidden_for_target_suspend: bool,
 }
 
 impl Default for DesktopEnvironment {
@@ -73,13 +87,14 @@ impl Default for DesktopEnvironment {
             nera_rect: None,
             nera_dpi: platform::BASE_DPI,
             nera_scale_factor: 1.0,
+            support_anchor_logical: None,
             monitor: None,
 
             discovered_windows: Vec::new(),
-            window_under_cursor: None,
             target_window: None,
-            z_order: ZOrderState::default(),
             taskbar: TaskbarState::default(),
+            placement: PlacementState::default(),
+            hidden_for_target_suspend: false,
         }
     }
 }
@@ -95,20 +110,16 @@ impl Plugin for DesktopEnvironmentPlugin {
         app
             .init_resource::<DesktopEnvironment>()
             .init_resource::<window_discovery::WindowDiscoveryTimer>()
-            .init_resource::<z_order::ZOrderTimer>()
-            .add_systems(First,sync_desktop_environment,)
+            .init_resource::<sitting::SittingTimer>()
+            .add_systems(First, sync_desktop_environment)
             .init_resource::<taskbar::TaskbarTimer>()
             .add_systems(
                 PreUpdate,
                 (
                     window_discovery::refresh_window_snapshot,
-                    window_discovery::update_window_under_cursor,
-
-                    window_tracking::acquire_target_from_cursor,
                     window_tracking::track_target_window,
-                    z_order::update_z_order,
                     taskbar::refresh_taskbars,
-
+                    sitting::follow_sitting_attachment,
                 )
                     .chain(),
             );
