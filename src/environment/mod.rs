@@ -11,7 +11,7 @@ pub use taskbar::{
     TaskbarState,
 };
 
-pub use sitting::PlacementState;
+pub use sitting::{AvatarAnchor, PlacementState};
 
 use bevy::{
     prelude::*,
@@ -41,9 +41,16 @@ pub struct DesktopEnvironment {
     pub nera_dpi: u32,
     pub nera_scale_factor: f64,
 
-    /// Local logical-pixel support point projected from Nera's feet.
-    /// Converted to physical pixels using the current monitor DPI on demand.
-    pub support_anchor_logical: Option<Vec2>,
+    /// Standing support point projected from leftFoot/rightFoot.
+    pub feet_anchor_logical: Option<Vec2>,
+
+    /// Sitting support point projected from the hips + tuned seat offset.
+    pub seat_anchor_logical: Option<Vec2>,
+
+    /// Which anchor an active attachment should use.
+    /// Keep `Feet` until the sitting animation is wired; the animation state
+    /// can switch this to `Seat` without changing snap/follow math.
+    pub attached_anchor: AvatarAnchor,
 
     // -------------------------------------------------------------------------
     // Monitor
@@ -87,7 +94,9 @@ impl Default for DesktopEnvironment {
             nera_rect: None,
             nera_dpi: platform::BASE_DPI,
             nera_scale_factor: 1.0,
-            support_anchor_logical: None,
+            feet_anchor_logical: None,
+            seat_anchor_logical: None,
+            attached_anchor: AvatarAnchor::Feet,
             monitor: None,
 
             discovered_windows: Vec::new(),
