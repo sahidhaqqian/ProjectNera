@@ -1,6 +1,9 @@
 mod environment;
 mod platform;
 
+#[cfg(target_os = "windows")]
+mod tray;
+
 use environment::{
     DesktopEnvironment,
     DesktopEnvironmentPlugin,
@@ -31,6 +34,8 @@ use bevy::{
 
 use bevy_vrm1::prelude::*;
 
+#[cfg(target_os = "windows")]
+use tray::TrayPlugin;
 
 // -----------------------------------------------------------------------------
 // Nera - Phase 2 (Final: Manual Drag + LookAt + Analytic Bone Colliders)
@@ -91,41 +96,47 @@ enum NeraCollider {
 // -----------------------------------------------------------------------------
 
 fn main() {
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "Nera".into(),
-                        transparent: true,
-                        decorations: false,
-                        window_level: WindowLevel::AlwaysOnTop,
-                        resolution: (600, 800).into(),
-                        resizable: false,
-                        position: WindowPosition::At(IVec2::new(200, 200)),
-                        present_mode: PresentMode::AutoVsync,
-                        desired_maximum_frame_latency: NonZeroU32::new(1),
-                        has_shadow: false,
-                        skip_taskbar: true,
-                        ..default()
-                    }),
-                    primary_cursor_options: Some(CursorOptions {
-                        hit_test: false,
-                        ..default()
-                    }),
-                    ..default()
-                })
-                .set(RenderPlugin {
-                    render_creation: WgpuSettings {
-                        memory_hints: MemoryHints::MemoryUsage,
-                        ..default()
-                    }
-                    .into(),
+    let mut app = App::new();
+
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Nera".into(),
+                    transparent: true,
+                    decorations: false,
+                    window_level: WindowLevel::AlwaysOnTop,
+                    resolution: (600, 800).into(),
+                    resizable: false,
+                    position: WindowPosition::At(IVec2::new(200, 200)),
+                    present_mode: PresentMode::AutoVsync,
+                    desired_maximum_frame_latency: NonZeroU32::new(1),
+                    has_shadow: false,
+                    skip_taskbar: true,
                     ..default()
                 }),
-        )
-        .add_plugins((VrmPlugin, VrmaPlugin,DesktopEnvironmentPlugin,))
-        .insert_resource(ClearColor(Color::NONE))
+                primary_cursor_options: Some(CursorOptions {
+                    hit_test: false,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(RenderPlugin {
+                render_creation: WgpuSettings {
+                    memory_hints: MemoryHints::MemoryUsage,
+                    ..default()
+                }
+                .into(),
+                ..default()
+            }),
+    );
+
+    app.add_plugins((VrmPlugin, VrmaPlugin, DesktopEnvironmentPlugin,));
+
+    #[cfg(target_os = "windows")]
+    app.add_plugins(TrayPlugin);
+
+    app.insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
         .add_systems(
             Startup,
