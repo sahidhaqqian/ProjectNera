@@ -6,9 +6,18 @@ mod platform;
 #[cfg(target_os = "windows")]
 mod tray;
 
-use animation::AnimationPlugin;
+use animation::{
+    NeraAnimationPlugin,
+    apply_animation_state,
+    register_idle_animation,
+    register_sitting_animation,
+    sync_animation_base_pose,
+    sync_interaction_animation_actions,
+    tick_animation_actions,
+};
 
 use environment::{
+    AvatarAnchor,
     DesktopEnvironment,
     DesktopEnvironmentPlugin,
     PlacementState,
@@ -33,6 +42,7 @@ use std::{
 };
 
 use bevy::{
+    animation::RepeatAnimation,
     prelude::*,
     render::{
         RenderPlugin,
@@ -165,6 +175,7 @@ struct DesktopPetInteraction {
     recent_unsnap_surface_y: Option<i32>,
 }
 
+
 #[derive(Component)]
 struct LookAtTarget;
 
@@ -225,7 +236,13 @@ fn main() {
             }),
     );
 
-    app.add_plugins((VrmPlugin, VrmaPlugin, DesktopEnvironmentPlugin, InteractionPlugin, AnimationPlugin));
+    app.add_plugins((
+        VrmPlugin,
+        VrmaPlugin,
+        DesktopEnvironmentPlugin,
+        InteractionPlugin,
+        NeraAnimationPlugin,
+    ));
 
     #[cfg(target_os = "windows")]
     app.add_plugins(TrayPlugin);
@@ -242,17 +259,14 @@ fn main() {
             (
                 attach_bone_colliders,
                 update_look_at_target,
-                // Placement must change before animation state is selected.
-                // This lets one click immediately perform Sitting -> Idle and
-                // one release immediately perform Idle -> Sitting.
+                // Native placement changes first, then Phase 5.3 derives the
+                // base pose, consumes temporary interaction actions, resolves
+                // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window,
-                // Phase 5.3: three animation systems replace sync_nera_pose.
-                // update_base_pose reads PlacementState.
-                // tick_active_action counts down temporary actions.
-                // sync_animation emits PlayVrma when needed.
-                animation::update_base_pose,
-                animation::tick_active_action,
-                animation::sync_animation,
+                sync_animation_base_pose,
+                sync_interaction_animation_actions,
+                tick_animation_actions,
+                apply_animation_state,
             )
                 .chain(),
         )
@@ -331,14 +345,14 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
                     Name::new("Nera Idle Animation"),
                     VrmaHandle(asset_server.load(IDLE_VRMA_PATH)),
                 ))
-                .observe(animation::register_idle_animation);
+                .observe(register_idle_animation);
 
             parent
                 .spawn((
                     Name::new("Nera Sitting Animation"),
                     VrmaHandle(asset_server.load(SITTING_VRMA_PATH)),
                 ))
-                .observe(animation::register_sitting_animation);
+                .observe(register_sitting_animation);
         });
 }
 
@@ -1061,7 +1075,7 @@ fn drag_nera_window(
                 && !vertical_blocked
             {
                 // IMPORTANT: this does NOT move the HWND. It only creates a
-                // Pending* placement. sync_nera_pose switches to sitting first;
+                // Pending* placement. sync_animation_base_pose switches to sitting first;
                 // Last then samples Seat and commits the attachment later.
                 environment.try_begin_sit_from_probe();
             }

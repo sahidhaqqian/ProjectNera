@@ -1,253 +1,305 @@
 //! Phase 5.3 — Animation State Machine.
 //!
-//! Two-layer controller that cleanly separates **base poses** (driven by
-//! `PlacementState`) from **temporary actions** (driven by interactions,
-//! alarms, etc.).
-//!
-//! ```text
-//! PlacementState ──► BasePose   (loops forever)
-//!                        +
-//! Interaction    ──► ActionAnimation (plays once, returns to base)
-//! ```
-//!
-//! Future phases simply call `AnimationController::request_action()` without
-//! touching the VRMA playback internals.
+//! Logical animation state is intentionally separate from VRMA playback.
+//! `BasePose` describes where Nera belongs in the world, while temporary
+//! actions describe what she is doing right now. Higher-priority actions can
+//! temporarily win without destroying the base pose, so ending the action
+//! naturally returns Nera to the correct Idle/Sitting state.
 
 use std::time::Duration;
 
-use bevy::{animation::RepeatAnimation, prelude::*};
+use bevy::{
+    animation::RepeatAnimation,
+    prelude::*,
+};
 use bevy_vrm1::prelude::*;
 
-use crate::environment::{AvatarAnchor, DesktopEnvironment, PlacementState};
+use crate::{
+    environment::{
+        AvatarAnchor,
+        DesktopEnvironment,
+        PlacementState,
+    },
+    interaction::{
+        NeraDragStarted,
+        NeraReleased,
+    },
+};
 
 // -----------------------------------------------------------------------------
-// Enums
+// Logical state
 // -----------------------------------------------------------------------------
 
-/// Base-layer pose, mapped deterministically from `PlacementState`.
-/// Loops forever. Only one base pose is active at a time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum BasePose {
     #[default]
     Idle,
     Sitting,
-    // Future: Falling
+    /// Reserved for Phase 5.6. It already participates in priority resolution
+    /// so gravity can plug in without redesigning the animation state model.
+    #[allow(dead_code)]
+    Falling,
 }
 
-/// Temporary action that plays **once** over the current base pose,
-/// then auto-returns to the base animation.
-///
-/// The enum is intentionally empty for Phase 5.3. Phase 5.4 will add
-/// HeadPat, Wave, etc. The full engine is built and ready.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ActionAnimation {
-    // Phase 5.4: HeadPat, Wave, Surprised
-    // Phase 5.5: Alarm
-    // Phase 5.6: Landing
-    _Placeholder, // removed once real variants arrive
-}
-
-/// Determines which animation wins when multiple compete.
-///
-/// A higher-priority action cancels a lower one.
-/// Same-or-lower priority is rejected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum AnimationPriority {
-    /// Idle, Sitting — the fallback.
-    Base,
-    /// HeadPat, Wave — nice but interruptible.
+pub(crate) enum TemporaryAction {
+    /// Real Phase 5.3 action driven by the existing interaction pipeline.
+    Dragging,
+    /// Reserved for Phase 5.4 expressions/reactions.
+    #[allow(dead_code)]
     Reaction,
-    /// Alarm — important, overrides reactions.
-    Important,
-    /// Dragging, Falling — physics-driven, cannot be interrupted.
-    Forced,
+    /// Reserved for Phase 5.5 alarm behavior.
+    #[allow(dead_code)]
+    Alarm,
 }
 
-// -----------------------------------------------------------------------------
-// Controller
-// -----------------------------------------------------------------------------
-
-/// What is actually playing on the VRMA layer right now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PlayingState {
-    Base(BasePose),
-    Action(ActionAnimation),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub(crate) enum AnimationPriority {
+    Idle = 10,
+    Sitting = 20,
+    Reaction = 60,
+    Alarm = 70,
+    Dragging = 80,
+    Falling = 90,
 }
 
-/// A temporary action currently in progress.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ActiveAction {
-    pub(crate) action: ActionAnimation,
-    pub(crate) priority: AnimationPriority,
-    pub(crate) remaining: Duration,
-}
-
-/// Central animation resource. Owned by the `AnimationPlugin`.
-///
-/// Other systems read `base_pose()` and `is_action_active()`.
-/// Future phases call `request_action()` to trigger temporary animations.
-#[derive(Resource)]
-pub(crate) struct AnimationController {
-    // -- base layer -----------------------------------------------------------
-    base_pose: BasePose,
-
-    // -- action layer ---------------------------------------------------------
-    active_action: Option<ActiveAction>,
-
-    // -- VRMA handles (filled by LoadedVrma observers) ------------------------
-    idle_vrma: Option<Entity>,
-    sitting_vrma: Option<Entity>,
-    // Future: action VRMAs registered here
-
-    // -- playback tracking (avoid redundant PlayVrma triggers) ----------------
-    playing: Option<PlayingState>,
-    startup_done: bool,
-}
-
-impl Default for AnimationController {
-    fn default() -> Self {
-        Self {
-            base_pose: BasePose::Idle,
-            active_action: None,
-            idle_vrma: None,
-            sitting_vrma: None,
-            playing: None,
-            startup_done: false,
+impl BasePose {
+    fn priority(self) -> AnimationPriority {
+        match self {
+            BasePose::Idle => AnimationPriority::Idle,
+            BasePose::Sitting => AnimationPriority::Sitting,
+            BasePose::Falling => AnimationPriority::Falling,
         }
     }
 }
 
-impl AnimationController {
-    // -- public read API ------------------------------------------------------
+impl TemporaryAction {
+    fn priority(self) -> AnimationPriority {
+        match self {
+            TemporaryAction::Reaction => AnimationPriority::Reaction,
+            TemporaryAction::Alarm => AnimationPriority::Alarm,
+            TemporaryAction::Dragging => AnimationPriority::Dragging,
+        }
+    }
+}
 
-    /// Current base pose (read-only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedAnimationState {
+    Base(BasePose),
+    Action(TemporaryAction),
+}
+
+/// Single logical source of truth for Nera's animation behavior.
+///
+/// Multiple temporary actions may remain active at once. The highest priority
+/// one wins visually/logically, but lower-priority actions are not destroyed.
+/// Example: Alarm + Dragging resolves to Dragging; when Dragging ends, Alarm
+/// becomes effective again instead of being lost.
+#[derive(Clone, Copy, Debug)]
+struct ActiveAction {
+    action: TemporaryAction,
+    /// `None` means event-driven/persistent (Dragging). Timed reactions and
+    /// alarms use `Some(remaining)` and expire automatically.
+    remaining: Option<Duration>,
+}
+
+#[derive(Resource, Debug)]
+pub(crate) struct NeraAnimationState {
+    base_pose: BasePose,
+    active_actions: Vec<ActiveAction>,
+}
+
+impl Default for NeraAnimationState {
+    fn default() -> Self {
+        Self {
+            base_pose: BasePose::Idle,
+            active_actions: Vec::with_capacity(3),
+        }
+    }
+}
+
+impl NeraAnimationState {
     pub(crate) fn base_pose(&self) -> BasePose {
         self.base_pose
     }
 
-    /// Whether a temporary action is currently playing.
-    #[allow(dead_code)]
-    pub(crate) fn is_action_active(&self) -> bool {
-        self.active_action.is_some()
-    }
-
-    // -- public write API -----------------------------------------------------
-
-    /// Try to play a temporary action animation.
-    ///
-    /// Returns `true` if the action was accepted. Returns `false` if a
-    /// higher-or-equal priority action is already in progress.
-    #[allow(dead_code)]
-    pub(crate) fn request_action(
-        &mut self,
-        action: ActionAnimation,
-        priority: AnimationPriority,
-        duration: Duration,
-    ) -> bool {
-        // A higher-priority action is already running — reject.
-        if let Some(ref current) = self.active_action {
-            if current.priority >= priority {
-                return false;
-            }
+    pub(crate) fn set_base_pose(&mut self, pose: BasePose) -> bool {
+        if self.base_pose == pose {
+            return false;
         }
 
-        self.active_action = Some(ActiveAction {
-            action,
-            priority,
-            remaining: duration,
-        });
-
-        info!(
-            "Animation action started: {:?} priority={:?} duration={:?}",
-            action, priority, duration
-        );
-
+        let previous = self.base_pose;
+        self.base_pose = pose;
+        info!("Nera base pose: {:?} -> {:?}", previous, pose);
         true
     }
 
-    /// Force-cancel the current action and return to the base pose.
+    /// Starts an event-driven action that remains active until explicitly
+    /// finished. Dragging uses this lifecycle.
+    pub(crate) fn start_action(&mut self, action: TemporaryAction) -> bool {
+        if self.active_actions.iter().any(|active| active.action == action) {
+            return false;
+        }
+
+        self.active_actions.push(ActiveAction {
+            action,
+            remaining: None,
+        });
+        info!(
+            "Nera temporary action +{:?} priority={:?}",
+            action,
+            action.priority()
+        );
+        true
+    }
+
+    /// Starts or refreshes a timed action. This is the Phase 5.4/5.5 entry
+    /// point for reactions and alarms that should return automatically.
     #[allow(dead_code)]
-    pub(crate) fn cancel_action(&mut self) {
-        if let Some(action) = self.active_action.take() {
-            info!("Animation action cancelled: {:?}", action.action);
+    pub(crate) fn request_timed_action(
+        &mut self,
+        action: TemporaryAction,
+        duration: Duration,
+    ) -> bool {
+        if let Some(active) = self
+            .active_actions
+            .iter_mut()
+            .find(|active| active.action == action)
+        {
+            active.remaining = Some(duration);
+            info!(
+                "Nera temporary action refreshed {:?} duration={:?}",
+                action, duration
+            );
+            return false;
+        }
+
+        self.active_actions.push(ActiveAction {
+            action,
+            remaining: Some(duration),
+        });
+        info!(
+            "Nera temporary action +{:?} priority={:?} duration={:?}",
+            action,
+            action.priority(),
+            duration
+        );
+        true
+    }
+
+    pub(crate) fn finish_action(&mut self, action: TemporaryAction) -> bool {
+        let old_len = self.active_actions.len();
+        self.active_actions.retain(|active| active.action != action);
+
+        if self.active_actions.len() == old_len {
+            return false;
+        }
+
+        info!("Nera temporary action -{:?}", action);
+        true
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_action(&mut self, action: TemporaryAction) -> bool {
+        self.finish_action(action)
+    }
+
+    fn advance_actions(&mut self, delta: Duration) {
+        let mut expired = Vec::new();
+
+        for active in &mut self.active_actions {
+            let Some(remaining) = active.remaining.as_mut() else {
+                continue;
+            };
+
+            if *remaining <= delta {
+                expired.push(active.action);
+            } else {
+                *remaining -= delta;
+            }
+        }
+
+        if expired.is_empty() {
+            return;
+        }
+
+        self.active_actions
+            .retain(|active| !expired.contains(&active.action));
+
+        for action in expired {
+            info!(
+                "Nera temporary action expired {:?}; resolving back to next priority/base",
+                action
+            );
         }
     }
 
-    // -- internal helpers -----------------------------------------------------
+    fn resolved(&self) -> ResolvedAnimationState {
+        let mut resolved = ResolvedAnimationState::Base(self.base_pose);
+        let mut priority = self.base_pose.priority();
 
-    /// VRMA entity for the given base pose, if loaded.
-    fn vrma_for_base(&self, pose: BasePose) -> Option<Entity> {
-        match pose {
-            BasePose::Idle => self.idle_vrma,
-            BasePose::Sitting => self.sitting_vrma,
+        for active in &self.active_actions {
+            let action_priority = active.action.priority();
+            if action_priority > priority {
+                resolved = ResolvedAnimationState::Action(active.action);
+                priority = action_priority;
+            }
         }
-    }
 
-    /// Avatar anchor appropriate for the given base pose.
-    fn anchor_for_base(pose: BasePose) -> AvatarAnchor {
-        match pose {
-            BasePose::Idle => AvatarAnchor::Feet,
-            BasePose::Sitting => AvatarAnchor::Seat,
-        }
+        resolved
     }
 }
 
 // -----------------------------------------------------------------------------
-// Plugin
+// VRMA playback
 // -----------------------------------------------------------------------------
 
-pub(crate) struct AnimationPlugin;
+#[derive(Resource, Default)]
+pub(crate) struct NeraAnimationClips {
+    idle: Option<Entity>,
+    sitting: Option<Entity>,
+}
 
-impl Plugin for AnimationPlugin {
+#[derive(Resource, Default)]
+pub(crate) struct NeraAnimationPlayback {
+    current_clip: Option<Entity>,
+    resolved: Option<ResolvedAnimationState>,
+}
+
+pub(crate) struct NeraAnimationPlugin;
+
+impl Plugin for NeraAnimationPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AnimationController>();
+        app.init_resource::<NeraAnimationState>()
+            .init_resource::<NeraAnimationClips>()
+            .init_resource::<NeraAnimationPlayback>();
     }
 }
 
-// -----------------------------------------------------------------------------
-// VRMA registration observers (called from spawn_nera)
-// -----------------------------------------------------------------------------
-
-/// Observer for the idle VRMA. Stores the handle and kicks the first animation.
 pub(crate) fn register_idle_animation(
     trigger: On<LoadedVrma>,
-    mut commands: Commands,
-    mut controller: ResMut<AnimationController>,
+    mut clips: ResMut<NeraAnimationClips>,
 ) {
-    controller.idle_vrma = Some(trigger.vrma);
-
-    // Idle is the startup pose. Kick it immediately.
-    if !controller.startup_done {
-        commands.trigger(PlayVrma {
-            repeat: RepeatAnimation::Forever,
-            transition_duration: Duration::ZERO,
-            vrma: trigger.vrma,
-            reset_spring_bones: false,
-        });
-
-        controller.playing = Some(PlayingState::Base(BasePose::Idle));
-        controller.startup_done = true;
-        info!("Idle VRMA loaded. Starting animation.");
-    }
+    clips.idle = Some(trigger.vrma);
+    info!("Idle VRMA loaded.");
 }
 
-/// Observer for the sitting VRMA.
 pub(crate) fn register_sitting_animation(
     trigger: On<LoadedVrma>,
-    mut controller: ResMut<AnimationController>,
+    mut clips: ResMut<NeraAnimationClips>,
 ) {
-    controller.sitting_vrma = Some(trigger.vrma);
+    clips.sitting = Some(trigger.vrma);
     info!("Sitting VRMA loaded.");
 }
 
-// -----------------------------------------------------------------------------
-// Systems
-// -----------------------------------------------------------------------------
-
-/// Maps `PlacementState` to `BasePose`. Pure data — no PlayVrma here.
-pub(crate) fn update_base_pose(
+/// Environment placement is the source of truth for the current base pose.
+///
+/// Falling is reserved for Phase 5.6; until gravity exists, Free means Idle
+/// and every pending/committed support attachment means Sitting.
+pub(crate) fn sync_animation_base_pose(
     environment: Res<DesktopEnvironment>,
-    mut controller: ResMut<AnimationController>,
+    mut state: ResMut<NeraAnimationState>,
 ) {
     let desired = match environment.placement {
         PlacementState::Free => BasePose::Idle,
@@ -257,104 +309,180 @@ pub(crate) fn update_base_pose(
         | PlacementState::Taskbar(_) => BasePose::Sitting,
     };
 
-    if controller.base_pose != desired {
-        info!("base_pose -> {:?}", desired);
-        controller.base_pose = desired;
-    }
+    state.set_base_pose(desired);
 }
 
-/// Counts down `ActiveAction::remaining`. Clears expired actions.
-pub(crate) fn tick_active_action(
-    time: Res<Time>,
-    mut controller: ResMut<AnimationController>,
-) {
-    let mut finished = false;
-    let mut action_name = None;
-
-    if let Some(ref mut action) = controller.active_action {
-        let dt = time.delta();
-        if action.remaining <= dt {
-            finished = true;
-            action_name = Some(action.action);
-        } else {
-            action.remaining -= dt;
-        }
-    }
-
-    if finished {
-        if let Some(name) = action_name {
-            info!(
-                "Animation action finished: {:?}, returning to base {:?}",
-                name, controller.base_pose
-            );
-        }
-        controller.active_action = None;
-    }
-}
-
-/// Decides what should actually play on the VRMA layer.
+/// Phase 5.3's first real temporary action is Dragging.
 ///
-/// Compares `playing` vs the desired state (action if active, else base pose).
-/// Emits `PlayVrma` only when a change is needed. Also sets `AvatarAnchor`.
-pub(crate) fn sync_animation(
+/// This is deliberately driven by semantic interaction messages rather than
+/// mouse state, keeping animation behavior decoupled from Win32 drag details.
+pub(crate) fn sync_interaction_animation_actions(
+    mut drag_started: MessageReader<NeraDragStarted>,
+    mut released: MessageReader<NeraReleased>,
+    mut state: ResMut<NeraAnimationState>,
+) {
+    if drag_started.read().next().is_some() {
+        state.start_action(TemporaryAction::Dragging);
+    }
+
+    if released.read().any(|event| event.was_dragging) {
+        state.finish_action(TemporaryAction::Dragging);
+    }
+}
+
+/// Advances timed temporary actions. Persistent actions such as Dragging are
+/// unaffected and remain active until their semantic end event arrives.
+pub(crate) fn tick_animation_actions(
+    time: Res<Time>,
+    mut state: ResMut<NeraAnimationState>,
+) {
+    state.advance_actions(time.delta());
+}
+
+/// Applies the resolved logical state to the avatar.
+///
+/// Phase 5.3 has only Idle/Sitting VRMA assets. Temporary actions already
+/// participate in priority resolution, but until their own clips arrive in
+/// 5.4/5.5 they intentionally fall back to the current base-pose clip.
+/// This proves the state machine without inventing placeholder animations.
+pub(crate) fn apply_animation_state(
     mut commands: Commands,
     mut environment: ResMut<DesktopEnvironment>,
-    mut controller: ResMut<AnimationController>,
+    state: Res<NeraAnimationState>,
+    clips: Res<NeraAnimationClips>,
+    mut playback: ResMut<NeraAnimationPlayback>,
 ) {
-    // -- determine desired state ----------------------------------------------
-    let desired_playing = if let Some(ref action) = controller.active_action {
-        PlayingState::Action(action.action)
-    } else {
-        PlayingState::Base(controller.base_pose)
+    let anchor = match state.base_pose() {
+        BasePose::Idle | BasePose::Falling => AvatarAnchor::Feet,
+        BasePose::Sitting => AvatarAnchor::Seat,
     };
-
-    // -- anchor always follows the base pose, even during actions -------------
-    let anchor = AnimationController::anchor_for_base(controller.base_pose);
     environment.set_attached_anchor(anchor);
 
-    // -- skip if already playing the right thing ------------------------------
-    if controller.playing == Some(desired_playing) {
+    let resolved = state.resolved();
+
+    if playback.resolved != Some(resolved) {
+        info!(
+            "Nera animation resolved -> {:?} | base={:?}",
+            resolved,
+            state.base_pose()
+        );
+        playback.resolved = Some(resolved);
+    }
+
+    // No dedicated action clips exist yet, so actions preserve the current
+    // base animation. Phase 5.4 can extend this match with reaction VRMAs
+    // without touching state/priority semantics.
+    let desired_clip = match state.base_pose() {
+        BasePose::Idle => clips.idle,
+        BasePose::Sitting => clips.sitting,
+        BasePose::Falling => clips.idle,
+    };
+
+    let Some(vrma) = desired_clip else {
+        return;
+    };
+
+    if playback.current_clip == Some(vrma) {
         return;
     }
 
-    // -- resolve VRMA entity --------------------------------------------------
-    let (vrma, repeat) = match desired_playing {
-        PlayingState::Base(pose) => {
-            let Some(vrma) = controller.vrma_for_base(pose) else {
-                // Asset not loaded yet. For Idle fallback, still set anchor.
-                if pose == BasePose::Idle {
-                    environment.set_attached_anchor(AvatarAnchor::Feet);
-                }
-                return;
-            };
-            (vrma, RepeatAnimation::Forever)
-        }
-        PlayingState::Action(_action) => {
-            // Future: look up action VRMA from a registry.
-            // For now no action VRMAs exist, so fall through to base.
-            let Some(vrma) = controller.vrma_for_base(controller.base_pose) else {
-                return;
-            };
-            (vrma, RepeatAnimation::Count(1))
-        }
-    };
-
-    // -- fire PlayVrma --------------------------------------------------------
     commands.trigger(PlayVrma {
-        repeat,
+        repeat: RepeatAnimation::Forever,
         transition_duration: Duration::ZERO,
         vrma,
         reset_spring_bones: false,
     });
 
-    match desired_playing {
-        PlayingState::Base(pose) => {
-            info!("Nera animation -> {:?} | anchor -> {:?}", pose, anchor);
+    match state.base_pose() {
+        BasePose::Idle => info!("Nera playback -> Idle | anchor -> Feet"),
+        BasePose::Sitting => {
+            info!("Nera playback -> Sitting | pose-first Seat calibration")
         }
-        PlayingState::Action(action) => {
-            info!("Nera animation -> action {:?} | anchor stays {:?}", action, anchor);
+        BasePose::Falling => {
+            info!("Nera playback -> Falling fallback | anchor -> Feet")
         }
     }
 
-    controller.playing = Some(desired_playing);
+    playback.current_clip = Some(vrma);
+}
+
+// -----------------------------------------------------------------------------
+// State-machine tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporary_action_returns_to_sitting_base() {
+        let mut state = NeraAnimationState::default();
+        state.set_base_pose(BasePose::Sitting);
+        state.start_action(TemporaryAction::Reaction);
+
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Action(TemporaryAction::Reaction)
+        );
+
+        state.finish_action(TemporaryAction::Reaction);
+
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Base(BasePose::Sitting)
+        );
+    }
+
+    #[test]
+    fn higher_priority_action_temporarily_overrides_lower_one() {
+        let mut state = NeraAnimationState::default();
+        state.start_action(TemporaryAction::Alarm);
+        state.start_action(TemporaryAction::Dragging);
+
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Action(TemporaryAction::Dragging)
+        );
+
+        state.finish_action(TemporaryAction::Dragging);
+
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Action(TemporaryAction::Alarm)
+        );
+    }
+
+    #[test]
+    fn timed_action_expires_and_returns_to_base() {
+        let mut state = NeraAnimationState::default();
+        state.set_base_pose(BasePose::Sitting);
+        state.request_timed_action(
+            TemporaryAction::Reaction,
+            Duration::from_millis(500),
+        );
+
+        state.advance_actions(Duration::from_millis(499));
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Action(TemporaryAction::Reaction)
+        );
+
+        state.advance_actions(Duration::from_millis(1));
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Base(BasePose::Sitting)
+        );
+    }
+
+    #[test]
+    fn falling_overrides_temporary_actions() {
+        let mut state = NeraAnimationState::default();
+        state.start_action(TemporaryAction::Dragging);
+        state.set_base_pose(BasePose::Falling);
+
+        assert_eq!(
+            state.resolved(),
+            ResolvedAnimationState::Base(BasePose::Falling)
+        );
+    }
 }
