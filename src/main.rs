@@ -17,7 +17,6 @@ use animation::{
 };
 
 use environment::{
-    AvatarAnchor,
     DesktopEnvironment,
     DesktopEnvironmentPlugin,
     PlacementState,
@@ -42,7 +41,6 @@ use std::{
 };
 
 use bevy::{
-    animation::RepeatAnimation,
     prelude::*,
     render::{
         RenderPlugin,
