@@ -1,4 +1,5 @@
 mod environment;
+mod interaction;
 mod platform;
 
 #[cfg(target_os = "windows")]
@@ -9,6 +10,17 @@ use environment::{
     DesktopEnvironment,
     DesktopEnvironmentPlugin,
     PlacementState,
+};
+
+use interaction::{
+    InteractionPlugin,
+    InteractionState,
+    NeraClicked,
+    NeraDragStarted,
+    NeraDragged,
+    NeraPointerPosition,
+    NeraReleased,
+    NeraRightClicked,
 };
 
 use std::{
@@ -87,8 +99,10 @@ const SEAT_OFFSET_WORLD: Vec3 = Vec3::new(0.0, -0.12, 0.08);
 /// quick desktop movement from accidentally turning into a sitting action.
 const MIN_DRAG_HOLD_TO_SIT: Duration = Duration::from_millis(550);
 
-/// Cursor must have actually moved before sitting can arm.
-const MIN_DRAG_PIXELS_TO_SIT_AT_96_DPI: f32 = 4.0;
+/// Left mouse press becomes a real drag only after the cursor moves this far.
+/// Keeping this DPI-aware also prevents tiny hand jitter from turning a click
+/// into a drag. Phase 4 sitting uses the same deliberate-drag threshold.
+const DRAG_START_DISTANCE_AT_96_DPI: f32 = 4.0;
 
 /// Once sitting has been committed, temporarily lock the attachment so the
 /// same mouse hold cannot immediately pull Nera off the surface again.
@@ -114,13 +128,19 @@ const UNSNAP_VERTICAL_BAND_AT_96_DPI: f32 = 24.0;
 
 #[derive(Resource, Default)]
 struct DesktopPetInteraction {
-    hovering_nera: bool,
+    state: InteractionState,
 
-    /// Grab point inside Nera's native window. Some means the mouse is holding
-    /// Nera, even while an attachment temporarily keeps the HWND pinned.
+    /// Grab point inside Nera's native window. Some means LMB currently owns
+    /// the interaction, even while an attachment temporarily keeps the HWND pinned.
     drag_offset: Option<IVec2>,
     drag_start_cursor: Option<IVec2>,
+    last_drag_cursor: Option<IVec2>,
     drag_started_at: Option<Instant>,
+
+    /// Capture RMB until release so click-through cannot hand the release to
+    /// the window underneath Nera. A small travel guard prevents right-drag
+    /// gestures from opening the future Phase 5.7 action menu.
+    right_press_origin: Option<IVec2>,
 
     /// Cursor position captured when a sitting attachment is established. A
     /// meaningful movement away from it unsnaps Nera without doing Seat->Feet
@@ -205,7 +225,7 @@ fn main() {
             }),
     );
 
-    app.add_plugins((VrmPlugin, VrmaPlugin, DesktopEnvironmentPlugin,));
+    app.add_plugins((VrmPlugin, VrmaPlugin, DesktopEnvironmentPlugin, InteractionPlugin));
 
     #[cfg(target_os = "windows")]
     app.add_plugins(TrayPlugin);
@@ -477,6 +497,17 @@ fn cursor_position_in_nera_window(
     ))
 }
 
+#[cfg(target_os = "windows")]
+fn nera_pointer_position(
+    screen: IVec2,
+    environment: &DesktopEnvironment,
+) -> NeraPointerPosition {
+    NeraPointerPosition {
+        screen,
+        local: cursor_position_in_nera_window(environment).unwrap_or_default(),
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Phase 4 avatar anchors
 // -----------------------------------------------------------------------------
@@ -532,6 +563,7 @@ fn update_avatar_anchors(
     // feet from sitting.vrma. That cached idle anchor is what allows a clean
     // Seat -> Feet handoff when Nera is unpinned.
     if environment.placement == PlacementState::Free
+        && interaction.state != InteractionState::Dragging
         && interaction.drag_offset.is_none()
         && !feet.is_empty()
     {
@@ -723,15 +755,28 @@ fn update_click_through(
         }
     }
 
-    if interaction.drag_offset.is_some() {
-        hovering = true;
-    }
-
-    if hovering == interaction.hovering_nera {
+    // Once LMB has captured Nera, keep receiving mouse input even if the
+    // animated collider moves away from the cursor during the gesture.
+    if matches!(
+        interaction.state,
+        InteractionState::Pressed | InteractionState::Dragging
+    ) || interaction.right_press_origin.is_some()
+    {
+        cursor_options.hit_test = true;
         return;
     }
 
-    interaction.hovering_nera = hovering;
+    let next_state = if hovering {
+        InteractionState::Hover
+    } else {
+        InteractionState::None
+    };
+
+    if next_state == interaction.state {
+        return;
+    }
+
+    interaction.state = next_state;
     cursor_options.hit_test = hovering;
 }
 
@@ -744,6 +789,11 @@ fn drag_nera_window(
     mouse: Res<ButtonInput<MouseButton>>,
     mut interaction: ResMut<DesktopPetInteraction>,
     mut environment: ResMut<DesktopEnvironment>,
+    mut clicked: MessageWriter<NeraClicked>,
+    mut right_clicked: MessageWriter<NeraRightClicked>,
+    mut drag_started: MessageWriter<NeraDragStarted>,
+    mut dragged: MessageWriter<NeraDragged>,
+    mut released: MessageWriter<NeraReleased>,
 ) {
     let Some(hwnd) = environment.nera_hwnd else {
         return;
@@ -756,15 +806,49 @@ fn drag_nera_window(
     let cursor = IVec2::new(global_cursor.x, global_cursor.y);
     let now = Instant::now();
 
-    // Mouse-down starts a HOLD. If Nera is already sitting we deliberately keep
-    // the attachment intact until the cursor meaningfully pulls away.
-    if interaction.hovering_nera && mouse.just_pressed(MouseButton::Left) {
+    // Right click is emitted on release, not press. Capture the gesture while
+    // RMB is down so click-through cannot lose the release to another window.
+    if interaction.state == InteractionState::Hover
+        && mouse.just_pressed(MouseButton::Right)
+    {
+        interaction.right_press_origin = Some(cursor);
+    }
+
+    if mouse.just_released(MouseButton::Right) {
+        if let Some(origin) = interaction.right_press_origin.take() {
+            let right_click_threshold = (
+                DRAG_START_DISTANCE_AT_96_DPI
+                    * environment.nera_scale_factor as f32
+            )
+                .round()
+                .max(1.0) as i32;
+
+            let delta = cursor - origin;
+            if delta.length_squared() <= right_click_threshold * right_click_threshold {
+                right_clicked.write(NeraRightClicked {
+                    pointer: nera_pointer_position(cursor, &environment),
+                });
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Hover -> Pressed
+    // ----------------------------------------------------------------------
+    // Mouse-down only captures the gesture. It is NOT a drag yet. This is the
+    // core Phase 5.1 distinction that prevents head clicks from being treated
+    // as window movement once body-part reactions arrive in 5.2/5.4.
+    if interaction.state == InteractionState::Hover
+        && mouse.just_pressed(MouseButton::Left)
+    {
         if let Some(rect) = environment.nera_rect {
+            interaction.state = InteractionState::Pressed;
             interaction.drag_offset = Some(IVec2::new(
                 global_cursor.x - rect.left,
                 global_cursor.y - rect.top,
             ));
             interaction.drag_start_cursor = Some(cursor);
+            interaction.last_drag_cursor = Some(cursor);
             interaction.drag_started_at = Some(now);
 
             if matches!(
@@ -776,7 +860,46 @@ fn drag_nera_window(
         }
     }
 
-    if mouse.pressed(MouseButton::Left) && interaction.drag_offset.is_some() {
+    // ----------------------------------------------------------------------
+    // Pressed -> Dragging
+    // ----------------------------------------------------------------------
+    if mouse.pressed(MouseButton::Left)
+        && interaction.state == InteractionState::Pressed
+    {
+        let drag_threshold = (
+            DRAG_START_DISTANCE_AT_96_DPI
+                * environment.nera_scale_factor as f32
+        )
+            .round()
+            .max(1.0) as i32;
+
+        let moved_enough = interaction
+            .drag_start_cursor
+            .map(|origin| {
+                let delta = cursor - origin;
+                delta.length_squared() >= drag_threshold * drag_threshold
+            })
+            .unwrap_or(false);
+
+        if moved_enough {
+            interaction.state = InteractionState::Dragging;
+            interaction.last_drag_cursor = Some(cursor);
+            drag_started.write(NeraDragStarted { screen: cursor });
+        }
+    }
+
+    if mouse.pressed(MouseButton::Left)
+        && interaction.state == InteractionState::Dragging
+        && interaction.drag_offset.is_some()
+    {
+        if let Some(previous) = interaction.last_drag_cursor {
+            let delta = cursor - previous;
+            if delta != IVec2::ZERO {
+                dragged.write(NeraDragged { screen: cursor, delta });
+            }
+        }
+        interaction.last_drag_cursor = Some(cursor);
+
         // ------------------------------------------------------------------
         // Attached -> user pulls away -> unsnap without Seat->Feet rebase.
         // ------------------------------------------------------------------
@@ -834,26 +957,12 @@ fn drag_nera_window(
                 }
             }
 
-            // Mate Engine arms sitting only after a deliberate one-second hold
-            // AND at least a tiny real movement from the drag start.
+            // Mate Engine arms sitting only after a deliberate hold AND a real
+            // drag. A click can never arm sitting now because Pressed is kept
+            // separate from Dragging.
             let hold_ready = interaction
                 .drag_started_at
                 .map(|started| now.duration_since(started) >= MIN_DRAG_HOLD_TO_SIT)
-                .unwrap_or(false);
-
-            let min_drag = (
-                MIN_DRAG_PIXELS_TO_SIT_AT_96_DPI
-                    * environment.nera_scale_factor as f32
-            )
-                .round()
-                .max(1.0) as i32;
-
-            let moved_for_sit = interaction
-                .drag_start_cursor
-                .map(|origin| {
-                    let delta = cursor - origin;
-                    delta.x.abs() >= min_drag || delta.y.abs() >= min_drag
-                })
                 .unwrap_or(false);
 
             let cooldown_blocked = interaction
@@ -901,7 +1010,6 @@ fn drag_nera_window(
             }
 
             if hold_ready
-                && moved_for_sit
                 && !cooldown_blocked
                 && !guard_blocked
                 && !vertical_blocked
@@ -914,11 +1022,32 @@ fn drag_nera_window(
         }
     }
 
-    if mouse.just_released(MouseButton::Left) {
-        // Release never performs snap detection anymore. Sitting is acquired
-        // while dragging, after the hold/probe rules above have been satisfied.
+    // ----------------------------------------------------------------------
+    // Pressed -> Click, Dragging -> Release
+    // ----------------------------------------------------------------------
+    if mouse.just_released(MouseButton::Left)
+        && matches!(
+            interaction.state,
+            InteractionState::Pressed | InteractionState::Dragging
+        )
+    {
+        let was_dragging = interaction.state == InteractionState::Dragging;
+
+        let pointer = nera_pointer_position(cursor, &environment);
+
+        if !was_dragging {
+            clicked.write(NeraClicked { pointer });
+        }
+
+        released.write(NeraReleased {
+            pointer,
+            was_dragging,
+        });
+
+        interaction.state = InteractionState::Hover;
         interaction.drag_offset = None;
         interaction.drag_start_cursor = None;
+        interaction.last_drag_cursor = None;
         interaction.drag_started_at = None;
         interaction.snap_cursor = None;
 
