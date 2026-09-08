@@ -1,3 +1,4 @@
+mod animation;
 mod environment;
 mod interaction;
 mod platform;
@@ -5,14 +6,17 @@ mod platform;
 #[cfg(target_os = "windows")]
 mod tray;
 
+use animation::AnimationPlugin;
+
 use environment::{
-    AvatarAnchor,
     DesktopEnvironment,
     DesktopEnvironmentPlugin,
     PlacementState,
 };
 
 use interaction::{
+    BodyPart,
+    HoveredBodyPart,
     InteractionPlugin,
     InteractionState,
     NeraClicked,
@@ -29,7 +33,6 @@ use std::{
 };
 
 use bevy::{
-    animation::RepeatAnimation,
     prelude::*,
     render::{
         RenderPlugin,
@@ -130,6 +133,11 @@ const UNSNAP_VERTICAL_BAND_AT_96_DPI: f32 = 24.0;
 struct DesktopPetInteraction {
     state: InteractionState,
 
+    /// Phase 5.2 captures semantic body parts at mouse-down so animation or
+    /// cursor movement cannot change a gesture's meaning before release.
+    pressed_body_part: Option<BodyPart>,
+    right_pressed_body_part: Option<BodyPart>,
+
     /// Grab point inside Nera's native window. Some means LMB currently owns
     /// the interaction, even while an attachment temporarily keeps the HWND pinned.
     drag_offset: Option<IVec2>,
@@ -157,25 +165,17 @@ struct DesktopPetInteraction {
     recent_unsnap_surface_y: Option<i32>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum NeraPose {
-    #[default]
-    Idle,
-    Sitting,
-}
-
-#[derive(Resource, Default)]
-struct NeraAnimations {
-    idle: Option<Entity>,
-    sitting: Option<Entity>,
-    current: Option<NeraPose>,
-}
-
 #[derive(Component)]
 struct LookAtTarget;
 
 #[derive(Component)]
-enum NeraCollider {
+struct NeraCollider {
+    body_part: BodyPart,
+    shape: NeraColliderShape,
+}
+
+#[derive(Clone, Copy)]
+enum NeraColliderShape {
     Sphere {
         radius: f32,
     },
@@ -225,14 +225,14 @@ fn main() {
             }),
     );
 
-    app.add_plugins((VrmPlugin, VrmaPlugin, DesktopEnvironmentPlugin, InteractionPlugin));
+    app.add_plugins((VrmPlugin, VrmaPlugin, DesktopEnvironmentPlugin, InteractionPlugin, AnimationPlugin));
 
     #[cfg(target_os = "windows")]
     app.add_plugins(TrayPlugin);
 
     app.insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
-        .init_resource::<NeraAnimations>()
+        .init_resource::<HoveredBodyPart>()
         .add_systems(
             Startup,
             (setup_camera, setup_lighting, spawn_nera),
@@ -246,7 +246,13 @@ fn main() {
                 // This lets one click immediately perform Sitting -> Idle and
                 // one release immediately perform Idle -> Sitting.
                 drag_nera_window,
-                sync_nera_pose,
+                // Phase 5.3: three animation systems replace sync_nera_pose.
+                // update_base_pose reads PlacementState.
+                // tick_active_action counts down temporary actions.
+                // sync_animation emits PlayVrma when needed.
+                animation::update_base_pose,
+                animation::tick_active_action,
+                animation::sync_animation,
             )
                 .chain(),
         )
@@ -325,100 +331,15 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
                     Name::new("Nera Idle Animation"),
                     VrmaHandle(asset_server.load(IDLE_VRMA_PATH)),
                 ))
-                .observe(register_idle_animation);
+                .observe(animation::register_idle_animation);
 
             parent
                 .spawn((
                     Name::new("Nera Sitting Animation"),
                     VrmaHandle(asset_server.load(SITTING_VRMA_PATH)),
                 ))
-                .observe(register_sitting_animation);
+                .observe(animation::register_sitting_animation);
         });
-}
-
-fn register_idle_animation(
-    trigger: On<LoadedVrma>,
-    mut commands: Commands,
-    mut animations: ResMut<NeraAnimations>,
-) {
-    animations.idle = Some(trigger.vrma);
-
-    // Idle is the startup pose. Do this once; later changes are handled by
-    // `sync_nera_pose`.
-    if animations.current.is_none() {
-        commands.trigger(PlayVrma {
-            repeat: RepeatAnimation::Forever,
-            transition_duration: Duration::ZERO,
-            vrma: trigger.vrma,
-            reset_spring_bones: false,
-        });
-
-        animations.current = Some(NeraPose::Idle);
-        info!("Idle VRMA loaded. Starting animation.");
-    }
-}
-
-fn register_sitting_animation(
-    trigger: On<LoadedVrma>,
-    mut animations: ResMut<NeraAnimations>,
-) {
-    animations.sitting = Some(trigger.vrma);
-    info!("Sitting VRMA loaded.");
-}
-
-fn sync_nera_pose(
-    mut commands: Commands,
-    mut environment: ResMut<DesktopEnvironment>,
-    mut animations: ResMut<NeraAnimations>,
-) {
-    let desired = match environment.placement {
-        PlacementState::Free => NeraPose::Idle,
-        PlacementState::PendingWindow { .. }
-        | PlacementState::PendingTaskbar { .. }
-        | PlacementState::Window(_)
-        | PlacementState::Taskbar(_) => NeraPose::Sitting,
-    };
-
-    let anchor = match desired {
-        NeraPose::Idle => AvatarAnchor::Feet,
-        NeraPose::Sitting => AvatarAnchor::Seat,
-    };
-
-    if animations.current == Some(desired) {
-        environment.set_attached_anchor(anchor);
-        return;
-    }
-
-    let vrma = match desired {
-        NeraPose::Idle => animations.idle,
-        NeraPose::Sitting => animations.sitting,
-    };
-
-    let Some(vrma) = vrma else {
-        if desired == NeraPose::Idle {
-            environment.set_attached_anchor(AvatarAnchor::Feet);
-        }
-        return;
-    };
-
-    // Deterministic pose-first alignment is more important here than blending.
-    // Once the mechanics are stable we can add visual smoothing without letting
-    // an in-progress blend drive native HWND geometry.
-    commands.trigger(PlayVrma {
-        repeat: RepeatAnimation::Forever,
-        transition_duration: Duration::ZERO,
-        vrma,
-        reset_spring_bones: false,
-    });
-
-    environment.set_attached_anchor(anchor);
-
-    match desired {
-        NeraPose::Idle => info!("Nera pose -> Idle | anchor -> Feet"),
-        NeraPose::Sitting => info!("Nera pose -> Sitting | pose-first Seat calibration"),
-    }
-
-    animations.current = Some(desired);
 }
 
 // -----------------------------------------------------------------------------
@@ -613,24 +534,49 @@ fn settle_pending_sit(
     interaction.recent_unsnap_surface_y = None;
 }
 
-fn ray_intersects_sphere(ray_origin: Vec3, ray_dir: Vec3, center: Vec3, radius: f32) -> bool {
+fn ray_sphere_distance(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    center: Vec3,
+    radius: f32,
+) -> Option<f32> {
     let oc = ray_origin - center;
     let b = oc.dot(ray_dir);
     let c = oc.length_squared() - radius * radius;
     let discriminant = b * b - c;
 
-    if discriminant >= 0.0 {
-        let sqrt_d = discriminant.sqrt();
-        return (-b - sqrt_d) >= 0.0 || (-b + sqrt_d) >= 0.0;
+    if discriminant < 0.0 {
+        return None;
     }
-    false
+
+    let sqrt_d = discriminant.sqrt();
+    let near = -b - sqrt_d;
+    let far = -b + sqrt_d;
+
+    if near >= 0.0 {
+        Some(near)
+    } else if far >= 0.0 {
+        Some(far)
+    } else {
+        None
+    }
 }
 
-fn ray_intersects_capsule(ray_origin: Vec3, ray_dir: Vec3, pa: Vec3, pb: Vec3, radius: f32) -> bool {
+fn ray_capsule_distance(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    pa: Vec3,
+    pb: Vec3,
+    radius: f32,
+) -> Option<f32> {
     let ba = pb - pa;
     let oa = ray_origin - pa;
 
     let baba = ba.dot(ba);
+    if baba < 1e-8 {
+        return ray_sphere_distance(ray_origin, ray_dir, pa, radius);
+    }
+
     let bard = ba.dot(ray_dir);
     let baoa = ba.dot(oa);
     let rdoa = ray_dir.dot(oa);
@@ -640,26 +586,76 @@ fn ray_intersects_capsule(ray_origin: Vec3, ray_dir: Vec3, pa: Vec3, pb: Vec3, r
     let b = baba * rdoa - baoa * bard;
     let c = baba * oaoa - baoa * baoa - radius * radius * baba;
 
-    if a.abs() < 1e-6 {
-        return ray_intersects_sphere(ray_origin, ray_dir, pa, radius)
-            || ray_intersects_sphere(ray_origin, ray_dir, pb, radius);
+    let mut nearest: Option<f32> = None;
+
+    // Infinite-cylinder intersection clipped to the bone segment.
+    if a.abs() >= 1e-6 {
+        let h = b * b - a * c;
+
+        if h >= 0.0 {
+            let t = (-b - h.sqrt()) / a;
+            let y = baoa + t * bard;
+
+            if t >= 0.0 && y > 0.0 && y < baba {
+                nearest = Some(t);
+            }
+        }
     }
 
-    let h = b * b - a * c;
-
-    if h < 0.0 {
-        return false;
+    // End caps. Keep the closest positive hit so overlapping body colliders
+    // remain deterministic instead of depending on ECS query iteration order.
+    for center in [pa, pb] {
+        if let Some(t) = ray_sphere_distance(ray_origin, ray_dir, center, radius) {
+            nearest = Some(match nearest {
+                Some(current) => current.min(t),
+                None => t,
+            });
+        }
     }
 
-    let t = (-b - h.sqrt()) / a;
-    let y = baoa + t * bard;
+    nearest
+}
 
-    if y > 0.0 && y < baba && t >= 0.0 {
-        return true;
+fn nearest_nera_body_part(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    colliders_query: &Query<(&GlobalTransform, &NeraCollider)>,
+    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+) -> Option<BodyPart> {
+    let mut nearest: Option<(BodyPart, f32)> = None;
+
+    for (bone_transform, collider) in colliders_query.iter() {
+        let pa = bone_transform.translation();
+
+        let distance = match collider.shape {
+            NeraColliderShape::Sphere { radius } => {
+                ray_sphere_distance(ray_origin, ray_dir, pa, radius)
+            }
+            NeraColliderShape::Capsule { radius, end_bone } => {
+                let pb = bone_query.iter().find_map(|(bone, transform)| {
+                    (bone.as_str() == end_bone).then(|| transform.translation())
+                });
+
+                match pb {
+                    Some(pb) => ray_capsule_distance(ray_origin, ray_dir, pa, pb, radius),
+                    None => ray_sphere_distance(ray_origin, ray_dir, pa, radius),
+                }
+            }
+        };
+
+        let Some(distance) = distance else {
+            continue;
+        };
+
+        if nearest
+            .map(|(_, current_distance)| distance < current_distance)
+            .unwrap_or(true)
+        {
+            nearest = Some((collider.body_part, distance));
+        }
     }
 
-    ray_intersects_sphere(ray_origin, ray_dir, pa, radius)
-        || ray_intersects_sphere(ray_origin, ray_dir, pb, radius)
+    nearest.map(|(body_part, _)| body_part)
 }
 
 // -----------------------------------------------------------------------------
@@ -670,36 +666,96 @@ fn attach_bone_colliders(
     mut commands: Commands,
     bones: Query<(Entity, &VrmBone), Added<VrmBone>>,
 ) {
+    use BodyPart::*;
+
     for (entity, bone) in &bones {
         let collider = match bone.as_str() {
-            "head" => Some(NeraCollider::Sphere { radius: 0.18 }),
-            "hips" => Some(NeraCollider::Capsule { radius: 0.18, end_bone: "spine" }),
-            "spine" => Some(NeraCollider::Capsule { radius: 0.19, end_bone: "chest" }),
-            "chest" => Some(NeraCollider::Capsule { radius: 0.20, end_bone: "upperChest" }),
-            "upperChest" => Some(NeraCollider::Capsule { radius: 0.18, end_bone: "neck" }),
-            
-            "leftShoulder" => Some(NeraCollider::Capsule { radius: 0.10, end_bone: "leftUpperArm" }),
-            "leftUpperArm" => Some(NeraCollider::Capsule { radius: 0.10, end_bone: "leftLowerArm" }),
-            "leftLowerArm" => Some(NeraCollider::Capsule { radius: 0.09, end_bone: "leftHand" }),
-            
-            "rightShoulder" => Some(NeraCollider::Capsule { radius: 0.10, end_bone: "rightUpperArm" }),
-            "rightUpperArm" => Some(NeraCollider::Capsule { radius: 0.10, end_bone: "rightLowerArm" }),
-            "rightLowerArm" => Some(NeraCollider::Capsule { radius: 0.09, end_bone: "rightHand" }),
-            
-            "leftHand" | "rightHand" => Some(NeraCollider::Sphere { radius: 0.10 }),
-            
-            "leftUpperLeg" => Some(NeraCollider::Capsule { radius: 0.13, end_bone: "leftLowerLeg" }),
-            "leftLowerLeg" => Some(NeraCollider::Capsule { radius: 0.11, end_bone: "leftFoot" }),
-            
-            "rightUpperLeg" => Some(NeraCollider::Capsule { radius: 0.13, end_bone: "rightLowerLeg" }),
-            "rightLowerLeg" => Some(NeraCollider::Capsule { radius: 0.11, end_bone: "rightFoot" }),
-            
-            "leftFoot" | "rightFoot" => Some(NeraCollider::Sphere { radius: 0.11 }),
+            "head" => Some(NeraCollider {
+                body_part: Head,
+                shape: NeraColliderShape::Sphere { radius: 0.18 },
+            }),
+
+            "hips" => Some(NeraCollider {
+                body_part: Torso,
+                shape: NeraColliderShape::Capsule { radius: 0.18, end_bone: "spine" },
+            }),
+            "spine" => Some(NeraCollider {
+                body_part: Torso,
+                shape: NeraColliderShape::Capsule { radius: 0.19, end_bone: "chest" },
+            }),
+            "chest" => Some(NeraCollider {
+                body_part: Torso,
+                shape: NeraColliderShape::Capsule { radius: 0.20, end_bone: "upperChest" },
+            }),
+            "upperChest" => Some(NeraCollider {
+                body_part: Torso,
+                shape: NeraColliderShape::Capsule { radius: 0.18, end_bone: "neck" },
+            }),
+
+            "leftShoulder" => Some(NeraCollider {
+                body_part: LeftArm,
+                shape: NeraColliderShape::Capsule { radius: 0.10, end_bone: "leftUpperArm" },
+            }),
+            "leftUpperArm" => Some(NeraCollider {
+                body_part: LeftArm,
+                shape: NeraColliderShape::Capsule { radius: 0.10, end_bone: "leftLowerArm" },
+            }),
+            "leftLowerArm" => Some(NeraCollider {
+                body_part: LeftArm,
+                shape: NeraColliderShape::Capsule { radius: 0.09, end_bone: "leftHand" },
+            }),
+            "leftHand" => Some(NeraCollider {
+                body_part: LeftHand,
+                shape: NeraColliderShape::Sphere { radius: 0.10 },
+            }),
+
+            "rightShoulder" => Some(NeraCollider {
+                body_part: RightArm,
+                shape: NeraColliderShape::Capsule { radius: 0.10, end_bone: "rightUpperArm" },
+            }),
+            "rightUpperArm" => Some(NeraCollider {
+                body_part: RightArm,
+                shape: NeraColliderShape::Capsule { radius: 0.10, end_bone: "rightLowerArm" },
+            }),
+            "rightLowerArm" => Some(NeraCollider {
+                body_part: RightArm,
+                shape: NeraColliderShape::Capsule { radius: 0.09, end_bone: "rightHand" },
+            }),
+            "rightHand" => Some(NeraCollider {
+                body_part: RightHand,
+                shape: NeraColliderShape::Sphere { radius: 0.10 },
+            }),
+
+            "leftUpperLeg" => Some(NeraCollider {
+                body_part: LeftLeg,
+                shape: NeraColliderShape::Capsule { radius: 0.13, end_bone: "leftLowerLeg" },
+            }),
+            "leftLowerLeg" => Some(NeraCollider {
+                body_part: LeftLeg,
+                shape: NeraColliderShape::Capsule { radius: 0.11, end_bone: "leftFoot" },
+            }),
+            "leftFoot" => Some(NeraCollider {
+                body_part: LeftFoot,
+                shape: NeraColliderShape::Sphere { radius: 0.11 },
+            }),
+
+            "rightUpperLeg" => Some(NeraCollider {
+                body_part: RightLeg,
+                shape: NeraColliderShape::Capsule { radius: 0.13, end_bone: "rightLowerLeg" },
+            }),
+            "rightLowerLeg" => Some(NeraCollider {
+                body_part: RightLeg,
+                shape: NeraColliderShape::Capsule { radius: 0.11, end_bone: "rightFoot" },
+            }),
+            "rightFoot" => Some(NeraCollider {
+                body_part: RightFoot,
+                shape: NeraColliderShape::Sphere { radius: 0.11 },
+            }),
             _ => None,
         };
 
-        if let Some(col) = collider {
-            commands.entity(entity).insert(col);
+        if let Some(collider) = collider {
+            commands.entity(entity).insert(collider);
         }
     }
 }
@@ -708,55 +764,32 @@ fn attach_bone_colliders(
 fn update_click_through(
     environment: Res<DesktopEnvironment>,
     mut interaction: ResMut<DesktopPetInteraction>,
+    mut hovered: ResMut<HoveredBodyPart>,
     mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     colliders_query: Query<(&GlobalTransform, &NeraCollider)>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
-    let Ok( mut cursor_options) = window_query.single_mut() else { return };
+    let Ok(mut cursor_options) = window_query.single_mut() else { return };
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
-    let mut hovering = false;
+    let hovered_body_part = cursor_position_in_nera_window(&environment)
+        .and_then(|cursor_pos| camera.viewport_to_world(camera_transform, cursor_pos).ok())
+        .and_then(|ray| {
+            nearest_nera_body_part(
+                ray.origin,
+                ray.direction.into(),
+                &colliders_query,
+                &bone_query,
+            )
+        });
 
-    if let Some(cursor_pos) = cursor_position_in_nera_window(&environment) {
-        if let Ok(ray) = camera.viewport_to_world(camera_transform, cursor_pos) {
-            let ray_origin = ray.origin;
-            let ray_dir = ray.direction.into();
+    hovered.part = hovered_body_part;
+    let hovering = hovered_body_part.is_some();
 
-            for (bone_transform, collider) in colliders_query.iter() {
-                let pa = bone_transform.translation();
-
-                let hit = match collider {
-                    NeraCollider::Sphere { radius } => {
-                        ray_intersects_sphere(ray_origin, ray_dir, pa, *radius)
-                    }
-                    NeraCollider::Capsule { radius, end_bone } => {
-                        let pb = bone_query.iter().find_map(|(bone, transform)| {
-                            if bone.as_str() == *end_bone {
-                                Some(transform.translation())
-                            } else {
-                                None
-                            }
-                        });
-
-                        if let Some(pb) = pb {
-                            ray_intersects_capsule(ray_origin, ray_dir, pa, pb, *radius)
-                        } else {
-                            ray_intersects_sphere(ray_origin, ray_dir, pa, *radius)
-                        }
-                    }
-                };
-
-                if hit {
-                    hovering = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Once LMB has captured Nera, keep receiving mouse input even if the
-    // animated collider moves away from the cursor during the gesture.
+    // Once a button has captured Nera, keep receiving input even if animation
+    // moves the current collider away from the cursor. The semantic body part
+    // was captured at press time and remains stable until release.
     if matches!(
         interaction.state,
         InteractionState::Pressed | InteractionState::Dragging
@@ -772,10 +805,6 @@ fn update_click_through(
         InteractionState::None
     };
 
-    if next_state == interaction.state {
-        return;
-    }
-
     interaction.state = next_state;
     cursor_options.hit_test = hovering;
 }
@@ -789,6 +818,7 @@ fn drag_nera_window(
     mouse: Res<ButtonInput<MouseButton>>,
     mut interaction: ResMut<DesktopPetInteraction>,
     mut environment: ResMut<DesktopEnvironment>,
+    hovered: Res<HoveredBodyPart>,
     mut clicked: MessageWriter<NeraClicked>,
     mut right_clicked: MessageWriter<NeraRightClicked>,
     mut drag_started: MessageWriter<NeraDragStarted>,
@@ -811,11 +841,17 @@ fn drag_nera_window(
     if interaction.state == InteractionState::Hover
         && mouse.just_pressed(MouseButton::Right)
     {
-        interaction.right_press_origin = Some(cursor);
+        if let Some(body_part) = hovered.part {
+            interaction.right_press_origin = Some(cursor);
+            interaction.right_pressed_body_part = Some(body_part);
+        }
     }
 
     if mouse.just_released(MouseButton::Right) {
-        if let Some(origin) = interaction.right_press_origin.take() {
+        let origin = interaction.right_press_origin.take();
+        let body_part = interaction.right_pressed_body_part.take();
+
+        if let (Some(origin), Some(body_part)) = (origin, body_part) {
             let right_click_threshold = (
                 DRAG_START_DISTANCE_AT_96_DPI
                     * environment.nera_scale_factor as f32
@@ -827,6 +863,7 @@ fn drag_nera_window(
             if delta.length_squared() <= right_click_threshold * right_click_threshold {
                 right_clicked.write(NeraRightClicked {
                     pointer: nera_pointer_position(cursor, &environment),
+                    body_part,
                 });
             }
         }
@@ -841,8 +878,11 @@ fn drag_nera_window(
     if interaction.state == InteractionState::Hover
         && mouse.just_pressed(MouseButton::Left)
     {
-        if let Some(rect) = environment.nera_rect {
+        if let (Some(rect), Some(body_part)) =
+            (environment.nera_rect, hovered.part)
+        {
             interaction.state = InteractionState::Pressed;
+            interaction.pressed_body_part = Some(body_part);
             interaction.drag_offset = Some(IVec2::new(
                 global_cursor.x - rect.left,
                 global_cursor.y - rect.top,
@@ -884,7 +924,13 @@ fn drag_nera_window(
         if moved_enough {
             interaction.state = InteractionState::Dragging;
             interaction.last_drag_cursor = Some(cursor);
-            drag_started.write(NeraDragStarted { screen: cursor });
+
+            if let Some(body_part) = interaction.pressed_body_part {
+                drag_started.write(NeraDragStarted {
+                    screen: cursor,
+                    body_part,
+                });
+            }
         }
     }
 
@@ -1032,19 +1078,25 @@ fn drag_nera_window(
         )
     {
         let was_dragging = interaction.state == InteractionState::Dragging;
-
         let pointer = nera_pointer_position(cursor, &environment);
 
-        if !was_dragging {
-            clicked.write(NeraClicked { pointer });
+        if let Some(body_part) = interaction.pressed_body_part {
+            if !was_dragging {
+                clicked.write(NeraClicked {
+                    pointer,
+                    body_part,
+                });
+            }
+
+            released.write(NeraReleased {
+                pointer,
+                body_part,
+                was_dragging,
+            });
         }
 
-        released.write(NeraReleased {
-            pointer,
-            was_dragging,
-        });
-
         interaction.state = InteractionState::Hover;
+        interaction.pressed_body_part = None;
         interaction.drag_offset = None;
         interaction.drag_start_cursor = None;
         interaction.last_drag_cursor = None;

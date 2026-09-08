@@ -1,9 +1,10 @@
-//! Phase 5.1 — semantic interaction messages.
+//! Phase 5.1–5.2 — semantic interaction messages + body-part vocabulary.
 //!
 //! This module owns the public vocabulary produced by Nera's existing input
 //! pipeline. The actual native-window drag/sitting mechanics stay in `main.rs`
-//! for Phase 5.1 so there is still only one state machine deciding whether a
-//! pointer gesture is a click or a drag.
+//! so there is still only one state machine deciding whether a pointer gesture
+//! is a click or a drag. Phase 5.2 adds semantic `BodyPart` data to those same
+//! messages without creating a second input pipeline.
 
 use bevy::prelude::*;
 
@@ -14,6 +15,36 @@ pub(crate) enum InteractionState {
     Hover,
     Pressed,
     Dragging,
+}
+
+/// Semantic body regions produced by Phase 5.2 hit detection.
+///
+/// Left/right are kept separate now so future reactions can distinguish, for
+/// example, a left-hand click from a right-hand click without changing the
+/// interaction message API again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum BodyPart {
+    Head,
+    Torso,
+    LeftArm,
+    RightArm,
+    LeftHand,
+    RightHand,
+    LeftLeg,
+    RightLeg,
+    LeftFoot,
+    RightFoot,
+}
+
+/// Current semantic body part under the cursor.
+///
+/// This is deliberately separate from `DesktopPetInteraction`: hover is
+/// useful to future behavior/UI systems even when no click is in progress.
+/// Click/drag messages still capture the body part at mouse-down so animation
+/// cannot change the meaning of an in-progress gesture.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct HoveredBodyPart {
+    pub(crate) part: Option<BodyPart>,
 }
 
 /// Pointer coordinates captured at the moment a semantic interaction fires.
@@ -30,11 +61,13 @@ pub(crate) struct NeraPointerPosition {
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct NeraClicked {
     pub(crate) pointer: NeraPointerPosition,
+    pub(crate) body_part: BodyPart,
 }
 
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct NeraRightClicked {
     pub(crate) pointer: NeraPointerPosition,
+    pub(crate) body_part: BodyPart,
 }
 
 /// Extra lifecycle message beyond the minimum roadmap. Consumers that care
@@ -42,6 +75,7 @@ pub(crate) struct NeraRightClicked {
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct NeraDragStarted {
     pub(crate) screen: IVec2,
+    pub(crate) body_part: BodyPart,
 }
 
 #[derive(Message, Clone, Copy, Debug)]
@@ -53,6 +87,7 @@ pub(crate) struct NeraDragged {
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct NeraReleased {
     pub(crate) pointer: NeraPointerPosition,
+    pub(crate) body_part: BodyPart,
     pub(crate) was_dragging: bool,
 }
 
@@ -80,20 +115,23 @@ fn log_interaction_messages(
 ) {
     for event in clicked.read() {
         info!(
-            "Nera interaction -> Click screen={:?} local={:?}",
-            event.pointer.screen, event.pointer.local
+            "Nera interaction -> Click {:?} screen={:?} local={:?}",
+            event.body_part, event.pointer.screen, event.pointer.local
         );
     }
 
     for event in right_clicked.read() {
         info!(
-            "Nera interaction -> RightClick screen={:?} local={:?}",
-            event.pointer.screen, event.pointer.local
+            "Nera interaction -> RightClick {:?} screen={:?} local={:?}",
+            event.body_part, event.pointer.screen, event.pointer.local
         );
     }
 
     for event in drag_started.read() {
-        info!("Nera interaction -> DragStarted @ {:?}", event.screen);
+        info!(
+            "Nera interaction -> DragStarted {:?} @ {:?}",
+            event.body_part, event.screen
+        );
     }
 
     for event in dragged.read() {
@@ -106,7 +144,8 @@ fn log_interaction_messages(
 
     for event in released.read() {
         info!(
-            "Nera interaction -> Released screen={:?} local={:?} (was_dragging={})",
+            "Nera interaction -> Released {:?} screen={:?} local={:?} (was_dragging={})",
+            event.body_part,
             event.pointer.screen,
             event.pointer.local,
             event.was_dragging
