@@ -8,10 +8,19 @@ mod tray;
 
 use animation::{
     NeraAnimationPlugin,
+    NeraAnimationState,
     apply_animation_state,
+    register_death_animation,
+    register_floating_animation,
+    register_head_stroke_animation,
+    register_hit_chest_animation,
+    register_hit_head_animation,
     register_idle_animation,
-    register_sitting_animation,
-    sync_animation_base_pose,
+    register_praying_animation,
+    register_sitting_enter_animation,
+    register_sitting_exit_animation,
+    register_sitting_loop_animation,
+    sync_environment_animation_state,
     sync_interaction_animation_actions,
     tick_animation_actions,
 };
@@ -30,6 +39,7 @@ use interaction::{
     NeraClicked,
     NeraDragStarted,
     NeraDragged,
+    NeraHeadPatted,
     NeraPointerPosition,
     NeraReleased,
     NeraRightClicked,
@@ -89,8 +99,29 @@ use tray::TrayPlugin;
 //└─ Drag lock            ✅
 
 const VRM_PATH: &str = "vrm/nera.vrm";
-const IDLE_VRMA_PATH: &str = "animations/idle.vrma";
-const SITTING_VRMA_PATH: &str = "animations/sitting.vrma";
+
+// Phase 5 runtime animation set. Large animation libraries stay as stock;
+// only stable animations used by current behavior live in animasi_basic.
+const IDLE_VRMA_PATH: &str =
+    "animations/animasi_basic/idle.vrma";
+const FLOATING_VRMA_PATH: &str =
+    "animations/animasi_basic/Floating.vrma";
+const DEATH_VRMA_PATH: &str =
+    "animations/animasi_basic/Death01.vrma";
+const HIT_HEAD_VRMA_PATH: &str =
+    "animations/animasi_basic/Hit_Head.vrma";
+const HIT_CHEST_VRMA_PATH: &str =
+    "animations/animasi_basic/Hit_Chest.vrma";
+const HEAD_STROKE_VRMA_PATH: &str =
+    "animations/animasi_basic/ShakeHeadNo1.vrma";
+const PRAYING_VRMA_PATH: &str =
+    "animations/animasi_basic/Praying.vrma";
+const SITTING_ENTER_VRMA_PATH: &str =
+    "animations/animasi_basic/Sitting_Enter.vrma";
+const SITTING_LOOP_VRMA_PATH: &str =
+    "animations/animasi_basic/Sitting_Idle_Loop.vrma";
+const SITTING_EXIT_VRMA_PATH: &str =
+    "animations/animasi_basic/Sitting_Exit.vrma";
 
 /// VrmBone `foot` is located around the ankle; shift the standing support
 /// plane down to the visible sole in logical window pixels.
@@ -101,6 +132,10 @@ const FOOT_SOLE_OFFSET_LOGICAL: f32 = 12.0;
 /// +Y is up; the small +Z term moves the anchor slightly toward Nera's rear in
 /// the current avatar orientation.
 const SEAT_OFFSET_WORLD: Vec3 = Vec3::new(0.0, -0.12, 0.08);
+
+/// Additional visual clearance used when a horizontal Death01 pose is grounded.
+/// The support point is measured from animated body bones in screen space.
+const DEATH_GROUND_MARGIN_LOGICAL: f32 = 8.0;
 
 // -----------------------------------------------------------------------------
 // Mate-Engine-style sitting interaction tuning
@@ -132,6 +167,19 @@ const UNSNAP_GUARD_RADIUS_AT_96_DPI: f32 = 240.0;
 
 /// Extra vertical separation requirement for the current drag after unsnapping.
 const UNSNAP_VERTICAL_BAND_AT_96_DPI: f32 = 24.0;
+
+// -----------------------------------------------------------------------------
+// Phase 5.4 head-stroke gesture tuning
+// -----------------------------------------------------------------------------
+
+/// "Elus kepala" accepts deliberate back-and-forth motion on either axis.
+/// No mouse button is required, so it never competes with click-vs-drag.
+const HEAD_STROKE_WINDOW: Duration = Duration::from_millis(900);
+const HEAD_STROKE_COOLDOWN: Duration = Duration::from_millis(1200);
+const HEAD_STROKE_MIN_TRAVEL_AT_96_DPI: f32 = 62.0;
+const HEAD_STROKE_MIN_SEGMENT_AT_96_DPI: f32 = 10.0;
+const HEAD_STROKE_JITTER_AT_96_DPI: f32 = 2.0;
+const HEAD_STROKE_MIN_REVERSALS: u8 = 1;
 
 // -----------------------------------------------------------------------------
 // Resources & Components
@@ -173,6 +221,53 @@ struct DesktopPetInteraction {
     recent_unsnap_surface_y: Option<i32>,
 }
 
+
+#[derive(Resource, Default)]
+struct HeadPatGesture {
+    started_at: Option<Instant>,
+    last_cursor: Option<IVec2>,
+    total_travel: f32,
+
+    x_direction: i8,
+    y_direction: i8,
+    x_segment: i32,
+    y_segment: i32,
+    x_reversals: u8,
+    y_reversals: u8,
+
+    cooldown_until: Option<Instant>,
+}
+
+impl HeadPatGesture {
+    fn reset_stroke(&mut self) {
+        self.started_at = None;
+        self.last_cursor = None;
+        self.total_travel = 0.0;
+        self.x_direction = 0;
+        self.y_direction = 0;
+        self.x_segment = 0;
+        self.y_segment = 0;
+        self.x_reversals = 0;
+        self.y_reversals = 0;
+    }
+
+    fn begin_stroke(&mut self, cursor: IVec2, now: Instant) {
+        self.reset_stroke();
+        self.started_at = Some(now);
+        self.last_cursor = Some(cursor);
+    }
+}
+
+#[derive(Resource, Default)]
+struct DeathGrounding {
+    /// Desktop-space Y of Nera's standing floor. Refreshed while Nera is
+    /// normally standing and then frozen throughout Death01.
+    ground_y_physical: Option<i32>,
+    was_death_active: bool,
+}
+
+#[derive(Component)]
+struct NeraAvatar;
 
 #[derive(Component)]
 struct LookAtTarget;
@@ -248,6 +343,8 @@ fn main() {
     app.insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
         .init_resource::<HoveredBodyPart>()
+        .init_resource::<DeathGrounding>()
+        .init_resource::<HeadPatGesture>()
         .add_systems(
             Startup,
             (setup_camera, setup_lighting, spawn_nera),
@@ -261,9 +358,10 @@ fn main() {
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window,
-                sync_animation_base_pose,
+                sync_environment_animation_state,
                 sync_interaction_animation_actions,
                 tick_animation_actions,
+                sync_look_at_for_animation,
                 apply_animation_state,
             )
                 .chain(),
@@ -272,8 +370,13 @@ fn main() {
             PostUpdate,
             update_click_through.after(VrmSystemSets::SpringBone),
         )
-        // Mate-style pose-first calibration: sample the newly evaluated sitting
-        // pose, then commit a pending attachment one frame later using Seat.
+        .add_systems(
+            PostUpdate,
+            detect_head_pat.after(update_click_through),
+        )
+        // Pose-first support calibration: Sitting_Enter starts in Update,
+        // then Last samples its animated Seat and commits the attachment.
+        // The attachment keeps Seat aligned for the rest of the entry clip.
         .add_systems(
             Last,
             (
@@ -333,6 +436,7 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn((
             Name::new("Nera"),
+            NeraAvatar,
             VrmHandle(asset_server.load(VRM_PATH)),
             LookAt::Target(target),
             Transform::from_xyz(0.0, -0.85, 0.0),
@@ -340,17 +444,73 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
         .with_children(|parent| {
             parent
                 .spawn((
-                    Name::new("Nera Idle Animation"),
+                    Name::new("Nera Idle"),
                     VrmaHandle(asset_server.load(IDLE_VRMA_PATH)),
                 ))
                 .observe(register_idle_animation);
 
             parent
                 .spawn((
-                    Name::new("Nera Sitting Animation"),
-                    VrmaHandle(asset_server.load(SITTING_VRMA_PATH)),
+                    Name::new("Nera Floating"),
+                    VrmaHandle(asset_server.load(FLOATING_VRMA_PATH)),
                 ))
-                .observe(register_sitting_animation);
+                .observe(register_floating_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Death Reaction"),
+                    VrmaHandle(asset_server.load(DEATH_VRMA_PATH)),
+                ))
+                .observe(register_death_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Hit Head"),
+                    VrmaHandle(asset_server.load(HIT_HEAD_VRMA_PATH)),
+                ))
+                .observe(register_hit_head_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Hit Chest"),
+                    VrmaHandle(asset_server.load(HIT_CHEST_VRMA_PATH)),
+                ))
+                .observe(register_hit_chest_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Head Stroke Reaction"),
+                    VrmaHandle(asset_server.load(HEAD_STROKE_VRMA_PATH)),
+                ))
+                .observe(register_head_stroke_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Praying Menu Pose"),
+                    VrmaHandle(asset_server.load(PRAYING_VRMA_PATH)),
+                ))
+                .observe(register_praying_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Sitting Enter"),
+                    VrmaHandle(asset_server.load(SITTING_ENTER_VRMA_PATH)),
+                ))
+                .observe(register_sitting_enter_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Sitting Loop"),
+                    VrmaHandle(asset_server.load(SITTING_LOOP_VRMA_PATH)),
+                ))
+                .observe(register_sitting_loop_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Sitting Exit"),
+                    VrmaHandle(asset_server.load(SITTING_EXIT_VRMA_PATH)),
+                ))
+                .observe(register_sitting_exit_animation);
         });
 }
 
@@ -393,6 +553,33 @@ fn update_look_at_target(
 
     target_transform.translation =
         Vec3::new(map_x, map_y, 2.0);
+}
+
+
+/// VRMA reactions such as HitHead and ShakeHeadNo1 need temporary ownership of
+/// the head bones. `bevy_vrm1` LookAt runs after animation, so leaving LookAt
+/// attached would partially overwrite those animation tracks every frame.
+fn sync_look_at_for_animation(
+    animation: Res<NeraAnimationState>,
+    target_query: Query<Entity, With<LookAtTarget>>,
+    avatar_query: Query<(Entity, Option<&LookAt>), With<NeraAvatar>>,
+    mut commands: Commands,
+) {
+    let Some(target) = target_query.iter().next() else {
+        return;
+    };
+
+    let Some((avatar, current_look_at)) = avatar_query.iter().next() else {
+        return;
+    };
+
+    if animation.suppresses_look_at() {
+        if current_look_at.is_some() {
+            commands.entity(avatar).remove::<LookAt>();
+        }
+    } else if current_look_at.is_none() {
+        commands.entity(avatar).insert(LookAt::Target(target));
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -448,6 +635,8 @@ fn nera_pointer_position(
 #[cfg(target_os = "windows")]
 fn update_avatar_anchors(
     interaction: Res<DesktopPetInteraction>,
+    animation: Res<NeraAnimationState>,
+    mut grounding: ResMut<DeathGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
@@ -461,9 +650,30 @@ fn update_avatar_anchors(
     };
 
     let mut feet = Vec::with_capacity(2);
+    let mut death_support_points = Vec::with_capacity(12);
     let mut seat = None;
 
     for (bone, transform) in &bone_query {
+        if matches!(
+            bone.as_str(),
+            "head"
+                | "hips"
+                | "chest"
+                | "leftHand"
+                | "rightHand"
+                | "leftFoot"
+                | "rightFoot"
+                | "leftLowerLeg"
+                | "rightLowerLeg"
+        ) {
+            if let Ok(viewport) = camera.world_to_viewport(
+                camera_transform,
+                transform.translation(),
+            ) {
+                death_support_points.push(viewport);
+            }
+        }
+
         match bone.as_str() {
             "leftFoot" | "rightFoot" => {
                 if let Ok(viewport) = camera.world_to_viewport(
@@ -512,6 +722,106 @@ fn update_avatar_anchors(
         environment.set_feet_anchor(Vec2::new(x, y));
     }
 
+    // ---------------------------------------------------------------------
+    // Death01 ground stabilization
+    // ---------------------------------------------------------------------
+    //
+    // Cache the standing floor continuously *before* Death starts. A death
+    // animation can move the feet on its very first evaluated frame, so using
+    // the current Death-frame feet would capture the wrong baseline.
+    //
+    // During Death, keep the lowest animated body point on that frozen
+    // desktop-space floor line. When the one-shot finishes, re-align the
+    // standing feet to the exact same floor before normal anchor sampling
+    // resumes.
+    if environment.placement == PlacementState::Free
+        && interaction.state != InteractionState::Dragging
+        && interaction.drag_offset.is_none()
+    {
+        let death_active = animation.death_active();
+        let scale = environment.nera_scale_factor.max(0.25) as f32;
+
+        if let Some(rect) = environment.nera_rect {
+            let standing_feet_y = (!feet.is_empty()).then(|| {
+                feet
+                    .iter()
+                    .map(|point| point.y)
+                    .fold(f32::NEG_INFINITY, f32::max)
+                    + FOOT_SOLE_OFFSET_LOGICAL
+            });
+
+            if !death_active && !grounding.was_death_active {
+                // Normal standing frame: continuously refresh the floor.
+                if let Some(feet_y) = standing_feet_y {
+                    grounding.ground_y_physical = Some(
+                        rect.top + (feet_y * scale).round() as i32
+                    );
+                }
+            }
+
+            if death_active {
+                if !grounding.was_death_active {
+                    info!(
+                        "Death grounding locked floor y={:?}",
+                        grounding.ground_y_physical
+                    );
+                }
+
+                if let (Some(hwnd), Some(ground_y), Some(lowest_y)) = (
+                    environment.nera_hwnd,
+                    grounding.ground_y_physical,
+                    death_support_points
+                        .iter()
+                        .map(|point| point.y)
+                        .max_by(|a, b| a.total_cmp(b)),
+                ) {
+                    let support_y =
+                        lowest_y + DEATH_GROUND_MARGIN_LOGICAL;
+
+                    let desired_top =
+                        ground_y - (support_y * scale).round() as i32;
+
+                    if (desired_top - rect.top).abs() >= 1 {
+                        let desired = platform::PhysicalPoint::new(
+                            rect.left,
+                            desired_top,
+                        );
+
+                        if platform::move_window(hwnd, desired).is_ok() {
+                            environment.nera_rect =
+                                platform::window_rect(hwnd);
+                        }
+                    }
+                }
+            } else if grounding.was_death_active {
+                if let (Some(hwnd), Some(ground_y), Some(feet_y)) = (
+                    environment.nera_hwnd,
+                    grounding.ground_y_physical,
+                    standing_feet_y,
+                ) {
+                    let desired_top =
+                        ground_y - (feet_y * scale).round() as i32;
+
+                    let desired = platform::PhysicalPoint::new(
+                        rect.left,
+                        desired_top,
+                    );
+
+                    if platform::move_window(hwnd, desired).is_ok() {
+                        environment.nera_rect =
+                            platform::window_rect(hwnd);
+                    }
+                }
+
+                info!("Death grounding released -> standing floor restored");
+            }
+
+            grounding.was_death_active = death_active;
+        }
+    } else if !animation.death_active() {
+        grounding.was_death_active = false;
+    }
+
     // Seat is pose-dependent and should follow the evaluated hips while Nera
     // is attached/sitting. It is harmless to refresh it while Free as well.
     if let Some(seat) = seat {
@@ -524,6 +834,10 @@ fn settle_pending_sit(
     mut interaction: ResMut<DesktopPetInteraction>,
     mut environment: ResMut<DesktopEnvironment>,
 ) {
+    // Commit as soon as the evaluated Sitting_Enter pose provides a Seat
+    // anchor. Once attached, Phase 4 keeps the animated Seat aligned to the
+    // support while the entry clip continues, eliminating the old
+    // "floating first, snap on SittingLoop" behavior.
     if !environment.settle_pending_sit() {
         return;
     }
@@ -628,6 +942,68 @@ fn ray_capsule_distance(
     nearest
 }
 
+fn vrm_bone_position(
+    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    name: &str,
+) -> Option<Vec3> {
+    bone_query
+        .iter()
+        .find_map(|(bone, transform)| (bone.as_str() == name).then(|| transform.translation()))
+}
+
+fn project_vrm_bone(
+    name: &str,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+) -> Option<Vec2> {
+    let world = vrm_bone_position(bone_query, name)?;
+    camera.world_to_viewport(camera_transform, world).ok()
+}
+
+/// Screen-space semantic head hit-test.
+///
+/// The humanoid `head` joint is not guaranteed to sit at the visual center of
+/// a VRM's hair/face. Eye bones, however, are much more stable visually. We
+/// therefore build a small ellipse around the rendered face using the eye
+/// separation as scale. This matches what the user actually sees and avoids
+/// the old "click empty air above the head" problem.
+fn head_part_at_cursor(
+    cursor: Vec2,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+) -> bool {
+    let left_eye = project_vrm_bone("leftEye", camera, camera_transform, bone_query);
+    let right_eye = project_vrm_bone("rightEye", camera, camera_transform, bone_query);
+
+    let (center, radius_x, radius_y) = match (left_eye, right_eye) {
+        (Some(left), Some(right)) => {
+            let eye_mid = (left + right) * 0.5;
+            let eye_distance = left.distance(right).max(1.0);
+
+            // Visual head center is slightly above the eye line in viewport
+            // coordinates (Y grows downward).
+            let radius_x = (eye_distance * 2.0).clamp(30.0, 48.0);
+            let radius_y = (radius_x * 1.20).clamp(36.0, 58.0);
+            let center = eye_mid + Vec2::new(0.0, -radius_y * 0.22);
+            (center, radius_x, radius_y)
+        }
+        _ => {
+            // VRMs without eye bones still get a conservative fallback based
+            // on the projected head joint, shifted down toward the visible face.
+            let Some(head) = project_vrm_bone("head", camera, camera_transform, bone_query) else {
+                return false;
+            };
+            (head + Vec2::new(0.0, 10.0), 34.0, 42.0)
+        }
+    };
+
+    let dx = (cursor.x - center.x) / radius_x;
+    let dy = (cursor.y - center.y) / radius_y;
+    dx * dx + dy * dy <= 1.0
+}
+
 fn nearest_nera_body_part(
     ray_origin: Vec3,
     ray_dir: Vec3,
@@ -682,10 +1058,10 @@ fn attach_bone_colliders(
 
     for (entity, bone) in &bones {
         let collider = match bone.as_str() {
-            "head" => Some(NeraCollider {
-                body_part: Head,
-                shape: NeraColliderShape::Sphere { radius: 0.18 },
-            }),
+            // Head is intentionally handled in screen-space by
+            // `head_part_at_cursor()`. A generic 3D sphere around the humanoid
+            // head joint proved too dependent on how each VRM places that joint.
+            "head" => None,
 
             "hips" => Some(NeraCollider {
                 body_part: Torso,
@@ -786,14 +1162,29 @@ fn update_click_through(
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
     let hovered_body_part = cursor_position_in_nera_window(&environment)
-        .and_then(|cursor_pos| camera.viewport_to_world(camera_transform, cursor_pos).ok())
-        .and_then(|ray| {
-            nearest_nera_body_part(
-                ray.origin,
-                ray.direction.into(),
-                &colliders_query,
+        .and_then(|cursor_pos| {
+            // Head gets a visual screen-space test first. Other body regions
+            // continue to use deterministic nearest 3D collider distance.
+            if head_part_at_cursor(
+                cursor_pos,
+                camera,
+                camera_transform,
                 &bone_query,
-            )
+            ) {
+                return Some(BodyPart::Head);
+            }
+
+            camera
+                .viewport_to_world(camera_transform, cursor_pos)
+                .ok()
+                .and_then(|ray| {
+                    nearest_nera_body_part(
+                        ray.origin,
+                        ray.direction.into(),
+                        &colliders_query,
+                        &bone_query,
+                    )
+                })
         });
 
     hovered.part = hovered_body_part;
@@ -819,6 +1210,138 @@ fn update_click_through(
 
     interaction.state = next_state;
     cursor_options.hit_test = hovering;
+}
+
+// -----------------------------------------------------------------------------
+// Phase 5.4 Head Pat Gesture
+// -----------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+fn detect_head_pat(
+    mouse: Res<ButtonInput<MouseButton>>,
+    hovered: Res<HoveredBodyPart>,
+    environment: Res<DesktopEnvironment>,
+    mut gesture: ResMut<HeadPatGesture>,
+    mut head_patted: MessageWriter<NeraHeadPatted>,
+) {
+    // Click/drag/right-click keep their own gesture ownership.
+    if mouse.pressed(MouseButton::Left) || mouse.pressed(MouseButton::Right) {
+        gesture.reset_stroke();
+        return;
+    }
+
+    if hovered.part != Some(BodyPart::Head) {
+        gesture.reset_stroke();
+        return;
+    }
+
+    let Some(point) = platform::global_cursor_position() else {
+        gesture.reset_stroke();
+        return;
+    };
+
+    let cursor = IVec2::new(point.x, point.y);
+    let now = Instant::now();
+
+    if gesture
+        .cooldown_until
+        .map(|until| now < until)
+        .unwrap_or(false)
+    {
+        gesture.last_cursor = Some(cursor);
+        return;
+    }
+
+    if gesture
+        .started_at
+        .map(|started| now.duration_since(started) > HEAD_STROKE_WINDOW)
+        .unwrap_or(true)
+    {
+        gesture.begin_stroke(cursor, now);
+        return;
+    }
+
+    let Some(previous) = gesture.last_cursor else {
+        gesture.begin_stroke(cursor, now);
+        return;
+    };
+
+    let delta = cursor - previous;
+    gesture.last_cursor = Some(cursor);
+
+    let scale = environment.nera_scale_factor.max(0.25) as f32;
+    let jitter =
+        (HEAD_STROKE_JITTER_AT_96_DPI * scale).round().max(1.0) as i32;
+    let segment_min =
+        (HEAD_STROKE_MIN_SEGMENT_AT_96_DPI * scale).round().max(1.0) as i32;
+    let min_travel =
+        HEAD_STROKE_MIN_TRAVEL_AT_96_DPI * scale;
+
+    let delta_f = Vec2::new(delta.x as f32, delta.y as f32);
+    let frame_travel = delta_f.length();
+
+    if frame_travel < jitter as f32 {
+        return;
+    }
+
+    gesture.total_travel += frame_travel;
+
+    // Track reversal independently on X and Y so horizontal, vertical, and
+    // natural diagonal/circular petting gestures all work.
+    if delta.x.abs() >= jitter {
+        let direction = delta.x.signum() as i8;
+
+        if gesture.x_direction == 0 || gesture.x_direction == direction {
+            gesture.x_direction = direction;
+            gesture.x_segment += delta.x.abs();
+        } else {
+            if gesture.x_segment >= segment_min {
+                gesture.x_reversals =
+                    gesture.x_reversals.saturating_add(1);
+            }
+            gesture.x_direction = direction;
+            gesture.x_segment = delta.x.abs();
+        }
+    }
+
+    if delta.y.abs() >= jitter {
+        let direction = delta.y.signum() as i8;
+
+        if gesture.y_direction == 0 || gesture.y_direction == direction {
+            gesture.y_direction = direction;
+            gesture.y_segment += delta.y.abs();
+        } else {
+            if gesture.y_segment >= segment_min {
+                gesture.y_reversals =
+                    gesture.y_reversals.saturating_add(1);
+            }
+            gesture.y_direction = direction;
+            gesture.y_segment = delta.y.abs();
+        }
+    }
+
+    let reversals =
+        gesture.x_reversals.saturating_add(gesture.y_reversals);
+
+    if gesture.total_travel < min_travel
+        || reversals < HEAD_STROKE_MIN_REVERSALS
+    {
+        return;
+    }
+
+    head_patted.write(NeraHeadPatted {
+        pointer: nera_pointer_position(cursor, &environment),
+    });
+
+    info!(
+        "Nera head-stroke recognized: travel={:.1}px x_rev={} y_rev={}",
+        gesture.total_travel,
+        gesture.x_reversals,
+        gesture.y_reversals,
+    );
+
+    gesture.cooldown_until = Some(now + HEAD_STROKE_COOLDOWN);
+    gesture.reset_stroke();
 }
 
 // -----------------------------------------------------------------------------
@@ -1073,7 +1596,7 @@ fn drag_nera_window(
                 && !vertical_blocked
             {
                 // IMPORTANT: this does NOT move the HWND. It only creates a
-                // Pending* placement. sync_animation_base_pose switches to sitting first;
+                // Pending* placement. Sitting_Enter owns the landing transition before Seat calibration;
                 // Last then samples Seat and commits the attachment later.
                 environment.try_begin_sit_from_probe();
             }

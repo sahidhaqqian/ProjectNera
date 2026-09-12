@@ -1,4 +1,4 @@
-//! Phase 5.1–5.2 — semantic interaction messages + body-part vocabulary.
+//! Phase 5.1–5.4 — semantic interaction messages + body-part/reaction vocabulary.
 //!
 //! This module owns the public vocabulary produced by Nera's existing input
 //! pipeline. The actual native-window drag/sitting mechanics stay in `main.rs`
@@ -84,6 +84,15 @@ pub(crate) struct NeraDragged {
     pub(crate) delta: IVec2,
 }
 
+/// Semantic head-stroke/pat gesture emitted after deliberate back-and-forth
+/// cursor movement over the Head collider. Horizontal, vertical, and natural
+/// diagonal strokes are accepted. It is mouse-button-free so it cannot race
+/// the already-locked click-vs-drag classifier.
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct NeraHeadPatted {
+    pub(crate) pointer: NeraPointerPosition,
+}
+
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct NeraReleased {
     pub(crate) pointer: NeraPointerPosition,
@@ -99,6 +108,7 @@ impl Plugin for InteractionPlugin {
             .add_message::<NeraRightClicked>()
             .add_message::<NeraDragStarted>()
             .add_message::<NeraDragged>()
+            .add_message::<NeraHeadPatted>()
             .add_message::<NeraReleased>()
             // Debug consumer only. Keeping it in PostUpdate guarantees the
             // Update-stage producer has already emitted this frame's messages.
@@ -111,6 +121,7 @@ fn log_interaction_messages(
     mut right_clicked: MessageReader<NeraRightClicked>,
     mut drag_started: MessageReader<NeraDragStarted>,
     mut dragged: MessageReader<NeraDragged>,
+    mut head_patted: MessageReader<NeraHeadPatted>,
     mut released: MessageReader<NeraReleased>,
 ) {
     for event in clicked.read() {
@@ -139,6 +150,13 @@ fn log_interaction_messages(
             "Nera interaction -> Dragged @ {:?}, delta={:?}",
             event.screen,
             event.delta
+        );
+    }
+
+    for event in head_patted.read() {
+        info!(
+            "Nera interaction -> HeadStroke screen={:?} local={:?}",
+            event.pointer.screen, event.pointer.local
         );
     }
 
