@@ -1,7 +1,12 @@
 mod animation;
+mod alarm;
+
+#[cfg(target_os = "windows")]
+mod action_menu;
 mod environment;
 mod interaction;
 mod platform;
+mod presentation;
 
 #[cfg(target_os = "windows")]
 mod tray;
@@ -10,6 +15,7 @@ use animation::{
     NeraAnimationPlugin,
     NeraAnimationState,
     apply_animation_state,
+    register_angry_animation,
     register_death_animation,
     register_floating_animation,
     register_head_stroke_animation,
@@ -17,9 +23,13 @@ use animation::{
     register_hit_head_animation,
     register_idle_animation,
     register_praying_animation,
+    register_sad_animation,
     register_sitting_enter_animation,
     register_sitting_exit_animation,
     register_sitting_loop_animation,
+    register_surprised_animation,
+    register_thinking_animation,
+    register_wave_animation,
     sync_environment_animation_state,
     sync_interaction_animation_actions,
     tick_animation_actions,
@@ -67,6 +77,11 @@ use bevy::{
 };
 
 use bevy_vrm1::prelude::*;
+
+use presentation::PresentationPlugin;
+
+#[cfg(target_os = "windows")]
+use action_menu::ActionMenuPlugin;
 
 #[cfg(target_os = "windows")]
 use tray::TrayPlugin;
@@ -122,6 +137,20 @@ const SITTING_LOOP_VRMA_PATH: &str =
     "animations/animasi_basic/Sitting_Idle_Loop.vrma";
 const SITTING_EXIT_VRMA_PATH: &str =
     "animations/animasi_basic/Sitting_Exit.vrma";
+
+// Phase 5.5 menu-triggered animation library.
+// Only these five are preloaded; the hundreds of other downloaded VRMAs stay
+// as stock and consume no runtime animation slots yet.
+const MENU_WAVE_VRMA_PATH: &str =
+    "animations/Clawatar_animations/161_Waving.vrma";
+const MENU_THINKING_VRMA_PATH: &str =
+    "animations/VRMA/Thinking.vrma";
+const MENU_ANGRY_VRMA_PATH: &str =
+    "animations/VRMA/Angry.vrma";
+const MENU_SAD_VRMA_PATH: &str =
+    "animations/VRMA/Sad.vrma";
+const MENU_SURPRISED_VRMA_PATH: &str =
+    "animations/VRMA/Surprised.vrma";
 
 /// VrmBone `foot` is located around the ankle; shift the standing support
 /// plane down to the visible sole in logical window pixels.
@@ -335,10 +364,12 @@ fn main() {
         DesktopEnvironmentPlugin,
         InteractionPlugin,
         NeraAnimationPlugin,
+        PresentationPlugin,
+        alarm::AlarmPlugin,
     ));
 
     #[cfg(target_os = "windows")]
-    app.add_plugins(TrayPlugin);
+    app.add_plugins((TrayPlugin, ActionMenuPlugin));
 
     app.insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
@@ -357,7 +388,7 @@ fn main() {
                 // Native placement changes first, then Phase 5.3 derives the
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
-                drag_nera_window,
+                drag_nera_window.run_if(presentation::desktop_pet_active),
                 sync_environment_animation_state,
                 sync_interaction_animation_actions,
                 tick_animation_actions,
@@ -372,7 +403,7 @@ fn main() {
         )
         .add_systems(
             PostUpdate,
-            detect_head_pat.after(update_click_through),
+            detect_head_pat.after(update_click_through).run_if(presentation::desktop_pet_active),
         )
         // Pose-first support calibration: Sitting_Enter starts in Update,
         // then Last samples its animated Seat and commits the attachment.
@@ -381,7 +412,7 @@ fn main() {
             Last,
             (
                 update_avatar_anchors,
-                settle_pending_sit,
+                settle_pending_sit.run_if(presentation::desktop_pet_active),
             )
                 .chain(),
         )
@@ -511,6 +542,41 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
                     VrmaHandle(asset_server.load(SITTING_EXIT_VRMA_PATH)),
                 ))
                 .observe(register_sitting_exit_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Menu Wave"),
+                    VrmaHandle(asset_server.load(MENU_WAVE_VRMA_PATH)),
+                ))
+                .observe(register_wave_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Menu Thinking"),
+                    VrmaHandle(asset_server.load(MENU_THINKING_VRMA_PATH)),
+                ))
+                .observe(register_thinking_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Menu Angry"),
+                    VrmaHandle(asset_server.load(MENU_ANGRY_VRMA_PATH)),
+                ))
+                .observe(register_angry_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Menu Sad"),
+                    VrmaHandle(asset_server.load(MENU_SAD_VRMA_PATH)),
+                ))
+                .observe(register_sad_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Menu Surprised"),
+                    VrmaHandle(asset_server.load(MENU_SURPRISED_VRMA_PATH)),
+                ))
+                .observe(register_surprised_animation);
         });
 }
 

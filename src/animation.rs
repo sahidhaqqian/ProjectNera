@@ -24,6 +24,12 @@ use crate::{
     },
 };
 
+#[cfg(target_os = "windows")]
+use crate::action_menu::{
+    AnimationMenuChoice,
+    NeraActionMenuCommand,
+};
+
 /// Three deliberate head hits inside this window trigger Death01.
 /// The combo expires naturally so occasional clicks do not accumulate forever.
 const DAMAGE_COMBO_WINDOW: Duration = Duration::from_millis(2500);
@@ -35,6 +41,13 @@ const REACTION_BLEND: Duration = Duration::from_millis(140);
 const HEAD_STROKE_BLEND: Duration = Duration::from_millis(180);
 const SUPPORT_BLEND: Duration = Duration::from_millis(100);
 const DEATH_BLEND: Duration = Duration::from_millis(160);
+const ALARM_BLEND: Duration = Duration::from_millis(120);
+
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AlarmAnimationCommand {
+    Start,
+    Stop,
+}
 
 // -----------------------------------------------------------------------------
 // Animation vocabulary
@@ -54,8 +67,11 @@ pub(crate) enum TemporaryAction {
     HitChest,
     HeadStroke,
     Death,
-    /// Phase 5.7: persistent while the right-click menu is open.
-    #[allow(dead_code)]
+    AlarmWave,
+    AlarmJump,
+    #[cfg(target_os = "windows")]
+    MenuAnimation(AnimationMenuChoice),
+    /// Phase 5.5: persistent while the right-click menu is open.
     Praying,
 }
 
@@ -72,6 +88,8 @@ enum AnimationPriority {
     Menu = 70,
     Floating = 80,
     Critical = 90,
+    Alarm = 100,
+    AlarmIntro = 110,
 }
 
 impl TemporaryAction {
@@ -81,8 +99,12 @@ impl TemporaryAction {
                 AnimationPriority::Reaction
             }
             Self::Praying => AnimationPriority::Menu,
+            #[cfg(target_os = "windows")]
+            Self::MenuAnimation(_) => AnimationPriority::Reaction,
             Self::Floating => AnimationPriority::Floating,
             Self::Death => AnimationPriority::Critical,
+            Self::AlarmWave => AnimationPriority::Alarm,
+            Self::AlarmJump => AnimationPriority::AlarmIntro,
         }
     }
 
@@ -120,6 +142,10 @@ enum VisualState {
     HitChest,
     HeadStroke,
     Death,
+    AlarmWave,
+    AlarmJump,
+    #[cfg(target_os = "windows")]
+    MenuAnimation(AnimationMenuChoice),
     Praying,
 }
 
@@ -170,6 +196,42 @@ impl NeraAnimationState {
             info!("Nera base pose: {:?} -> {:?}", self.base_pose, pose);
             self.base_pose = pose;
         }
+    }
+
+    /// Phase 5.55 Presentation Mode temporarily leaves the desktop support
+    /// world. Do not play SittingExit: Attention/Alarm owns the avatar now.
+    pub(crate) fn suspend_support_for_attention(&mut self) {
+        self.support_transition = None;
+        self.was_on_sitting_surface = false;
+        self.set_base_pose(BasePose::Idle);
+        self.bump_revision();
+
+        info!("Nera support suspended for Attention");
+    }
+
+    /// Restore the desktop base pose without replaying SittingEnter.
+    ///
+    /// The attachment geometry itself is restored by PresentationState. This
+    /// method only re-synchronizes the animation state with that snapshot.
+    pub(crate) fn restore_support_after_attention(
+        &mut self,
+        sitting: bool,
+    ) {
+        self.support_transition = None;
+        self.was_on_sitting_surface = sitting;
+
+        self.set_base_pose(if sitting {
+            BasePose::Sitting
+        } else {
+            BasePose::Idle
+        });
+
+        self.bump_revision();
+
+        info!(
+            "Nera support restored after Attention -> {:?}",
+            self.base_pose
+        );
     }
 
     fn start_persistent_action(&mut self, action: TemporaryAction) {
@@ -467,6 +529,12 @@ impl NeraAnimationState {
                 TemporaryAction::HitChest => VisualState::HitChest,
                 TemporaryAction::HeadStroke => VisualState::HeadStroke,
                 TemporaryAction::Death => VisualState::Death,
+                TemporaryAction::AlarmWave => VisualState::AlarmWave,
+                TemporaryAction::AlarmJump => VisualState::AlarmJump,
+                #[cfg(target_os = "windows")]
+                TemporaryAction::MenuAnimation(choice) => {
+                    VisualState::MenuAnimation(choice)
+                }
                 TemporaryAction::Praying => VisualState::Praying,
             };
         }
@@ -485,16 +553,22 @@ impl NeraAnimationState {
     /// applies LookAt after animation, so leaving LookAt enabled would partly
     /// overwrite ShakeHead/HitHead every frame.
     pub(crate) fn suppresses_look_at(&self) -> bool {
-        matches!(
-            self.visual_state(),
+        match self.visual_state() {
             VisualState::HitHead
-                | VisualState::HitChest
-                | VisualState::HeadStroke
-                | VisualState::Death
-                | VisualState::Praying
-                | VisualState::SittingEnter
-                | VisualState::SittingExit
-        )
+            | VisualState::HitChest
+            | VisualState::HeadStroke
+            | VisualState::Death
+            | VisualState::AlarmWave
+            | VisualState::AlarmJump
+            | VisualState::Praying
+            | VisualState::SittingEnter
+            | VisualState::SittingExit => true,
+
+            #[cfg(target_os = "windows")]
+            VisualState::MenuAnimation(_) => true,
+
+            _ => false,
+        }
     }
 }
 
@@ -513,6 +587,8 @@ pub(crate) struct NeraAnimationClips {
     idle: Option<ClipSlot>,
     floating: Option<ClipSlot>,
     death: Option<ClipSlot>,
+    alarm_wave: Option<ClipSlot>,
+    alarm_jump: Option<ClipSlot>,
     hit_head: Option<ClipSlot>,
     hit_chest: Option<ClipSlot>,
     head_stroke: Option<ClipSlot>,
@@ -520,6 +596,17 @@ pub(crate) struct NeraAnimationClips {
     sitting_enter: Option<ClipSlot>,
     sitting_loop: Option<ClipSlot>,
     sitting_exit: Option<ClipSlot>,
+
+    #[cfg(target_os = "windows")]
+    wave: Option<ClipSlot>,
+    #[cfg(target_os = "windows")]
+    thinking: Option<ClipSlot>,
+    #[cfg(target_os = "windows")]
+    angry: Option<ClipSlot>,
+    #[cfg(target_os = "windows")]
+    sad: Option<ClipSlot>,
+    #[cfg(target_os = "windows")]
+    surprised: Option<ClipSlot>,
 }
 
 #[derive(Resource, Default)]
@@ -529,13 +616,34 @@ pub(crate) struct NeraAnimationPlayback {
     revision: u64,
 }
 
+/// Alarm may trigger before asynchronous VRMA loading has finished.
+/// Keep the request pending instead of entering an unavailable VisualState.
+#[derive(Resource, Default)]
+struct AlarmAnimationRuntime {
+    requested: bool,
+    started: bool,
+    waiting_logged: bool,
+}
+
 pub(crate) struct NeraAnimationPlugin;
 
 impl Plugin for NeraAnimationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NeraAnimationState>()
             .init_resource::<NeraAnimationClips>()
-            .init_resource::<NeraAnimationPlayback>();
+            .init_resource::<NeraAnimationPlayback>()
+            .init_resource::<AlarmAnimationRuntime>()
+            .add_message::<AlarmAnimationCommand>()
+            .add_systems(
+                Update,
+                sync_alarm_animation,
+            );
+
+        #[cfg(target_os = "windows")]
+        app.add_systems(
+            Update,
+            sync_action_menu_animation,
+        );
     }
 }
 
@@ -567,6 +675,8 @@ macro_rules! register_clip {
 register_clip!(register_idle_animation, idle, "Idle");
 register_clip!(register_floating_animation, floating, "Floating");
 register_clip!(register_death_animation, death, "Death01");
+register_clip!(register_alarm_wave_animation, alarm_wave, "Alarm/Wave");
+register_clip!(register_alarm_jump_animation, alarm_jump, "Alarm/JumpHappy");
 register_clip!(register_hit_head_animation, hit_head, "HitHead");
 register_clip!(register_hit_chest_animation, hit_chest, "HitChest");
 register_clip!(
@@ -589,6 +699,21 @@ register_clip!(
     register_sitting_exit_animation,
     sitting_exit,
     "SittingExit"
+);
+
+#[cfg(target_os = "windows")]
+register_clip!(register_wave_animation, wave, "Menu/Wave");
+#[cfg(target_os = "windows")]
+register_clip!(register_thinking_animation, thinking, "Menu/Thinking");
+#[cfg(target_os = "windows")]
+register_clip!(register_angry_animation, angry, "Menu/Angry");
+#[cfg(target_os = "windows")]
+register_clip!(register_sad_animation, sad, "Menu/Sad");
+#[cfg(target_os = "windows")]
+register_clip!(
+    register_surprised_animation,
+    surprised,
+    "Menu/Surprised"
 );
 
 // -----------------------------------------------------------------------------
@@ -692,6 +817,124 @@ pub(crate) fn sync_interaction_animation_actions(
     }
 }
 
+pub(crate) fn sync_alarm_animation(
+    mut commands: MessageReader<AlarmAnimationCommand>,
+    clips: Res<NeraAnimationClips>,
+    mut state: ResMut<NeraAnimationState>,
+    mut runtime: ResMut<AlarmAnimationRuntime>,
+) {
+    for command in commands.read() {
+        match command {
+            AlarmAnimationCommand::Start => {
+                runtime.requested = true;
+                runtime.started = false;
+                runtime.waiting_logged = false;
+
+                // Clear any stale alarm action from an earlier interrupted
+                // presentation before starting a new sequence.
+                state.finish_action(TemporaryAction::AlarmJump);
+                state.finish_action(TemporaryAction::AlarmWave);
+            }
+
+            AlarmAnimationCommand::Stop => {
+                runtime.requested = false;
+                runtime.started = false;
+                runtime.waiting_logged = false;
+
+                state.finish_action(TemporaryAction::AlarmJump);
+                state.finish_action(TemporaryAction::AlarmWave);
+                state.bump_revision();
+            }
+        }
+    }
+
+    if !runtime.requested || runtime.started {
+        return;
+    }
+
+    let (Some(wave), Some(jump)) =
+        (clips.alarm_wave, clips.alarm_jump)
+    else {
+        if !runtime.waiting_logged {
+            info!(
+                "Nera alarm animation waiting for Wave + JumpHappy VRMAs..."
+            );
+            runtime.waiting_logged = true;
+        }
+        return;
+    };
+
+    // Persistent Wave sits underneath the one-shot intro.
+    state.start_persistent_action(TemporaryAction::AlarmWave);
+
+    // Jump has higher priority. When its *real loaded clip duration* expires,
+    // visual_state() naturally falls back to the persistent Wave.
+    state.request_one_shot(
+        TemporaryAction::AlarmJump,
+        jump.duration,
+    );
+
+    runtime.started = true;
+    runtime.waiting_logged = false;
+
+    info!(
+        "Nera alarm animation started | jump={:?} wave={:?}",
+        jump.duration,
+        wave.duration,
+    );
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn sync_action_menu_animation(
+    mut commands: MessageReader<NeraActionMenuCommand>,
+    clips: Res<NeraAnimationClips>,
+    mut state: ResMut<NeraAnimationState>,
+) {
+    for command in commands.read() {
+        let NeraActionMenuCommand::Animation(choice) = *command else {
+            // Alarm is consumed by Phase 5.6. Settings gets its own UI later.
+            continue;
+        };
+
+        if choice == AnimationMenuChoice::ResetBasePose {
+            // Do not fake a Sitting pose in mid-air. Reset means: return to
+            // the correct environment-owned base pose (Idle or real Sitting).
+            state.active_actions.retain(|active| {
+                !active.action.is_reaction()
+            });
+            state.bump_revision();
+
+            info!(
+                "Nera menu animation reset -> base {:?}",
+                state.base_pose()
+            );
+            continue;
+        }
+
+        let clip = match choice {
+            AnimationMenuChoice::Wave => clips.wave,
+            AnimationMenuChoice::Thinking => clips.thinking,
+            AnimationMenuChoice::Angry => clips.angry,
+            AnimationMenuChoice::Sad => clips.sad,
+            AnimationMenuChoice::Surprised => clips.surprised,
+            AnimationMenuChoice::ResetBasePose => None,
+        };
+
+        let Some(clip) = clip else {
+            warn!(
+                "Nera menu animation {:?} requested before its VRMA loaded",
+                choice
+            );
+            continue;
+        };
+
+        state.request_one_shot(
+            TemporaryAction::MenuAnimation(choice),
+            clip.duration,
+        );
+    }
+}
+
 pub(crate) fn tick_animation_actions(
     time: Res<Time>,
     mut state: ResMut<NeraAnimationState>,
@@ -735,6 +978,51 @@ fn clip_for_visual(
         VisualState::Death => {
             (clips.death, RepeatAnimation::Count(1), "Death01")
         }
+        VisualState::AlarmJump => {
+            (
+                clips.alarm_jump,
+                RepeatAnimation::Count(1),
+                "Alarm/JumpHappy",
+            )
+        }
+        VisualState::AlarmWave => {
+            (
+                clips.alarm_wave,
+                RepeatAnimation::Forever,
+                "Alarm/Wave",
+            )
+        }
+        #[cfg(target_os = "windows")]
+        VisualState::MenuAnimation(choice) => {
+            match choice {
+                AnimationMenuChoice::Wave => {
+                    (clips.wave, RepeatAnimation::Count(1), "Menu/Wave")
+                }
+                AnimationMenuChoice::Thinking => {
+                    (
+                        clips.thinking,
+                        RepeatAnimation::Count(1),
+                        "Menu/Thinking",
+                    )
+                }
+                AnimationMenuChoice::Angry => {
+                    (clips.angry, RepeatAnimation::Count(1), "Menu/Angry")
+                }
+                AnimationMenuChoice::Sad => {
+                    (clips.sad, RepeatAnimation::Count(1), "Menu/Sad")
+                }
+                AnimationMenuChoice::Surprised => {
+                    (
+                        clips.surprised,
+                        RepeatAnimation::Count(1),
+                        "Menu/Surprised",
+                    )
+                }
+                AnimationMenuChoice::ResetBasePose => {
+                    (None, RepeatAnimation::Forever, "Menu/Reset")
+                }
+            }
+        }
         VisualState::Praying => {
             (clips.praying, RepeatAnimation::Forever, "Praying")
         }
@@ -756,6 +1044,9 @@ fn transition_for_visual(visual: VisualState) -> Duration {
         VisualState::HeadStroke => HEAD_STROKE_BLEND,
         VisualState::HitHead | VisualState::HitChest => REACTION_BLEND,
         VisualState::Death => DEATH_BLEND,
+        VisualState::AlarmJump | VisualState::AlarmWave => ALARM_BLEND,
+        #[cfg(target_os = "windows")]
+        VisualState::MenuAnimation(_) => REACTION_BLEND,
         VisualState::SittingEnter | VisualState::SittingExit => SUPPORT_BLEND,
         VisualState::Idle
         | VisualState::SittingLoop
@@ -998,6 +1289,109 @@ mod tests {
 
         assert_eq!(state.damage_hit_count, 0);
         assert!(state.damage_combo_remaining.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn action_menu_praying_returns_to_base_when_closed() {
+        let mut state = NeraAnimationState::default();
+
+        state.set_praying_menu(true);
+        assert_eq!(state.visual_state(), VisualState::Praying);
+
+        state.set_praying_menu(false);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn menu_animation_is_a_timed_reaction() {
+        let mut state = NeraAnimationState::default();
+
+        state.request_one_shot(
+            TemporaryAction::MenuAnimation(AnimationMenuChoice::Wave),
+            Duration::from_millis(500),
+        );
+
+        assert_eq!(
+            state.visual_state(),
+            VisualState::MenuAnimation(AnimationMenuChoice::Wave)
+        );
+
+        state.advance(Duration::from_millis(500));
+
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn attention_suspends_sitting_without_exit_transition() {
+        let mut state = NeraAnimationState::default();
+
+        state.observe_sitting_surface(
+            true,
+            Duration::from_millis(300),
+            Duration::from_millis(300),
+        );
+
+        state.suspend_support_for_attention();
+
+        assert_eq!(state.base_pose(), BasePose::Idle);
+        assert!(state.support_transition.is_none());
+        assert!(!state.was_on_sitting_surface);
+    }
+
+    #[test]
+    fn attention_restore_returns_directly_to_sitting_base() {
+        let mut state = NeraAnimationState::default();
+
+        state.suspend_support_for_attention();
+        state.restore_support_after_attention(true);
+
+        assert_eq!(state.base_pose(), BasePose::Sitting);
+        assert!(state.support_transition.is_none());
+        assert!(state.was_on_sitting_surface);
+    }
+
+    #[test]
+    fn alarm_jump_overrides_wave_then_wave_remains() {
+        let mut state = NeraAnimationState::default();
+
+        state.start_persistent_action(TemporaryAction::AlarmWave);
+        state.request_one_shot(
+            TemporaryAction::AlarmJump,
+            Duration::from_millis(500),
+        );
+
+        assert_eq!(state.visual_state(), VisualState::AlarmJump);
+
+        state.advance(Duration::from_millis(500));
+
+        assert_eq!(state.visual_state(), VisualState::AlarmWave);
+    }
+
+    #[test]
+    fn stopping_alarm_returns_to_base_pose() {
+        let mut state = NeraAnimationState::default();
+
+        state.start_persistent_action(TemporaryAction::AlarmWave);
+        state.request_one_shot(
+            TemporaryAction::AlarmJump,
+            Duration::from_millis(500),
+        );
+
+        state.finish_action(TemporaryAction::AlarmJump);
+        state.finish_action(TemporaryAction::AlarmWave);
+
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn alarm_runtime_starts_pending_not_started() {
+        let runtime = AlarmAnimationRuntime::default();
+
+        assert!(!runtime.requested);
+        assert!(!runtime.started);
+        assert!(!runtime.waiting_logged);
     }
 
 }

@@ -11,6 +11,8 @@ bevy = { version = "0.19", default-features = false, features = [
     "3d_bevy_render",
     "jpeg",
     "png",
+    "bevy_audio",
+    "mp3",
 ] }
 
 bevy_vrm1 = "0.9.2"

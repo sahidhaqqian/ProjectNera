@@ -29,6 +29,12 @@ use bevy::{
     },
 };
 
+use crate::action_menu::{
+    NeraActionMenuCommand,
+    WM_SHOW_NERA_ACTION_MENU,
+    show_nera_action_menu,
+};
+
 use windows::{
     core::{
         w,
@@ -194,20 +200,80 @@ fn send_tray_command(
 }
 
 // =============================================================================
+// Phase 5.5: typed Nera action-menu result channel
+// =============================================================================
+
+static ACTION_MENU_SENDER:
+    OnceLock<
+        Mutex<
+            Option<
+                Sender<Option<NeraActionMenuCommand>>,
+            >,
+        >,
+    > = OnceLock::new();
+
+pub(crate) fn send_action_menu_result(
+    result: Option<NeraActionMenuCommand>,
+) {
+    let Some(sender_slot) =
+        ACTION_MENU_SENDER.get()
+    else {
+        return;
+    };
+
+    let Ok(sender_guard) =
+        sender_slot.lock()
+    else {
+        return;
+    };
+
+    let Some(sender) =
+        sender_guard.as_ref()
+    else {
+        return;
+    };
+
+    let _ = sender.send(result);
+}
+
+// =============================================================================
 // Bevy-side runtime
 // =============================================================================
 
 #[derive(Resource)]
-struct TrayRuntime {
+pub(crate) struct TrayRuntime {
     receiver:
         Mutex<
             Receiver<TrayCommand>,
         >,
 
-    // HWND tidak disimpan langsung sebagai Resource,
-    // karena HWND dari windows-rs bukan Send/Sync.
+    action_menu_receiver:
+        Mutex<
+            Receiver<Option<NeraActionMenuCommand>>,
+        >,
+
+    // HWND is represented as an atomic raw value because windows-rs HWND is
+    // not a Send/Sync Bevy resource.
     hidden_hwnd:
         Arc<AtomicIsize>,
+}
+
+impl TrayRuntime {
+    pub(crate) fn hidden_hwnd_raw(&self) -> isize {
+        self.hidden_hwnd.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn drain_action_menu_results(
+        &self,
+    ) -> Vec<Option<NeraActionMenuCommand>> {
+        let Ok(receiver) =
+            self.action_menu_receiver.lock()
+        else {
+            return Vec::new();
+        };
+
+        receiver.try_iter().collect()
+    }
 }
 
 impl Drop for TrayRuntime {
@@ -262,6 +328,23 @@ fn start_system_tray(
         *slot = Some(sender);
     }
 
+    // Phase 5.5: typed Nera action-menu channel.
+    let (
+        action_menu_sender,
+        action_menu_receiver,
+    ) = mpsc::channel();
+
+    let sender_slot =
+        ACTION_MENU_SENDER.get_or_init(
+            || Mutex::new(None),
+        );
+
+    if let Ok(mut slot) =
+        sender_slot.lock()
+    {
+        *slot = Some(action_menu_sender);
+    }
+
     let hidden_hwnd =
         Arc::new(
             AtomicIsize::new(0),
@@ -305,6 +388,11 @@ fn start_system_tray(
             receiver:
                 Mutex::new(
                     receiver,
+                ),
+
+            action_menu_receiver:
+                Mutex::new(
+                    action_menu_receiver,
                 ),
 
             hidden_hwnd,
@@ -811,6 +899,27 @@ unsafe extern "system" fn tray_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // =========================================================================
+    // Phase 5.5: Nera Action Menu
+    // =========================================================================
+    if message == WM_SHOW_NERA_ACTION_MENU {
+        // The coordinates originated as i32 screen pixels. The cast through
+        // WPARAM/LPARAM preserves the low 32-bit two's-complement value, so
+        // negative coordinates on left/top secondary monitors survive.
+        let x = wparam.0 as i32;
+        let y = lparam.0 as i32;
+
+        if let Err(error) = unsafe {
+            show_nera_action_menu(hwnd, x, y)
+        } {
+            error!("Nera radial action menu error: {error:?}");
+            send_action_menu_result(None);
+        }
+
+        // The radial HWND is non-blocking. Its own WndProc sends the eventual
+        // typed result/cancel event through ACTION_MENU_SENDER.
+        return LRESULT(0);
+    }
     // =========================================================================
     // Explorer.exe restarted
     // =========================================================================
