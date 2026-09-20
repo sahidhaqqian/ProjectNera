@@ -1,6 +1,8 @@
 mod animation;
 mod alarm;
 
+mod desktop_physics;
+
 #[cfg(target_os = "windows")]
 mod action_menu;
 mod environment;
@@ -17,6 +19,8 @@ use animation::{
     apply_animation_state,
     register_angry_animation,
     register_death_animation,
+    register_falling_animation,
+    register_falling_to_landing_animation,
     register_floating_animation,
     register_head_stroke_animation,
     register_hit_chest_animation,
@@ -123,6 +127,10 @@ const FLOATING_VRMA_PATH: &str =
     "animations/animasi_basic/Floating.vrma";
 const DEATH_VRMA_PATH: &str =
     "animations/animasi_basic/Death01.vrma";
+const FALLING_VRMA_PATH: &str =
+    "animations/Falling.vrma";
+const FALLING_TO_LANDING_VRMA_PATH: &str =
+    "animations/Falling_To_Landing.vrma";
 const HIT_HEAD_VRMA_PATH: &str =
     "animations/animasi_basic/Hit_Head.vrma";
 const HIT_CHEST_VRMA_PATH: &str =
@@ -376,6 +384,7 @@ fn main() {
         .init_resource::<HoveredBodyPart>()
         .init_resource::<DeathGrounding>()
         .init_resource::<HeadPatGesture>()
+        .init_resource::<desktop_physics::DesktopPhysicsState>()
         .add_systems(
             Startup,
             (setup_camera, setup_lighting, spawn_nera),
@@ -389,6 +398,8 @@ fn main() {
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window.run_if(presentation::desktop_pet_active),
+                desktop_physics::update_desktop_physics
+                    .run_if(presentation::desktop_pet_active),
                 sync_environment_animation_state,
                 sync_interaction_animation_actions,
                 tick_animation_actions,
@@ -493,6 +504,20 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
                     VrmaHandle(asset_server.load(DEATH_VRMA_PATH)),
                 ))
                 .observe(register_death_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Falling"),
+                    VrmaHandle(asset_server.load(FALLING_VRMA_PATH)),
+                ))
+                .observe(register_falling_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Falling To Landing"),
+                    VrmaHandle(asset_server.load(FALLING_TO_LANDING_VRMA_PATH)),
+                ))
+                .observe(register_falling_to_landing_animation);
 
             parent
                 .spawn((

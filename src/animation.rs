@@ -63,6 +63,8 @@ pub(crate) enum BasePose {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
     Floating,
+    Falling,
+    Landing,
     HitHead,
     HitChest,
     HeadStroke,
@@ -87,6 +89,7 @@ enum AnimationPriority {
     Reaction = 60,
     Menu = 70,
     Floating = 80,
+    Physics = 85,
     Critical = 90,
     Alarm = 100,
     AlarmIntro = 110,
@@ -102,6 +105,7 @@ impl TemporaryAction {
             #[cfg(target_os = "windows")]
             Self::MenuAnimation(_) => AnimationPriority::Reaction,
             Self::Floating => AnimationPriority::Floating,
+            Self::Falling | Self::Landing => AnimationPriority::Physics,
             Self::Death => AnimationPriority::Critical,
             Self::AlarmWave => AnimationPriority::Alarm,
             Self::AlarmJump => AnimationPriority::AlarmIntro,
@@ -138,6 +142,8 @@ enum VisualState {
     SittingEnter,
     SittingExit,
     Floating,
+    Falling,
+    Landing,
     HitHead,
     HitChest,
     HeadStroke,
@@ -525,6 +531,8 @@ impl NeraAnimationState {
         if let Some(action) = self.highest_action() {
             return match action {
                 TemporaryAction::Floating => VisualState::Floating,
+                TemporaryAction::Falling => VisualState::Falling,
+                TemporaryAction::Landing => VisualState::Landing,
                 TemporaryAction::HitHead => VisualState::HitHead,
                 TemporaryAction::HitChest => VisualState::HitChest,
                 TemporaryAction::HeadStroke => VisualState::HeadStroke,
@@ -545,6 +553,61 @@ impl NeraAnimationState {
         }
     }
 
+    /// Phase 5.7 persistent freefall layer. It sits above drag Floating but
+    /// below critical/alarm actions, so existing high-priority behavior wins.
+    pub(crate) fn set_physics_falling(&mut self, falling: bool) {
+        let active = self
+            .active_actions
+            .iter()
+            .any(|active| active.action == TemporaryAction::Falling);
+
+        if falling == active {
+            return;
+        }
+
+        if falling {
+            // A new fall cancels any stale landing one-shot.
+            self.active_actions
+                .retain(|active| active.action != TemporaryAction::Landing);
+            self.start_persistent_action(TemporaryAction::Falling);
+        } else {
+            self.finish_action(TemporaryAction::Falling);
+        }
+    }
+
+    /// Cancel the complete Phase 5.7 motion layer when another native owner
+    /// takes over (dragging or Phase 4 sitting). This keeps input responsive
+    /// even if the landing one-shot had not finished yet.
+    pub(crate) fn cancel_physics_motion(&mut self) {
+        let before = self.active_actions.len();
+        self.active_actions.retain(|active| {
+            !matches!(
+                active.action,
+                TemporaryAction::Falling | TemporaryAction::Landing
+            )
+        });
+
+        if before != self.active_actions.len() {
+            self.bump_revision();
+            info!("Nera physics animation cancelled");
+        }
+    }
+
+    /// Switch Falling -> Falling_To_Landing using the real VRMA duration.
+    pub(crate) fn land_from_fall(&mut self, landing_duration: Duration) {
+        self.finish_action(TemporaryAction::Falling);
+        self.active_actions
+            .retain(|active| active.action != TemporaryAction::Landing);
+
+        if landing_duration.is_zero() {
+            warn!("Falling_To_Landing duration unavailable; landing directly to base pose");
+            self.bump_revision();
+            return;
+        }
+
+        self.request_one_shot(TemporaryAction::Landing, landing_duration);
+    }
+
     pub(crate) fn death_active(&self) -> bool {
         self.visual_state() == VisualState::Death
     }
@@ -554,7 +617,9 @@ impl NeraAnimationState {
     /// overwrite ShakeHead/HitHead every frame.
     pub(crate) fn suppresses_look_at(&self) -> bool {
         match self.visual_state() {
-            VisualState::HitHead
+            VisualState::Falling
+            | VisualState::Landing
+            | VisualState::HitHead
             | VisualState::HitChest
             | VisualState::HeadStroke
             | VisualState::Death
@@ -586,6 +651,8 @@ struct ClipSlot {
 pub(crate) struct NeraAnimationClips {
     idle: Option<ClipSlot>,
     floating: Option<ClipSlot>,
+    falling: Option<ClipSlot>,
+    falling_to_landing: Option<ClipSlot>,
     death: Option<ClipSlot>,
     alarm_wave: Option<ClipSlot>,
     alarm_jump: Option<ClipSlot>,
@@ -607,6 +674,14 @@ pub(crate) struct NeraAnimationClips {
     sad: Option<ClipSlot>,
     #[cfg(target_os = "windows")]
     surprised: Option<ClipSlot>,
+}
+
+impl NeraAnimationClips {
+    pub(crate) fn falling_to_landing_duration(&self) -> Duration {
+        self.falling_to_landing
+            .map(|clip| clip.duration)
+            .unwrap_or(Duration::ZERO)
+    }
 }
 
 #[derive(Resource, Default)]
@@ -674,6 +749,12 @@ macro_rules! register_clip {
 
 register_clip!(register_idle_animation, idle, "Idle");
 register_clip!(register_floating_animation, floating, "Floating");
+register_clip!(register_falling_animation, falling, "Falling");
+register_clip!(
+    register_falling_to_landing_animation,
+    falling_to_landing,
+    "FallingToLanding"
+);
 register_clip!(register_death_animation, death, "Death01");
 register_clip!(register_alarm_wave_animation, alarm_wave, "Alarm/Wave");
 register_clip!(register_alarm_jump_animation, alarm_jump, "Alarm/JumpHappy");
@@ -966,6 +1047,19 @@ fn clip_for_visual(
         VisualState::Floating => {
             (clips.floating, RepeatAnimation::Forever, "Floating")
         }
+        // Phase 5.7 uses the existing Floating pose while airborne. The
+        // dedicated Falling clip is intentionally not used because its body
+        // pose does not match the desktop-pet fall presentation.
+        VisualState::Falling => {
+            (clips.floating, RepeatAnimation::Forever, "Floating/Fall")
+        }
+        VisualState::Landing => {
+            (
+                clips.falling_to_landing,
+                RepeatAnimation::Count(1),
+                "FallingToLanding",
+            )
+        }
         VisualState::HitHead => {
             (clips.hit_head, RepeatAnimation::Count(1), "HitHead")
         }
@@ -1042,6 +1136,7 @@ fn base_fallback(
 fn transition_for_visual(visual: VisualState) -> Duration {
     match visual {
         VisualState::HeadStroke => HEAD_STROKE_BLEND,
+        VisualState::Falling | VisualState::Landing => SUPPORT_BLEND,
         VisualState::HitHead | VisualState::HitChest => REACTION_BLEND,
         VisualState::Death => DEATH_BLEND,
         VisualState::AlarmJump | VisualState::AlarmWave => ALARM_BLEND,
