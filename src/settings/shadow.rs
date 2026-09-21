@@ -191,6 +191,7 @@ fn apply_simple_shadow(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     bones: Query<(&VrmBone, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut layers: Query<(&SimpleShadowLayer, &mut Transform, &mut Visibility)>,
 ) {
@@ -204,7 +205,9 @@ fn apply_simple_shadow(
     let opacity = settings.shadow_opacity.clamp(0, 100) as f32 / 100.0;
     let softness = settings.shadow_softness.clamp(25, 100) as f32 / 100.0;
     let character_scale = settings.character_scale();
-    let ground = should_show.then(|| character_shadow_ground(&bones)).flatten();
+    let ground = should_show
+        .then(|| shadow_ground_with_user_offset(&settings, &bones, &camera_query))
+        .flatten();
     let visible = should_show && ground.is_some();
 
     for (layer, mut transform, mut visibility) in &mut layers {
@@ -278,12 +281,66 @@ fn character_shadow_ground(
     }
 }
 
+
+/// Apply the user-facing Ground Offset to the shadow support plane in render
+/// world space. Physics stores that setting in logical screen pixels, while
+/// the shadow receiver lives in 3D world units, so convert the requested
+/// vertical screen delta using the active 3D camera projection.
+///
+/// This keeps the desktop support calibration and the visible shadow using the
+/// same visual ground reference instead of letting Ground Offset move Nera
+/// against a shadow that is still pinned to the raw foot bones.
+fn shadow_ground_with_user_offset(
+    settings: &NeraSettings,
+    bones: &Query<(&VrmBone, &GlobalTransform)>,
+    camera_query: &Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+) -> Option<Vec3> {
+    let mut ground = character_shadow_ground(bones)?;
+    let offset_pixels = settings.ground_offset_logical();
+
+    if offset_pixels.abs() <= f32::EPSILON {
+        return Some(ground);
+    }
+
+    let Some((camera, camera_transform)) = camera_query.iter().next() else {
+        return Some(ground);
+    };
+
+    // Probe a small +Y world displacement around the current feet to derive
+    // the local logical-pixels-per-world-unit ratio. This remains correct if
+    // the camera projection/window resolution changes later.
+    const PROBE_WORLD_Y: f32 = 0.10;
+    let Ok(base_viewport) = camera.world_to_viewport(camera_transform, ground) else {
+        return Some(ground);
+    };
+    let Ok(up_viewport) = camera.world_to_viewport(
+        camera_transform,
+        ground + Vec3::Y * PROBE_WORLD_Y,
+    ) else {
+        return Some(ground);
+    };
+
+    // Viewport Y grows downward. Moving +Y in world space normally decreases
+    // viewport Y, so this value is positive for Nera's current camera.
+    let pixels_per_world_y =
+        (base_viewport.y - up_viewport.y) / PROBE_WORLD_Y;
+
+    if pixels_per_world_y.abs() > 0.001 {
+        // Positive Ground Offset means a contact point lower on screen.
+        // Therefore the receiver moves toward -Y in world space.
+        ground.y -= offset_pixels / pixels_per_world_y;
+    }
+
+    Some(ground)
+}
+
 fn apply_character_shadow_receiver(
     settings: Res<NeraSettings>,
     environment: Res<DesktopEnvironment>,
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     bones: Query<(&VrmBone, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut materials: ResMut<Assets<ShadowOnlyMaterial>>,
     mut receivers: Query<(
         &CharacterShadowReceiver,
@@ -299,7 +356,7 @@ fn apply_character_shadow_receiver(
     ) && settings.uses_character_shadow();
 
     let ground = if should_show {
-        character_shadow_ground(&bones)
+        shadow_ground_with_user_offset(&settings, &bones, &camera_query)
     } else {
         None
     };
