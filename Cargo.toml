@@ -38,10 +38,10 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [profile.dev]
-opt-level = 1
+opt-level = 0
 
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 1
 
 [profile.release]
 opt-level = 3

@@ -92,7 +92,7 @@ use windows::{
 use crate::{
     animation::NeraAnimationState,
     interaction::NeraRightClicked,
-    settings::OpenSettingsWindow,
+    settings::{OpenSettingsWindow, ReturnToActionMenu},
     tray::{
         send_action_menu_result,
         TrayRuntime,
@@ -367,6 +367,10 @@ fn native_state() -> &'static Mutex<NativeRadialState> {
 #[derive(Resource, Default)]
 struct ActionMenuState {
     open: bool,
+    /// Last root-menu center in desktop physical pixels. Settings uses this to
+    /// return to the same radial menu location instead of reopening under the
+    /// Settings-window cursor.
+    last_center: Option<IVec2>,
 }
 
 pub(crate) struct ActionMenuPlugin;
@@ -379,10 +383,48 @@ impl Plugin for ActionMenuPlugin {
                 Update,
                 (
                     open_action_menu,
+                    reopen_action_menu_from_settings,
                     poll_action_menu_result,
                 )
                     .chain(),
             );
+    }
+}
+
+fn post_action_menu_request(
+    screen: IVec2,
+    menu: &mut ActionMenuState,
+    animation: &mut NeraAnimationState,
+    tray: &TrayRuntime,
+) {
+    if menu.open {
+        return;
+    }
+
+    let hwnd_raw = tray.hidden_hwnd_raw();
+    if hwnd_raw == 0 {
+        warn!("Nera radial menu requested before tray HWND was ready");
+        return;
+    }
+
+    menu.open = true;
+    menu.last_center = Some(screen);
+    animation.set_praying_menu(true);
+
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    let posted = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(hwnd),
+            WM_SHOW_NERA_ACTION_MENU,
+            WPARAM(screen.x as usize),
+            LPARAM(screen.y as isize),
+        )
+    };
+
+    if posted.is_err() {
+        menu.open = false;
+        animation.set_praying_menu(false);
+        error!("Failed to post Nera radial-menu request");
     }
 }
 
@@ -397,37 +439,40 @@ fn open_action_menu(
     };
 
     for event in right_clicked.read() {
-        if menu.open {
-            continue;
-        }
-
-        let hwnd_raw = tray.hidden_hwnd_raw();
-        if hwnd_raw == 0 {
-            warn!("Nera radial menu requested before tray HWND was ready");
-            continue;
-        }
-
-        menu.open = true;
-        animation.set_praying_menu(true);
-
-        let screen = event.pointer.screen;
-        let hwnd = HWND(hwnd_raw as *mut c_void);
-
-        let posted = unsafe {
-            windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                Some(hwnd),
-                WM_SHOW_NERA_ACTION_MENU,
-                WPARAM(screen.x as usize),
-                LPARAM(screen.y as isize),
-            )
-        };
-
-        if posted.is_err() {
-            menu.open = false;
-            animation.set_praying_menu(false);
-            error!("Failed to post Nera radial-menu request");
-        }
+        post_action_menu_request(
+            event.pointer.screen,
+            &mut menu,
+            &mut animation,
+            &tray,
+        );
     }
+}
+
+fn reopen_action_menu_from_settings(
+    mut requests: MessageReader<ReturnToActionMenu>,
+    mut menu: ResMut<ActionMenuState>,
+    mut animation: ResMut<NeraAnimationState>,
+    tray: Option<Res<TrayRuntime>>,
+) {
+    if requests.read().next().is_none() {
+        return;
+    }
+
+    let Some(tray) = tray else {
+        return;
+    };
+
+    let Some(screen) = menu.last_center else {
+        warn!("Settings requested Back, but no previous radial-menu center was recorded");
+        return;
+    };
+
+    post_action_menu_request(screen, &mut menu, &mut animation, &tray);
+    info!(
+        "Nera Settings -> radial root reopened at ({}, {})",
+        screen.x,
+        screen.y,
+    );
 }
 
 fn poll_action_menu_result(

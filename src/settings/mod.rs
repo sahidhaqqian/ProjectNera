@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use bevy::{
     app::AppExit,
+    audio::{AudioSink, AudioSinkPlayback, GlobalVolume, Volume},
     camera::RenderTarget,
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
@@ -30,6 +31,7 @@ use bevy::{
         WindowMoved,
         WindowPosition,
         WindowRef,
+        WindowResizeConstraints,
     },
     winit::{UpdateMode, WinitSettings},
 };
@@ -81,6 +83,11 @@ pub(crate) struct NeraSettings {
     /// Key-light intensity percentage. UI cycles 75 / 100 / 125 / 150.
     pub(crate) brightness: u8,
 
+    /// Global application audio level in percent.
+    pub(crate) master_volume: u8,
+    /// Keeps the configured volume while silencing all current/future Nera audio.
+    pub(crate) audio_muted: bool,
+
     /// 0 = uncapped update loop. Rendering can still be limited by VSync
     /// because the primary Nera window currently uses AutoVsync.
     pub(crate) fps_limit: u16,
@@ -105,6 +112,8 @@ impl Default for NeraSettings {
             shadow_opacity: 40,
             shadow_softness: 75,
             brightness: 100,
+            master_volume: 100,
+            audio_muted: false,
             fps_limit: 60,
         }
     }
@@ -223,6 +232,27 @@ impl NeraSettings {
         format!("{}%", self.brightness.clamp(50, 200))
     }
 
+    fn cycle_master_volume(&mut self) {
+        self.master_volume = match self.master_volume {
+            25 => 50,
+            50 => 75,
+            75 => 100,
+            _ => 25,
+        };
+    }
+
+    fn master_volume_label(&self) -> String {
+        format!("{}%", self.master_volume.clamp(0, 100))
+    }
+
+    fn audio_volume(&self) -> Volume {
+        if self.audio_muted {
+            Volume::SILENT
+        } else {
+            Volume::Linear(self.master_volume.clamp(0, 100) as f32 / 100.0)
+        }
+    }
+
     fn cycle_fps_limit(&mut self) {
         self.fps_limit = match self.fps_limit {
             30 => 60,
@@ -247,6 +277,12 @@ impl NeraSettings {
 #[derive(Message, Default)]
 pub(crate) struct OpenSettingsWindow;
 
+/// Emitted only after the Settings mouse gesture has fully released and the
+/// utility window is being closed. ActionMenuPlugin uses this to reopen the
+/// root radial menu at the same center where Settings was entered.
+#[derive(Message, Default)]
+pub(crate) struct ReturnToActionMenu;
+
 /// Owns input routing while the secondary Settings window exists.
 ///
 /// Bevy's mouse ButtonInput is application-global: clicks on the Settings
@@ -259,6 +295,7 @@ pub(crate) struct OpenSettingsWindow;
 pub(crate) struct SettingsInputGate {
     window_open: bool,
     close_requested: bool,
+    return_to_menu_requested: bool,
 }
 
 pub(crate) fn nera_input_available(gate: Res<SettingsInputGate>) -> bool {
@@ -317,6 +354,7 @@ impl Plugin for NeraSettingsPlugin {
             .init_resource::<LaunchVisibilityRuntime>()
             .init_resource::<PositionRuntime>()
             .add_message::<OpenSettingsWindow>()
+            .add_message::<ReturnToActionMenu>()
             .add_systems(Startup, initialize_startup_state)
             .add_systems(
                 Update,
@@ -332,8 +370,10 @@ impl Plugin for NeraSettingsPlugin {
                     close_settings_after_mouse_release,
                     update_settings_labels,
                     update_character_settings_labels,
+                    update_audio_settings_labels,
                     apply_always_on_top,
                     apply_character_size,
+                    apply_audio_settings,
                     apply_fps_limit,
                     cleanup_settings_window,
                     observe_settings_window_removed,
@@ -507,6 +547,40 @@ fn apply_character_size(
     );
 }
 
+fn apply_audio_settings(
+    settings: Res<NeraSettings>,
+    mut global_volume: ResMut<GlobalVolume>,
+    mut active_sinks: Query<&mut AudioSink>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+
+    let desired = settings.audio_volume();
+    global_volume.volume = desired.clone();
+
+    // GlobalVolume is used when future sounds are created. Bevy intentionally
+    // does not retroactively change already-playing sinks, so mirror the new
+    // value into live Nera audio too (currently the looping alarm).
+    for mut sink in &mut active_sinks {
+        sink.set_volume(Volume::Linear(
+            settings.master_volume.clamp(0, 100) as f32 / 100.0,
+        ));
+
+        if settings.audio_muted {
+            sink.mute();
+        } else {
+            sink.unmute();
+        }
+    }
+
+    info!(
+        "Settings: Audio -> volume={} mute={}",
+        settings.master_volume_label(),
+        settings.audio_muted,
+    );
+}
+
 fn apply_fps_limit(
     settings: Res<NeraSettings>,
     mut winit: ResMut<WinitSettings>,
@@ -597,6 +671,12 @@ struct ShadowSoftnessValue;
 struct BrightnessValue;
 
 #[derive(Component)]
+struct MasterVolumeValue;
+
+#[derive(Component)]
+struct AudioMutedValue;
+
+#[derive(Component)]
 struct FpsValue;
 
 #[derive(Component)]
@@ -625,7 +705,11 @@ enum SettingsButtonAction {
     CycleShadowOpacity,
     CycleShadowSoftness,
     CycleBrightness,
+    CycleMasterVolume,
+    ToggleAudioMute,
     CycleFps,
+    BackToMenu,
+    ResetDefaults,
     CloseWindow,
     Exit,
 }
@@ -654,6 +738,7 @@ fn open_settings_window(
     // so winit never loses the corresponding mouse-up event.
     input_gate.window_open = true;
     input_gate.close_requested = false;
+    input_gate.return_to_menu_requested = false;
 
     let window_entity = commands
         .spawn((
@@ -661,8 +746,14 @@ fn open_settings_window(
             SettingsWindow,
             Window {
                 title: "Nera Settings".into(),
-                resolution: (580, 1020).into(),
-                resizable: false,
+                resolution: (580, 820).into(),
+                resizable: true,
+                resize_constraints: WindowResizeConstraints {
+                    min_width: 460.0,
+                    min_height: 520.0,
+                    max_width: 960.0,
+                    max_height: 1200.0,
+                },
                 // The OS chrome is intentionally removed. The visible rounded
                 // shell is Bevy UI drawn on a transparent native window.
                 decorations: false,
@@ -902,6 +993,32 @@ fn spawn_settings_ui(
                             ));
                         });
 
+                        settings_card(scroll, "AUDIO", |card| {
+                            settings_row(
+                                card,
+                                "Master volume",
+                                settings.master_volume_label(),
+                                MasterVolumeValue,
+                                SettingsButtonAction::CycleMasterVolume,
+                            );
+                            settings_row(
+                                card,
+                                "Mute audio",
+                                if settings.audio_muted { "ON" } else { "OFF" }.to_string(),
+                                AudioMutedValue,
+                                SettingsButtonAction::ToggleAudioMute,
+                            );
+
+                            card.spawn((
+                                Text::new("Applies globally to current and future Nera sounds"),
+                                TextFont {
+                                    font_size: FontSize::Px(11.0),
+                                    ..default()
+                                },
+                                TextColor(Color::srgb(0.45, 0.5, 0.64)),
+                            ));
+                        });
+
                         settings_card(scroll, "PERFORMANCE", |card| {
                             settings_row(
                                 card,
@@ -921,44 +1038,55 @@ fn spawn_settings_ui(
                             ));
                         });
 
+                        settings_card(scroll, "ABOUT", |card| {
+                            info_row(card, "App", "Project Nera".to_string());
+                            info_row(
+                                card,
+                                "Version",
+                                format!("v{}", env!("CARGO_PKG_VERSION")),
+                            );
+                            info_row(card, "Engine", "Rust · Bevy 0.19 · VRM 1.0".to_string());
+                            info_row(
+                                card,
+                                "Build",
+                                if cfg!(debug_assertions) {
+                                    "Debug".to_string()
+                                } else {
+                                    "Release".to_string()
+                                },
+                            );
+                        });
+
                         settings_card(scroll, "APP", |card| {
+                            action_button(
+                                card,
+                                "Reset to defaults",
+                                SettingsButtonAction::ResetDefaults,
+                            );
+
                             card.spawn((
-                                Button,
-                                SettingsButtonAction::Exit,
-                                Node {
-                                    width: percent(100),
-                                    height: px(46),
-                                    justify_content: JustifyContent::Center,
-                                    align_items: AlignItems::Center,
-                                    border_radius: BorderRadius::all(px(13)),
+                                Text::new("Reset restores app settings, startup state, audio, size, and saved position"),
+                                TextFont {
+                                    font_size: FontSize::Px(11.0),
                                     ..default()
                                 },
-                                BackgroundColor(button_color(
-                                    SettingsButtonAction::Exit,
-                                    Interaction::None,
-                                )),
-                                Outline::new(
-                                    px(1),
-                                    Val::ZERO,
-                                    Color::srgba(0.58, 0.18, 0.25, 0.75),
-                                ),
-                            ))
-                            .with_children(|button| {
-                                button.spawn((
-                                    Text::new("Exit Nera"),
-                                    TextFont {
-                                        font_size: FontSize::Px(16.0),
-                                        ..default()
-                                    },
-                                    TextColor(Color::srgb(1.0, 0.84, 0.87)),
-                                ));
-                            });
+                                TextColor(Color::srgb(0.45, 0.5, 0.64)),
+                            ));
+
+                            action_button(
+                                card,
+                                "Exit Nera",
+                                SettingsButtonAction::Exit,
+                            );
                         });
 
                     });
 
                 panel.spawn((
-                    Text::new("Project Nera  ·  Mouse wheel / touchpad to scroll"),
+                    Text::new(format!(
+                        "Project Nera v{}  ·  Drag window edges to resize  ·  Wheel / touchpad to scroll",
+                        env!("CARGO_PKG_VERSION"),
+                    )),
                     TextFont {
                         font_size: FontSize::Px(11.0),
                         ..default()
@@ -976,12 +1104,45 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
             height: px(58),
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
-            column_gap: px(12),
+            column_gap: px(10),
             ..default()
         })
         .with_children(|header| {
-            // Only the title strip starts a native drag move. Keeping the close
-            // button outside this region prevents click-vs-drag ambiguity.
+            header
+                .spawn((
+                    Button,
+                    SettingsButtonAction::BackToMenu,
+                    Node {
+                        width: px(42),
+                        height: px(42),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        border_radius: BorderRadius::all(px(13)),
+                        ..default()
+                    },
+                    BackgroundColor(button_color(
+                        SettingsButtonAction::BackToMenu,
+                        Interaction::None,
+                    )),
+                    Outline::new(
+                        px(1),
+                        Val::ZERO,
+                        Color::srgba(0.24, 0.29, 0.43, 0.9),
+                    ),
+                ))
+                .with_children(|back| {
+                    back.spawn((
+                        Text::new("‹"),
+                        TextFont {
+                            font_size: FontSize::Px(28.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.73, 0.77, 0.89)),
+                    ));
+                });
+
+            // Only the title strip starts a native drag move. Keeping both
+            // navigation buttons outside it prevents click-vs-drag ambiguity.
             header
                 .spawn((
                     Button,
@@ -1060,6 +1221,7 @@ fn settings_card(
         .spawn((
             Node {
                 width: percent(100),
+                flex_shrink: 0.0,
                 padding: UiRect::all(px(12)),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(5),
@@ -1151,6 +1313,85 @@ fn settings_row<M: Component>(
         });
 }
 
+fn info_row(
+    parent: &mut ChildSpawnerCommands,
+    label: &'static str,
+    value: String,
+) {
+    parent
+        .spawn(Node {
+            width: percent(100),
+            min_height: px(32),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            column_gap: px(14),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.67, 0.8)),
+            ));
+
+            row.spawn((
+                Text::new(value),
+                TextFont {
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.88, 0.9, 0.98)),
+            ));
+        });
+}
+
+fn action_button(
+    parent: &mut ChildSpawnerCommands,
+    label: &'static str,
+    action: SettingsButtonAction,
+) {
+    parent
+        .spawn((
+            Button,
+            action,
+            Node {
+                width: percent(100),
+                height: px(46),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border_radius: BorderRadius::all(px(13)),
+                ..default()
+            },
+            BackgroundColor(button_color(action, Interaction::None)),
+            Outline::new(
+                px(1),
+                Val::ZERO,
+                if matches!(action, SettingsButtonAction::Exit) {
+                    Color::srgba(0.58, 0.18, 0.25, 0.75)
+                } else {
+                    Color::srgba(0.18, 0.23, 0.38, 0.9)
+                },
+            ),
+        ))
+        .with_children(|button| {
+            button.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(if matches!(action, SettingsButtonAction::Exit) {
+                    Color::srgb(1.0, 0.84, 0.87)
+                } else {
+                    Color::srgb(0.88, 0.9, 0.98)
+                }),
+            ));
+        });
+}
+
 fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color {
     match action {
         SettingsButtonAction::Exit => match interaction {
@@ -1158,7 +1399,7 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
             Interaction::Hovered => Color::srgb(0.35, 0.095, 0.14),
             Interaction::None => Color::srgb(0.24, 0.075, 0.11),
         },
-        SettingsButtonAction::CloseWindow => match interaction {
+        SettingsButtonAction::CloseWindow | SettingsButtonAction::BackToMenu => match interaction {
             Interaction::Pressed => Color::srgb(0.20, 0.23, 0.34),
             Interaction::Hovered => Color::srgb(0.16, 0.19, 0.30),
             Interaction::None => Color::srgb(0.095, 0.115, 0.19),
@@ -1178,7 +1419,10 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::CycleShadowOpacity
         | SettingsButtonAction::CycleShadowSoftness
         | SettingsButtonAction::CycleBrightness
-        | SettingsButtonAction::CycleFps => {
+        | SettingsButtonAction::CycleMasterVolume
+        | SettingsButtonAction::ToggleAudioMute
+        | SettingsButtonAction::CycleFps
+        | SettingsButtonAction::ResetDefaults => {
             match interaction {
                 Interaction::Pressed => Color::srgb(0.18, 0.22, 0.36),
                 Interaction::Hovered => Color::srgb(0.135, 0.17, 0.29),
@@ -1195,8 +1439,9 @@ fn handle_settings_buttons(
     >,
     mut settings: ResMut<NeraSettings>,
     mut startup_state: ResMut<StartupRuntime>,
-    position_runtime: Res<PositionRuntime>,
+    mut position_runtime: ResMut<PositionRuntime>,
     mut input_gate: ResMut<SettingsInputGate>,
+    mut primary: Query<&mut Window, With<PrimaryWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -1314,11 +1559,47 @@ fn handle_settings_buttons(
                 save_settings_deferred(&mut commands);
                 info!("Settings: Brightness -> {}", settings.brightness_label());
             }
+            SettingsButtonAction::CycleMasterVolume => {
+                settings.cycle_master_volume();
+                save_settings_deferred(&mut commands);
+                info!("Settings: Master volume -> {}", settings.master_volume_label());
+            }
+            SettingsButtonAction::ToggleAudioMute => {
+                settings.audio_muted = !settings.audio_muted;
+                save_settings_deferred(&mut commands);
+                info!("Settings: Audio mute {}", if settings.audio_muted { "ON" } else { "OFF" });
+            }
             SettingsButtonAction::CycleFps => {
                 settings.cycle_fps_limit();
                 save_settings_deferred(&mut commands);
             }
+            SettingsButtonAction::BackToMenu => {
+                input_gate.return_to_menu_requested = true;
+                input_gate.close_requested = true;
+                info!("Nera Settings -> back to action menu requested");
+            }
+            SettingsButtonAction::ResetDefaults => {
+                *settings = NeraSettings::default();
+
+                if let Err(error) = startup::set_enabled(false) {
+                    warn!("Settings: reset could not disable Start with Windows: {error}");
+                } else {
+                    startup_state.enabled = false;
+                }
+
+                let default_position = IVec2::new(settings.window_x, settings.window_y);
+                position_runtime.last_known = default_position;
+                position_runtime.dirty = false;
+
+                if let Ok(mut window) = primary.single_mut() {
+                    window.position = WindowPosition::At(default_position);
+                }
+
+                save_settings_deferred(&mut commands);
+                info!("Settings: restored defaults");
+            }
             SettingsButtonAction::CloseWindow => {
+                input_gate.return_to_menu_requested = false;
                 // Do NOT despawn the native window while this press is still
                 // active. If the HWND disappears before winit receives the
                 // matching mouse-up, ButtonInput can remain stuck forever.
@@ -1496,6 +1777,27 @@ fn update_character_settings_labels(
     }
 }
 
+fn update_audio_settings_labels(
+    settings: Res<NeraSettings>,
+    mut volume_labels: Query<&mut Text, With<MasterVolumeValue>>,
+    mut mute_labels: Query<
+        &mut Text,
+        (With<AudioMutedValue>, Without<MasterVolumeValue>),
+    >,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+
+    for mut text in &mut volume_labels {
+        text.0 = settings.master_volume_label();
+    }
+
+    for mut text in &mut mute_labels {
+        text.0 = if settings.audio_muted { "ON" } else { "OFF" }.into();
+    }
+}
+
 fn cleanup_settings_window(
     settings_windows: Query<(), With<SettingsWindow>>,
     owned: Query<(Entity, &SettingsOwned)>,
@@ -1519,6 +1821,7 @@ fn close_settings_after_mouse_release(
     mouse: Res<ButtonInput<MouseButton>>,
     settings_windows: Query<Entity, With<SettingsWindow>>,
     mut gate: ResMut<SettingsInputGate>,
+    mut return_to_menu: MessageWriter<ReturnToActionMenu>,
     mut commands: Commands,
 ) {
     if !gate.window_open || !gate.close_requested {
@@ -1537,9 +1840,18 @@ fn close_settings_after_mouse_release(
         commands.entity(window).despawn();
     }
 
+    let reopen_menu = gate.return_to_menu_requested;
+
     gate.window_open = false;
     gate.close_requested = false;
-    info!("Nera Settings -> closed after mouse release");
+    gate.return_to_menu_requested = false;
+
+    if reopen_menu {
+        return_to_menu.write(ReturnToActionMenu);
+        info!("Nera Settings -> closed, returning to radial menu");
+    } else {
+        info!("Nera Settings -> closed after mouse release");
+    }
 }
 
 /// Covers non-button closure paths such as the OS destroying the secondary
@@ -1555,4 +1867,5 @@ fn observe_settings_window_removed(
 
     gate.window_open = false;
     gate.close_requested = false;
+    gate.return_to_menu_requested = false;
 }
