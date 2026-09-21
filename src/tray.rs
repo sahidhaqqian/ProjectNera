@@ -25,8 +25,13 @@ use bevy::{
     window::{
         PrimaryWindow,
         Window,
-        WindowLevel,
     },
+};
+
+use crate::settings::{
+    NeraSettings,
+    save_settings_before_exit,
+    save_settings_deferred,
 };
 
 use crate::action_menu::{
@@ -418,6 +423,12 @@ fn process_tray_commands(
             With<PrimaryWindow>,
         >,
 
+    mut settings:
+        ResMut<NeraSettings>,
+
+    mut commands:
+        Commands,
+
     mut exit:
         MessageWriter<AppExit>,
 ) {
@@ -490,34 +501,13 @@ fn process_tray_commands(
             // =============================================================
 
             TrayCommand::ToggleAlwaysOnTop => {
-                if let Some(
-                    mut window,
-                ) = windows
-                    .iter_mut()
-                    .next()
-                {
-                    let enabled =
-                        matches!(
-                            window.window_level,
-                            WindowLevel::AlwaysOnTop
-                        );
+                settings.toggle_always_on_top();
+                save_settings_deferred(&mut commands);
 
-                    if enabled {
-                        window.window_level =
-                            WindowLevel::Normal;
-
-                        info!(
-                            "Tray: Always On Top OFF"
-                        );
-                    } else {
-                        window.window_level =
-                            WindowLevel::AlwaysOnTop;
-
-                        info!(
-                            "Tray: Always On Top ON"
-                        );
-                    }
-                }
+                info!(
+                    "Tray: Always On Top {}",
+                    if settings.always_on_top { "ON" } else { "OFF" }
+                );
             }
 
             // =============================================================
@@ -529,6 +519,7 @@ fn process_tray_commands(
                     "Tray: Exit Nera"
                 );
 
+                save_settings_before_exit(&mut commands);
                 exit.write(
                     AppExit::Success,
                 );

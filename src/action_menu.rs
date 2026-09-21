@@ -92,6 +92,7 @@ use windows::{
 use crate::{
     animation::NeraAnimationState,
     interaction::NeraRightClicked,
+    settings::OpenSettingsWindow,
     tray::{
         send_action_menu_result,
         TrayRuntime,
@@ -434,6 +435,7 @@ fn poll_action_menu_result(
     mut animation: ResMut<NeraAnimationState>,
     tray: Option<Res<TrayRuntime>>,
     mut commands: MessageWriter<NeraActionMenuCommand>,
+    mut open_settings: MessageWriter<OpenSettingsWindow>,
 ) {
     let Some(tray) = tray else {
         return;
@@ -459,6 +461,7 @@ fn poll_action_menu_result(
             }
             NeraActionMenuCommand::Settings => {
                 info!("Nera radial menu -> Settings");
+                open_settings.write(OpenSettingsWindow);
             }
         }
 

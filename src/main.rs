@@ -9,6 +9,7 @@ mod environment;
 mod interaction;
 mod platform;
 mod presentation;
+mod settings;
 
 #[cfg(target_os = "windows")]
 mod tray;
@@ -65,7 +66,9 @@ use std::{
 };
 
 use bevy::{
+    asset::AssetPlugin,
     prelude::*,
+    settings::SettingsPlugin,
     render::{
         RenderPlugin,
         settings::{MemoryHints, WgpuSettings},
@@ -80,9 +83,13 @@ use bevy::{
     },
 };
 
-use bevy_vrm1::prelude::*;
+use bevy_vrm1::{
+    prelude::*,
+    vrm::body_tracking::BodyTracking,
+};
 
 use presentation::PresentationPlugin;
+use settings::{NeraSettings, NeraSettingsPlugin};
 
 #[cfg(target_os = "windows")]
 use action_menu::ActionMenuPlugin;
@@ -330,11 +337,33 @@ enum NeraColliderShape {
 // Main
 // -----------------------------------------------------------------------------
 
+/// Bevy 0.19 resolves file assets relative to the executable directory when
+/// BEVY_ASSET_ROOT / CARGO_MANIFEST_DIR are not present at runtime. `cargo run`
+/// therefore points at `target/debug/assets`, while Project Nera keeps assets
+/// in the repository root. Prefer the repository assets while developing, and
+/// fall back to a normal `assets` folder beside the executable for packaged builds.
+fn nera_asset_path() -> String {
+    let development_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+
+    if development_assets.is_dir() {
+        development_assets.to_string_lossy().into_owned()
+    } else {
+        "assets".to_string()
+    }
+}
+
 fn main() {
     let mut app = App::new();
 
+    // Load persistent Nera settings before engine-facing glue systems run.
+    app.add_plugins(SettingsPlugin::new("io.github.sahidhaqqi.projectnera"));
+
     app.add_plugins(
         DefaultPlugins
+            .set(AssetPlugin {
+                file_path: nera_asset_path(),
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Nera".into(),
@@ -348,6 +377,10 @@ fn main() {
                     desired_maximum_frame_latency: NonZeroU32::new(1),
                     has_shadow: false,
                     skip_taskbar: true,
+                    // Keep the native pet hidden until persisted settings have
+                    // been loaded. NeraSettingsPlugin reveals it on the first
+                    // update unless "Start hidden" is enabled.
+                    visible: false,
                     ..default()
                 }),
                 primary_cursor_options: Some(CursorOptions {
@@ -374,6 +407,7 @@ fn main() {
         NeraAnimationPlugin,
         PresentationPlugin,
         alarm::AlarmPlugin,
+        NeraSettingsPlugin,
     ));
 
     #[cfg(target_os = "windows")]
@@ -394,10 +428,17 @@ fn main() {
             (
                 attach_bone_colliders,
                 update_look_at_target,
+                // A secondary Settings window owns application mouse input while
+                // it is open. Reset Nera capture state first so Settings clicks
+                // cannot become body hits / drags through global ButtonInput.
+                suspend_nera_interaction_for_settings
+                    .run_if(settings::nera_input_blocked),
                 // Native placement changes first, then Phase 5.3 derives the
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
-                drag_nera_window.run_if(presentation::desktop_pet_active),
+                drag_nera_window
+                    .run_if(presentation::desktop_pet_active)
+                    .run_if(settings::nera_input_available),
                 desktop_physics::update_desktop_physics
                     .run_if(presentation::desktop_pet_active),
                 sync_environment_animation_state,
@@ -410,11 +451,16 @@ fn main() {
         )
         .add_systems(
             PostUpdate,
-            update_click_through.after(VrmSystemSets::SpringBone),
+            update_click_through
+                .after(VrmSystemSets::SpringBone)
+                .run_if(settings::nera_input_available),
         )
         .add_systems(
             PostUpdate,
-            detect_head_pat.after(update_click_through).run_if(presentation::desktop_pet_active),
+            detect_head_pat
+                .after(update_click_through)
+                .run_if(presentation::desktop_pet_active)
+                .run_if(settings::nera_input_available),
         )
         // Pose-first support calibration: Sitting_Enter starts in Update,
         // then Last samples its animated Seat and commits the attachment.
@@ -611,65 +657,102 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 #[cfg(target_os = "windows")]
 fn update_look_at_target(
+    time: Res<Time>,
+    settings: Res<NeraSettings>,
     environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
 ) {
-    let Some(window) =
-        window_query.iter().next()
-    else {
+    let Some(window) = window_query.iter().next() else {
         return;
     };
 
-    let Some(mut target_transform) =
-        target_query.iter_mut().next()
-    else {
+    let Some(mut target_transform) = target_query.iter_mut().next() else {
         return;
     };
 
-    let Some(cursor_pos) =
+    // Keep a stable neutral point in front of Nera. Turning Follow Mouse off
+    // eases the target back here instead of snapping the gaze in one frame.
+    let neutral = Vec3::new(0.0, 0.5, 2.0);
+
+    let desired = if settings.follow_mouse {
         cursor_position_in_nera_window(&environment)
-    else {
-        return;
+            .map(|cursor_pos| {
+                let intensity =
+                    f32::from(settings.follow_intensity.clamp(25, 100)) / 100.0;
+
+                let map_x =
+                    (cursor_pos.x / window.resolution.width() - 0.5)
+                        * 4.0
+                        * intensity;
+
+                let map_y =
+                    0.5
+                        + (0.5 - cursor_pos.y / window.resolution.height())
+                            * 4.0
+                            * intensity;
+
+                Vec3::new(map_x, map_y, 2.0)
+            })
+            .unwrap_or(neutral)
+    } else {
+        neutral
     };
 
-    let map_x =
-        (cursor_pos.x / window.resolution.width() - 0.5)
-            * 4.0;
-
-    let map_y =
-        (0.5 - cursor_pos.y / window.resolution.height())
-            * 4.0
-            + 0.5;
-
+    // Frame-rate independent exponential smoothing. A value around 12 keeps
+    // gaze responsive while removing the robotic cursor-to-bone snapping.
+    let blend = 1.0 - (-12.0 * time.delta_secs()).exp();
     target_transform.translation =
-        Vec3::new(map_x, map_y, 2.0);
+        target_transform.translation.lerp(desired, blend);
 }
 
 
 /// VRMA reactions such as HitHead and ShakeHeadNo1 need temporary ownership of
-/// the head bones. `bevy_vrm1` LookAt runs after animation, so leaving LookAt
-/// attached would partially overwrite those animation tracks every frame.
+/// the head bones. `bevy_vrm1` LookAt runs after animation, so the animation
+/// suppression rule remains authoritative over the user Follow Mouse settings.
 fn sync_look_at_for_animation(
     animation: Res<NeraAnimationState>,
+    settings: Res<NeraSettings>,
     target_query: Query<Entity, With<LookAtTarget>>,
-    avatar_query: Query<(Entity, Option<&LookAt>), With<NeraAvatar>>,
+    avatar_query: Query<
+        (Entity, Option<&LookAt>, Option<&BodyTracking>),
+        With<NeraAvatar>,
+    >,
     mut commands: Commands,
 ) {
     let Some(target) = target_query.iter().next() else {
         return;
     };
 
-    let Some((avatar, current_look_at)) = avatar_query.iter().next() else {
+    let Some((avatar, current_look_at, current_body_tracking)) =
+        avatar_query.iter().next()
+    else {
         return;
     };
 
-    if animation.suppresses_look_at() {
-        if current_look_at.is_some() {
-            commands.entity(avatar).remove::<LookAt>();
+    // The master Follow Mouse switch changes the target between cursor and
+    // neutral. Keep LookAt attached (when Eyes is enabled) so switching the
+    // master off can visibly ease back to neutral instead of freezing mid-gaze.
+    let allow_look_at = settings.follow_eyes && !animation.suppresses_look_at();
+    let allow_body_tracking = allow_look_at && settings.follow_head;
+
+    if allow_look_at {
+        if current_look_at.is_none() {
+            commands.entity(avatar).insert(LookAt::Target(target));
         }
-    } else if current_look_at.is_none() {
-        commands.entity(avatar).insert(LookAt::Target(target));
+    } else if current_look_at.is_some() {
+        commands.entity(avatar).remove::<LookAt>();
+    }
+
+    // bevy_vrm1's BodyTracking extends LookAt from the eyes into the upper
+    // body. Keep it opt-in and remove it whenever LookAt is unavailable so it
+    // cannot fight reaction / transition VRMAs.
+    if allow_body_tracking {
+        if current_body_tracking.is_none() {
+            commands.entity(avatar).insert(BodyTracking::default());
+        }
+    } else if current_body_tracking.is_some() {
+        commands.entity(avatar).remove::<BodyTracking>();
     }
 }
 
@@ -727,6 +810,8 @@ fn nera_pointer_position(
 fn update_avatar_anchors(
     interaction: Res<DesktopPetInteraction>,
     animation: Res<NeraAnimationState>,
+    settings: Res<NeraSettings>,
+    mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
     mut grounding: ResMut<DeathGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
@@ -739,6 +824,10 @@ fn update_avatar_anchors(
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
+
+    let character_scale = settings.character_scale();
+    let standing_support_offset =
+        FOOT_SOLE_OFFSET_LOGICAL * character_scale + settings.ground_offset_logical();
 
     let mut feet = Vec::with_capacity(2);
     let mut death_support_points = Vec::with_capacity(12);
@@ -808,9 +897,16 @@ fn update_avatar_anchors(
             .iter()
             .map(|point| point.y)
             .fold(f32::NEG_INFINITY, f32::max)
-            + FOOT_SOLE_OFFSET_LOGICAL;
+            + standing_support_offset;
 
         environment.set_feet_anchor(Vec2::new(x, y));
+
+        // Physics intentionally freezes its standing anchor during normal
+        // animation. A settings change can alter avatar scale/ground contact,
+        // so refresh that rigid-body anchor from the newly evaluated geometry.
+        if settings.is_changed() && !physics.falling && !animation.death_active() {
+            physics.refresh_support_anchor(environment.feet_anchor_logical);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -838,7 +934,7 @@ fn update_avatar_anchors(
                     .iter()
                     .map(|point| point.y)
                     .fold(f32::NEG_INFINITY, f32::max)
-                    + FOOT_SOLE_OFFSET_LOGICAL
+                    + standing_support_offset
             });
 
             if !death_active && !grounding.was_death_active {
@@ -867,7 +963,7 @@ fn update_avatar_anchors(
                         .max_by(|a, b| a.total_cmp(b)),
                 ) {
                     let support_y =
-                        lowest_y + DEATH_GROUND_MARGIN_LOGICAL;
+                        lowest_y + DEATH_GROUND_MARGIN_LOGICAL * character_scale;
 
                     let desired_top =
                         ground_y - (support_y * scale).round() as i32;
@@ -1064,6 +1160,7 @@ fn head_part_at_cursor(
     camera: &Camera,
     camera_transform: &GlobalTransform,
     bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    character_scale: f32,
 ) -> bool {
     let left_eye = project_vrm_bone("leftEye", camera, camera_transform, bone_query);
     let right_eye = project_vrm_bone("rightEye", camera, camera_transform, bone_query);
@@ -1075,8 +1172,10 @@ fn head_part_at_cursor(
 
             // Visual head center is slightly above the eye line in viewport
             // coordinates (Y grows downward).
-            let radius_x = (eye_distance * 2.0).clamp(30.0, 48.0);
-            let radius_y = (radius_x * 1.20).clamp(36.0, 58.0);
+            let radius_x = (eye_distance * 2.0)
+                .clamp(30.0 * character_scale, 48.0 * character_scale);
+            let radius_y = (radius_x * 1.20)
+                .clamp(36.0 * character_scale, 58.0 * character_scale);
             let center = eye_mid + Vec2::new(0.0, -radius_y * 0.22);
             (center, radius_x, radius_y)
         }
@@ -1086,7 +1185,11 @@ fn head_part_at_cursor(
             let Some(head) = project_vrm_bone("head", camera, camera_transform, bone_query) else {
                 return false;
             };
-            (head + Vec2::new(0.0, 10.0), 34.0, 42.0)
+            (
+                head + Vec2::new(0.0, 10.0 * character_scale),
+                34.0 * character_scale,
+                42.0 * character_scale,
+            )
         }
     };
 
@@ -1100,6 +1203,7 @@ fn nearest_nera_body_part(
     ray_dir: Vec3,
     colliders_query: &Query<(&GlobalTransform, &NeraCollider)>,
     bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    character_scale: f32,
 ) -> Option<BodyPart> {
     let mut nearest: Option<(BodyPart, f32)> = None;
 
@@ -1108,7 +1212,12 @@ fn nearest_nera_body_part(
 
         let distance = match collider.shape {
             NeraColliderShape::Sphere { radius } => {
-                ray_sphere_distance(ray_origin, ray_dir, pa, radius)
+                ray_sphere_distance(
+                    ray_origin,
+                    ray_dir,
+                    pa,
+                    radius * character_scale,
+                )
             }
             NeraColliderShape::Capsule { radius, end_bone } => {
                 let pb = bone_query.iter().find_map(|(bone, transform)| {
@@ -1116,8 +1225,19 @@ fn nearest_nera_body_part(
                 });
 
                 match pb {
-                    Some(pb) => ray_capsule_distance(ray_origin, ray_dir, pa, pb, radius),
-                    None => ray_sphere_distance(ray_origin, ray_dir, pa, radius),
+                    Some(pb) => ray_capsule_distance(
+                        ray_origin,
+                        ray_dir,
+                        pa,
+                        pb,
+                        radius * character_scale,
+                    ),
+                    None => ray_sphere_distance(
+                        ray_origin,
+                        ray_dir,
+                        pa,
+                        radius * character_scale,
+                    ),
                 }
             }
         };
@@ -1240,7 +1360,38 @@ fn attach_bone_colliders(
 }
 
 #[cfg(target_os = "windows")]
+fn suspend_nera_interaction_for_settings(
+    mut interaction: ResMut<DesktopPetInteraction>,
+    mut hovered: ResMut<HoveredBodyPart>,
+    mut head_pat: ResMut<HeadPatGesture>,
+    mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    // Settings is a real second Bevy window, but ButtonInput<MouseButton> is
+    // application-global. Clear every *active gesture* so a Settings click
+    // cannot continue a PrimaryWindow press/drag that happened previously.
+    interaction.state = InteractionState::None;
+    interaction.pressed_body_part = None;
+    interaction.right_pressed_body_part = None;
+    interaction.drag_offset = None;
+    interaction.drag_start_cursor = None;
+    interaction.last_drag_cursor = None;
+    interaction.drag_started_at = None;
+    interaction.right_press_origin = None;
+    interaction.snap_cursor = None;
+
+    hovered.part = None;
+    head_pat.reset_stroke();
+
+    // Critical when Nera itself is Always-On-Top and visually overlaps the
+    // Settings panel: let native hit-testing pass through the pet HWND.
+    if let Ok(mut cursor_options) = window_query.single_mut() {
+        cursor_options.hit_test = false;
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn update_click_through(
+    settings: Res<NeraSettings>,
     environment: Res<DesktopEnvironment>,
     mut interaction: ResMut<DesktopPetInteraction>,
     mut hovered: ResMut<HoveredBodyPart>,
@@ -1251,6 +1402,7 @@ fn update_click_through(
 ) {
     let Ok(mut cursor_options) = window_query.single_mut() else { return };
     let Ok((camera, camera_transform)) = camera_query.single() else { return };
+    let character_scale = settings.character_scale();
 
     let hovered_body_part = cursor_position_in_nera_window(&environment)
         .and_then(|cursor_pos| {
@@ -1261,6 +1413,7 @@ fn update_click_through(
                 camera,
                 camera_transform,
                 &bone_query,
+                character_scale,
             ) {
                 return Some(BodyPart::Head);
             }
@@ -1274,6 +1427,7 @@ fn update_click_through(
                         ray.direction.into(),
                         &colliders_query,
                         &bone_query,
+                        character_scale,
                     )
                 })
         });

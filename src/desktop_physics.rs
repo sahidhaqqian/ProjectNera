@@ -83,6 +83,16 @@ impl Default for DesktopPhysicsState {
     }
 }
 
+impl DesktopPhysicsState {
+    /// Re-sample the rigid-body standing anchor after settings change avatar
+    /// scale or the logical ground contact point. Normal animation continues to
+    /// use the frozen anchor; this is only an explicit geometry recalibration.
+    pub(crate) fn refresh_support_anchor(&mut self, anchor: Option<Vec2>) {
+        self.support_anchor_logical = anchor;
+        self.subpixel_y = 0.0;
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SurfaceHit {
     y: i32,
@@ -113,14 +123,9 @@ pub(crate) fn update_desktop_physics(
         return;
     }
 
-    // From mouse-down until release, interaction / Phase 4 sitting owns the
-    // HWND. Physics must not pin Nera to an existing support during the
-    // Pressed -> Dragging threshold, otherwise the sitting probe can fight a
-    // taskbar/desktop attachment before the deliberate drag is armed.
-    if matches!(
-        interaction.state,
-        InteractionState::Pressed | InteractionState::Dragging
-    ) {
+    // While the user actually drags, cursor movement owns the HWND. Releasing
+    // it leaves support empty; the next frame performs unsupported detection.
+    if interaction.state == InteractionState::Dragging {
         physics.support = None;
         reset_freefall(&mut physics, &mut animation);
         return;
@@ -333,42 +338,12 @@ fn floor_surface_for_feet(
     feet: PhysicalPoint,
     environment: &DesktopEnvironment,
 ) -> Option<SurfaceHit> {
-    // The desktop floor belongs to the monitor containing/nearest the Nera
-    // HWND, not to the projected foot X. At screen corners an animation or
-    // projection can put feet.x a few pixels outside monitor.bounds even while
-    // the actual HWND is still on that monitor. Requiring x_inside() here can
-    // therefore delete the only hard floor and create an infinite fall.
     let monitor = environment.monitor.or_else(|| {
-        let nera_rect = environment.nera_rect?;
-        let center_x = nera_rect.left.saturating_add(nera_rect.width() / 2);
-        let center_y = nera_rect.top.saturating_add(nera_rect.height() / 2);
-
         platform::enumerate_monitors()
             .into_iter()
-            .min_by_key(|candidate| {
-                let dx = if center_x < candidate.bounds.left {
-                    candidate.bounds.left - center_x
-                } else if center_x > candidate.bounds.right {
-                    center_x - candidate.bounds.right
-                } else {
-                    0
-                };
-
-                let dy = if center_y < candidate.bounds.top {
-                    candidate.bounds.top - center_y
-                } else if center_y > candidate.bounds.bottom {
-                    center_y - candidate.bounds.bottom
-                } else {
-                    0
-                };
-
-                i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy)
-            })
+            .find(|monitor| x_inside(feet.x, monitor.bounds))
     })?;
 
-    // Prefer an explicit bottom taskbar only when the projected foot is over
-    // its horizontal span. Otherwise the monitor work-area bottom remains a
-    // valid hard floor. This is what prevents corner/off-edge infinite fall.
     if let Some(taskbar) = environment
         .taskbar
         .for_monitor(monitor.handle)
@@ -521,29 +496,17 @@ fn collect_surfaces(
         }
     }
 
-    // The monitor floor is a hard boundary and must never disappear merely
-    // because the projected feet X drifts a few pixels beyond a screen edge.
-    // floor_surface_for_feet() resolves the monitor from the Nera HWND first.
-    if let Some(floor) = floor_surface_for_feet(
-        PhysicalPoint::new(feet_x, environment.nera_rect.map(|r| r.top).unwrap_or(0)),
-        environment,
-    ) {
-        // If this is an explicit taskbar hit it is already present above; the
-        // generic desktop floor is still useful as a hard fallback.
-        match floor.support {
-            PhysicsSupport::Desktop { .. } => surfaces.push(floor),
-            PhysicsSupport::Taskbar { monitor, .. } => {
-                if let Some(info) = platform::enumerate_monitors()
-                    .into_iter()
-                    .find(|info| info.handle == monitor)
-                {
-                    surfaces.push(SurfaceHit {
-                        y: info.work_area.bottom,
-                        support: PhysicsSupport::Desktop { monitor },
-                    });
-                }
-            }
-            PhysicsSupport::Window { .. } => {}
+    // Monitor work-area bottom is the desktop floor. On a bottom-taskbar setup
+    // this usually coincides with taskbar.top; duplicate removal below keeps
+    // the explicit taskbar attachment.
+    for monitor in platform::enumerate_monitors() {
+        if x_inside(feet_x, monitor.bounds) {
+            surfaces.push(SurfaceHit {
+                y: monitor.work_area.bottom,
+                support: PhysicsSupport::Desktop {
+                    monitor: monitor.handle,
+                },
+            });
         }
     }
 
