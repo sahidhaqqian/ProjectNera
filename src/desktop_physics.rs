@@ -91,6 +91,17 @@ impl DesktopPhysicsState {
         self.support_anchor_logical = anchor;
         self.subpixel_y = 0.0;
     }
+
+    /// Emergency recovery used by the system-tray Reset Position command.
+    /// The next physics update re-samples the standing feet anchor from the
+    /// avatar's new desktop position instead of continuing an off-screen fall.
+    pub(crate) fn reset_for_position_recovery(&mut self) {
+        self.vertical_velocity = 0.0;
+        self.falling = false;
+        self.support = None;
+        self.support_anchor_logical = None;
+        self.subpixel_y = 0.0;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -124,7 +124,7 @@ use tray::TrayPlugin;
 //├─ Click-through        ✅
 //└─ Drag lock            ✅
 
-const VRM_PATH: &str = "vrm/nera.vrm";
+const VRM_PATH: &str = "vrm/nera_256.vrm";
 
 // Phase 5 runtime animation set. Large animation libraries stay as stock;
 // only stable animations used by current behavior live in animasi_basic.

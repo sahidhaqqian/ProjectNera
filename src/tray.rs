@@ -28,10 +28,16 @@ use bevy::{
     },
 };
 
-use crate::settings::{
-    NeraSettings,
-    save_settings_before_exit,
-    save_settings_deferred,
+use crate::{
+    animation::NeraAnimationState,
+    desktop_physics::DesktopPhysicsState,
+    environment::DesktopEnvironment,
+    platform,
+    settings::{
+        NeraSettings,
+        save_settings_before_exit,
+        save_settings_deferred,
+    },
 };
 
 use crate::action_menu::{
@@ -143,6 +149,7 @@ impl Plugin for TrayPlugin {
 enum TrayCommand {
     Show,
     Hide,
+    ResetPosition,
     ToggleAlwaysOnTop,
     Exit,
 }
@@ -161,6 +168,7 @@ const MENU_SHOW: usize = 1001;
 const MENU_HIDE: usize = 1002;
 const MENU_ALWAYS_ON_TOP: usize = 1003;
 const MENU_EXIT: usize = 1004;
+const MENU_RESET_POSITION: usize = 1005;
 
 // Registered Windows message yang dikirim ketika Explorer/taskbar dibuat ulang.
 static TASKBAR_CREATED_MSG: AtomicU32 =
@@ -431,6 +439,15 @@ fn process_tray_commands(
 
     mut exit:
         MessageWriter<AppExit>,
+
+    mut environment:
+        ResMut<DesktopEnvironment>,
+
+    mut physics:
+        ResMut<DesktopPhysicsState>,
+
+    mut animation:
+        ResMut<NeraAnimationState>,
 ) {
     let Some(runtime) =
         runtime
@@ -493,6 +510,80 @@ fn process_tray_commands(
                     info!(
                         "Tray: Hide Nera"
                     );
+                }
+            }
+
+            // =============================================================
+            // RESET POSITION
+            // =============================================================
+
+            TrayCommand::ResetPosition => {
+                let Some(hwnd) = environment.nera_hwnd else {
+                    warn!("Tray: Reset Position ignored because Nera HWND is not ready");
+                    continue;
+                };
+
+                let monitors = platform::enumerate_monitors();
+                let monitor = monitors
+                    .iter()
+                    .copied()
+                    .find(|monitor| monitor.is_primary)
+                    .or_else(|| monitors.first().copied());
+
+                let Some(monitor) = monitor else {
+                    warn!("Tray: Reset Position failed because no active monitor was found");
+                    continue;
+                };
+
+                let rect = platform::window_rect(hwnd)
+                    .or(environment.nera_rect);
+
+                let Some(rect) = rect else {
+                    warn!("Tray: Reset Position failed because Nera geometry is unavailable");
+                    continue;
+                };
+
+                // Recovery is authoritative: any sitting/window attachment or
+                // in-progress fall must stop owning the HWND before we move it.
+                environment.detach_nera();
+                physics.reset_for_position_recovery();
+                animation.cancel_physics_motion();
+
+                let work = monitor.work_area;
+                let width = rect.width().max(1);
+                let height = rect.height().max(1);
+
+                let position = platform::PhysicalPoint::new(
+                    work.left + (work.width() - width) / 2,
+                    work.top + (work.height() - height) / 2,
+                );
+
+                match platform::move_window(hwnd, position) {
+                    Ok(()) => {
+                        environment.nera_rect = platform::window_rect(hwnd);
+                        environment.monitor = Some(monitor);
+
+                        if let Some(mut window) = windows.iter_mut().next() {
+                            // Reset Position doubles as an emergency recovery
+                            // command, so a previously hidden Nera is shown.
+                            window.visible = true;
+                        }
+
+                        if settings.remember_position {
+                            settings.window_x = position.x;
+                            settings.window_y = position.y;
+                            save_settings_deferred(&mut commands);
+                        }
+
+                        info!(
+                            "Tray: Reset Position -> primary work-area center ({}, {})",
+                            position.x,
+                            position.y,
+                        );
+                    }
+                    Err(error) => {
+                        warn!("Tray: Reset Position failed: {error}");
+                    }
                 }
             }
 
@@ -720,6 +811,20 @@ unsafe fn show_safety_menu(
         };
 
     // -------------------------------------------------------------------------
+    // Reset Position
+    // -------------------------------------------------------------------------
+
+    let _ =
+        unsafe {
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                MENU_RESET_POSITION,
+                w!("Reset Position"),
+            )
+        };
+
+    // -------------------------------------------------------------------------
     // Always On Top
     // -------------------------------------------------------------------------
 
@@ -850,6 +955,12 @@ unsafe fn show_safety_menu(
         MENU_HIDE => {
             send_tray_command(
                 TrayCommand::Hide,
+            );
+        }
+
+        MENU_RESET_POSITION => {
+            send_tray_command(
+                TrayCommand::ResetPosition,
             );
         }
 
