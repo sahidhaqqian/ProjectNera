@@ -21,6 +21,7 @@ use windows::Win32::{
         LPARAM,
         POINT,
         RECT,
+        SYSTEMTIME,
     },
 
     Graphics::{
@@ -40,6 +41,8 @@ use windows::Win32::{
             MONITOR_DEFAULTTONEAREST,
         },
     },
+
+    System::SystemInformation::GetLocalTime,
 
     UI::{
         HiDpi::GetDpiForWindow,
@@ -116,6 +119,36 @@ impl NativeMonitorHandle {
 
     pub const fn as_raw(self) -> isize {
         self.0
+    }
+}
+
+/// Small platform-neutral projection of Windows' local wall clock.
+///
+/// Alarm UI needs wall-clock text, but pulling a date/time crate only to render
+/// one utility panel would be unnecessary. `GetLocalTime` already applies the
+/// user's Windows timezone and daylight-saving rules for us.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalDateTime {
+    pub year: u16,
+    pub month: u16,
+    pub day: u16,
+    /// Windows convention: Sunday = 0 ... Saturday = 6.
+    pub day_of_week: u16,
+    pub hour: u16,
+    pub minute: u16,
+}
+
+/// Current Windows-local date/time.
+pub fn local_datetime() -> LocalDateTime {
+    let value: SYSTEMTIME = unsafe { GetLocalTime() };
+
+    LocalDateTime {
+        year: value.wYear,
+        month: value.wMonth,
+        day: value.wDay,
+        day_of_week: value.wDayOfWeek,
+        hour: value.wHour,
+        minute: value.wMinute,
     }
 }
 
@@ -569,6 +602,16 @@ pub fn window_at_point(
 /// - mengambil fokus
 ///
 /// Ini nantinya juga akan dipakai Phase 4 ketika Nera mengikuti target window.
+/// True only once Windows reports the HWND as actually visible.
+///
+/// Bevy's `Window::visible` is desired state; the native window can lag behind
+/// it by a frame while winit applies the change. Lifecycle code that must prove
+/// an affordance is reachable should use this native observation instead.
+pub fn window_is_visible(handle: NativeWindowHandle) -> bool {
+    unsafe { IsWindowVisible(handle.hwnd()) }.as_bool()
+}
+
+
 pub fn move_window(
     handle: NativeWindowHandle,
     position: PhysicalPoint,

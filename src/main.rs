@@ -5,10 +5,14 @@ mod desktop_physics;
 
 #[cfg(target_os = "windows")]
 mod action_menu;
+#[cfg(target_os = "windows")]
+mod alarm_dismiss;
 mod environment;
+mod expression;
 mod interaction;
 mod platform;
 mod presentation;
+mod rng;
 mod settings;
 
 #[cfg(target_os = "windows")]
@@ -27,6 +31,10 @@ use animation::{
     register_hit_chest_animation,
     register_hit_head_animation,
     register_idle_animation,
+    register_idle_blush_animation,
+    register_idle_look_around_animation,
+    register_idle_relax_animation,
+    register_idle_sleepy_animation,
     register_praying_animation,
     register_sad_animation,
     register_sitting_enter_animation,
@@ -35,6 +43,7 @@ use animation::{
     register_surprised_animation,
     register_thinking_animation,
     register_wave_animation,
+    schedule_idle_variation,
     sync_environment_animation_state,
     sync_interaction_animation_actions,
     tick_animation_actions,
@@ -45,6 +54,8 @@ use environment::{
     DesktopEnvironmentPlugin,
     PlacementState,
 };
+
+use expression::NeraExpressionPlugin;
 
 use interaction::{
     BodyPart,
@@ -93,6 +104,9 @@ use settings::{NeraSettings, NeraSettingsPlugin};
 
 #[cfg(target_os = "windows")]
 use action_menu::ActionMenuPlugin;
+
+#[cfg(target_os = "windows")]
+use alarm_dismiss::AlarmDismissPlugin;
 
 #[cfg(target_os = "windows")]
 use tray::TrayPlugin;
@@ -152,6 +166,18 @@ const SITTING_LOOP_VRMA_PATH: &str =
     "animations/animasi_basic/Sitting_Idle_Loop.vrma";
 const SITTING_EXIT_VRMA_PATH: &str =
     "animations/animasi_basic/Sitting_Exit.vrma";
+
+// Phase 5.8 idle micro-actions. Fidgets only: Clapping/Goodbye/Jump are also
+// converted and unused, but a pet that randomly applauds while you work reads
+// as noise rather than life.
+const IDLE_LOOK_AROUND_VRMA_PATH: &str =
+    "animations/VRMA/LookAround.vrma";
+const IDLE_RELAX_VRMA_PATH: &str =
+    "animations/VRMA/Relax.vrma";
+const IDLE_SLEEPY_VRMA_PATH: &str =
+    "animations/VRMA/Sleepy.vrma";
+const IDLE_BLUSH_VRMA_PATH: &str =
+    "animations/VRMA/Blush.vrma";
 
 // Phase 5.5 menu-triggered animation library.
 // Only these five are preloaded; the hundreds of other downloaded VRMAs stay
@@ -265,6 +291,45 @@ struct DesktopPetInteraction {
     recent_unsnap_surface_y: Option<i32>,
 }
 
+impl DesktopPetInteraction {
+    /// Drop every in-flight pointer gesture.
+    ///
+    /// `ButtonInput<MouseButton>` is application-global while `drag_nera_window`
+    /// is gated on `presentation::desktop_pet_active`. Whenever another surface
+    /// takes input ownership — the Settings window, or an Attention
+    /// presentation — the LMB release edge can pass unseen and leave `state`
+    /// frozen at `Pressed`/`Dragging`. `update_click_through` deliberately keeps
+    /// `hit_test = true` while captured, so a frozen state would swallow every
+    /// desktop click until the user happened to complete another full
+    /// press+release over Nera.
+    fn reset_gesture_state(&mut self) {
+        self.state = InteractionState::None;
+        self.pressed_body_part = None;
+        self.right_pressed_body_part = None;
+        self.drag_offset = None;
+        self.drag_start_cursor = None;
+        self.last_drag_cursor = None;
+        self.drag_started_at = None;
+        self.right_press_origin = None;
+        self.snap_cursor = None;
+    }
+
+    /// Stronger reset for Attention enter/exit.
+    ///
+    /// Presentation resizes and relocates the pet HWND into a large portrait
+    /// crop and then restores the original rect afterwards. The anti-resnap
+    /// guards are recorded in *desktop* pixels against the pre-Attention rect,
+    /// so keeping them would let a stale `guard_center` /
+    /// `recent_unsnap_surface_y` veto or force a snap the moment DesktopPet
+    /// resumes. They have no meaning across the round-trip.
+    fn reset_for_attention(&mut self) {
+        self.reset_gesture_state();
+        self.sitting_lock_until = None;
+        self.unsnap_cooldown_until = None;
+        self.guard_center = None;
+        self.recent_unsnap_surface_y = None;
+    }
+}
 
 #[derive(Resource, Default)]
 struct HeadPatGesture {
@@ -405,13 +470,18 @@ fn main() {
         DesktopEnvironmentPlugin,
         InteractionPlugin,
         NeraAnimationPlugin,
+        NeraExpressionPlugin,
         PresentationPlugin,
         alarm::AlarmPlugin,
         NeraSettingsPlugin,
     ));
 
     #[cfg(target_os = "windows")]
-    app.add_plugins((TrayPlugin, ActionMenuPlugin));
+    app.add_plugins((
+        TrayPlugin,
+        ActionMenuPlugin,
+        AlarmDismissPlugin,
+    ));
 
     app.insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
@@ -443,6 +513,13 @@ fn main() {
                     .run_if(presentation::desktop_pet_active),
                 sync_environment_animation_state,
                 sync_interaction_animation_actions,
+                // Phase 5.8 idle variation. Runs before the tick so a fidget
+                // requested this frame ages like every other one-shot, and
+                // before `apply_animation_state` so it plays without a frame of
+                // latency. It is the lowest priority layer, so it can never
+                // displace something the systems above just requested.
+                schedule_idle_variation
+                    .run_if(presentation::desktop_pet_active),
                 tick_animation_actions,
                 sync_look_at_for_animation,
                 apply_animation_state,
@@ -453,6 +530,7 @@ fn main() {
             PostUpdate,
             update_click_through
                 .after(VrmSystemSets::SpringBone)
+                .run_if(presentation::desktop_pet_active)
                 .run_if(settings::nera_input_available),
         )
         .add_systems(
@@ -613,6 +691,39 @@ fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
                     VrmaHandle(asset_server.load(SITTING_EXIT_VRMA_PATH)),
                 ))
                 .observe(register_sitting_exit_animation);
+
+            // Phase 5.8 idle micro-actions. Same child-of-"Nera" pattern as
+            // everything else here: bevy_vrm1 needs the VRM ancestry to
+            // retarget the clip.
+            parent
+                .spawn((
+                    Name::new("Nera Idle LookAround"),
+                    VrmaHandle(
+                        asset_server.load(IDLE_LOOK_AROUND_VRMA_PATH),
+                    ),
+                ))
+                .observe(register_idle_look_around_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Idle Relax"),
+                    VrmaHandle(asset_server.load(IDLE_RELAX_VRMA_PATH)),
+                ))
+                .observe(register_idle_relax_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Idle Sleepy"),
+                    VrmaHandle(asset_server.load(IDLE_SLEEPY_VRMA_PATH)),
+                ))
+                .observe(register_idle_sleepy_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Idle Blush"),
+                    VrmaHandle(asset_server.load(IDLE_BLUSH_VRMA_PATH)),
+                ))
+                .observe(register_idle_blush_animation);
 
             parent
                 .spawn((
@@ -1369,15 +1480,7 @@ fn suspend_nera_interaction_for_settings(
     // Settings is a real second Bevy window, but ButtonInput<MouseButton> is
     // application-global. Clear every *active gesture* so a Settings click
     // cannot continue a PrimaryWindow press/drag that happened previously.
-    interaction.state = InteractionState::None;
-    interaction.pressed_body_part = None;
-    interaction.right_pressed_body_part = None;
-    interaction.drag_offset = None;
-    interaction.drag_start_cursor = None;
-    interaction.last_drag_cursor = None;
-    interaction.drag_started_at = None;
-    interaction.right_press_origin = None;
-    interaction.snap_cursor = None;
+    interaction.reset_gesture_state();
 
     hovered.part = None;
     head_pat.reset_stroke();

@@ -1,0 +1,23 @@
+1. **Phase 5.75 — Alarm / Attention Lifecycle** 
+   -  reset stale `Pressed/Dragging` saat masuk/keluar Attention 
+   -  real alarm dismiss 
+   -  beresin `Custom Alarm` atau disable dengan jelas kalau mau ditunda 
+2. **Phase 5.8 — Expression & Idle Variation** 
+   -  facial expression state 
+   -  mapping Neutral/Happy/Angry/Sad/Surprised 
+   -  idle variation / micro-action foundation 
+
+Setelah itu baru:
+
+```
+```
+
+```
+Phase 5.9 — Refactor / Cleanup / Robustness
+
+
+
+
+```
+
+gas lanjutin project nera

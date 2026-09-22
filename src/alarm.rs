@@ -50,6 +50,7 @@ use crate::{
         AttentionKind,
         PresentationCommand,
         PresentationExited,
+        PresentationState,
     },
 };
 
@@ -58,6 +59,20 @@ const ALARM_JUMP_VRMA_PATH: &str =
     "animations/animasi_basic/jump_happy.vrma";
 const ALARM_WAVE_VRMA_PATH: &str =
     "animations/animasi_basic/161_Waving.vrma";
+
+/// If the alarm asked for Attention but presentation never leaves DesktopPet,
+/// something failed before the dismiss UI could be created. Never leave a
+/// looping alarm with no reachable dismissal path.
+const ALARM_ATTENTION_FAILSAFE: Duration = Duration::from_secs(2);
+
+/// Default snooze interval used by the alarm panel.
+pub(crate) const DEFAULT_SNOOZE_DURATION: Duration = Duration::from_secs(5 * 60);
+
+/// Runtime controls emitted by the alarm presentation UI.
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AlarmControlCommand {
+    Snooze(Duration),
+}
 
 #[derive(Clone, Copy, Debug)]
 enum AlarmPhase {
@@ -68,7 +83,9 @@ enum AlarmPhase {
         duration: Duration,
     },
 
-    Ringing,
+    Ringing {
+        started_at: Instant,
+    },
 }
 
 #[derive(Resource, Debug)]
@@ -86,7 +103,7 @@ impl Default for AlarmState {
 
 impl AlarmState {
     pub(crate) fn is_ringing(&self) -> bool {
-        matches!(self.phase, AlarmPhase::Ringing)
+        matches!(self.phase, AlarmPhase::Ringing { .. })
     }
 
     pub(crate) fn remaining(&self) -> Option<Duration> {
@@ -123,6 +140,7 @@ impl Plugin for AlarmPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AlarmState>()
             .init_resource::<AlarmVrmaBootstrap>()
+            .add_message::<AlarmControlCommand>()
             .add_systems(
                 Startup,
                 load_alarm_audio,
@@ -132,9 +150,10 @@ impl Plugin for AlarmPlugin {
                 (
                     ensure_alarm_vrmas_under_nera,
                     consume_alarm_menu_commands,
-                    debug_alarm_now,
+                    consume_alarm_control_commands,
                     tick_alarm_deadline,
                     cleanup_after_presentation_exit,
+                    abort_ringing_if_attention_never_started,
                 )
                     .chain(),
             );
@@ -214,13 +233,28 @@ fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {
         AlarmMenuChoice::TenMinutes => {
             Some(Duration::from_secs(10 * 60))
         }
+        AlarmMenuChoice::FifteenMinutes => {
+            Some(Duration::from_secs(15 * 60))
+        }
         AlarmMenuChoice::ThirtyMinutes => {
             Some(Duration::from_secs(30 * 60))
         }
+        AlarmMenuChoice::FortyFiveMinutes => {
+            Some(Duration::from_secs(45 * 60))
+        }
+        AlarmMenuChoice::OneHour => {
+            Some(Duration::from_secs(60 * 60))
+        }
+        AlarmMenuChoice::TwoHours => {
+            Some(Duration::from_secs(2 * 60 * 60))
+        }
 
-        // Phase 5.6.2 will attach a proper input panel.
-        AlarmMenuChoice::Custom
-        | AlarmMenuChoice::Cancel => None,
+        // Zero delay fires on the next `tick_alarm_deadline`, so the test
+        // action reuses the one real trigger path instead of duplicating it.
+        // This replaces the old Ctrl+Alt+A debug shortcut.
+        AlarmMenuChoice::TestNow => Some(Duration::ZERO),
+
+        AlarmMenuChoice::Cancel => None,
     }
 }
 
@@ -246,7 +280,7 @@ fn consume_alarm_menu_commands(
                         info!("Nera alarm cancelled");
                     }
 
-                    AlarmPhase::Ringing => {
+                    AlarmPhase::Ringing { .. } => {
                         // Cleanup happens from PresentationExited so all alarm
                         // exit paths have one single source of truth.
                         presentation.write(
@@ -254,13 +288,6 @@ fn consume_alarm_menu_commands(
                         );
                     }
                 }
-            }
-
-            AlarmMenuChoice::Custom => {
-                warn!(
-                    "Custom alarm duration UI is not wired yet; \
-                     use 5 / 10 / 30 min in Phase 5.6.1"
-                );
             }
 
             preset => {
@@ -291,34 +318,55 @@ fn consume_alarm_menu_commands(
     }
 }
 
-/// Development-only shortcut for testing without waiting five minutes.
-///
-/// Ctrl + Alt + A -> ring immediately.
-///
-/// Remove this once the Alarm panel has a dedicated "Test Alarm" action.
-fn debug_alarm_now(
-    keyboard: Res<ButtonInput<KeyCode>>,
+fn consume_alarm_control_commands(
+    mut commands: Commands,
+    mut controls: MessageReader<AlarmControlCommand>,
     mut state: ResMut<AlarmState>,
+    mut presentation: MessageWriter<PresentationCommand>,
+    mut animation: MessageWriter<AlarmAnimationCommand>,
+    alarm_audio: Query<
+        (Entity, Option<&AudioSink>),
+        With<AlarmAudioPlayback>,
+    >,
 ) {
-    let ctrl = keyboard.pressed(KeyCode::ControlLeft)
-        || keyboard.pressed(KeyCode::ControlRight);
-    let alt = keyboard.pressed(KeyCode::AltLeft)
-        || keyboard.pressed(KeyCode::AltRight);
+    for control in controls.read() {
+        let AlarmControlCommand::Snooze(duration) = *control;
 
-    if ctrl && alt && keyboard.just_pressed(KeyCode::KeyA) {
-        if state.is_ringing() {
-            warn!(
-                "DEBUG alarm trigger ignored: alarm is already ringing"
-            );
-            return;
+        if !state.is_ringing() {
+            warn!("Alarm snooze ignored: alarm is not currently ringing");
+            continue;
         }
 
+        let mut stopped = 0usize;
+
+        // Snooze is a real lifecycle transition, not a second alarm player:
+        // stop the current presentation/audio first, then arm the next deadline.
+        for (entity, sink) in &alarm_audio {
+            if let Some(sink) = sink {
+                sink.stop();
+            }
+
+            commands.entity(entity).despawn();
+            stopped += 1;
+        }
+
+        animation.write(AlarmAnimationCommand::Stop);
+
         state.phase = AlarmPhase::Armed {
-            deadline: Instant::now(),
-            duration: Duration::ZERO,
+            deadline: Instant::now() + duration,
+            duration,
         };
 
-        info!("DEBUG: Nera alarm deadline forced to now");
+        // Presentation teardown restores the exact DesktopPet snapshot. The
+        // normal PresentationExited alarm cleanup intentionally sees Armed here
+        // and leaves the newly scheduled snooze intact.
+        presentation.write(PresentationCommand::ExitAttention);
+
+        info!(
+            "Nera alarm snoozed for {:?} | {} audio player(s) stopped",
+            duration,
+            stopped,
+        );
     }
 }
 
@@ -365,7 +413,9 @@ fn tick_alarm_deadline(
         PlaybackSettings::LOOP,
     ));
 
-    state.phase = AlarmPhase::Ringing;
+    state.phase = AlarmPhase::Ringing {
+        started_at: Instant::now(),
+    };
 
     presentation.write(
         PresentationCommand::EnterAttention(
@@ -396,7 +446,7 @@ fn cleanup_after_presentation_exit(
             continue;
         }
 
-        let AlarmPhase::Ringing = state.phase else {
+        let AlarmPhase::Ringing { .. } = state.phase else {
             continue;
         };
 
@@ -423,6 +473,60 @@ fn cleanup_after_presentation_exit(
     }
 }
 
+fn should_abort_failed_attention(
+    presentation_is_desktop_pet: bool,
+    ringing_for: Duration,
+) -> bool {
+    presentation_is_desktop_pet
+        && ringing_for >= ALARM_ATTENTION_FAILSAFE
+}
+
+/// Defense-in-depth for a failed Attention transition.  The dismiss box is
+/// spawned from `PresentationEntered`, so if presentation never leaves
+/// DesktopPet there is otherwise no clickable path that can stop the looping
+/// audio.  This is intentionally alarm-owned rather than dismiss-window-owned:
+/// it also covers failures that happen before that window can be requested.
+fn abort_ringing_if_attention_never_started(
+    mut commands: Commands,
+    presentation_state: Res<PresentationState>,
+    mut state: ResMut<AlarmState>,
+    mut animation: MessageWriter<AlarmAnimationCommand>,
+    alarm_audio: Query<
+        (Entity, Option<&AudioSink>),
+        With<AlarmAudioPlayback>,
+    >,
+) {
+    let AlarmPhase::Ringing { started_at } = state.phase else {
+        return;
+    };
+
+    if !should_abort_failed_attention(
+        presentation_state.is_desktop_pet(),
+        started_at.elapsed(),
+    ) {
+        return;
+    }
+
+    let mut stopped = 0usize;
+    for (entity, sink) in &alarm_audio {
+        if let Some(sink) = sink {
+            sink.stop();
+        }
+
+        commands.entity(entity).despawn();
+        stopped += 1;
+    }
+
+    animation.write(AlarmAnimationCommand::Stop);
+    state.phase = AlarmPhase::Idle;
+
+    error!(
+        "Nera alarm Attention failed to start within {:?}; stopped {} audio player(s) and returned alarm runtime to Idle",
+        ALARM_ATTENTION_FAILSAFE,
+        stopped,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,17 +542,50 @@ mod tests {
             Some(Duration::from_secs(600)),
         );
         assert_eq!(
+            preset_duration(AlarmMenuChoice::FifteenMinutes),
+            Some(Duration::from_secs(900)),
+        );
+        assert_eq!(
             preset_duration(AlarmMenuChoice::ThirtyMinutes),
             Some(Duration::from_secs(1800)),
+        );
+        assert_eq!(
+            preset_duration(AlarmMenuChoice::FortyFiveMinutes),
+            Some(Duration::from_secs(2700)),
+        );
+        assert_eq!(
+            preset_duration(AlarmMenuChoice::OneHour),
+            Some(Duration::from_secs(3600)),
+        );
+        assert_eq!(
+            preset_duration(AlarmMenuChoice::TwoHours),
+            Some(Duration::from_secs(7200)),
+        );
+    }
+
+    /// "Test Now" must arm an already-expired deadline so the next
+    /// `tick_alarm_deadline` fires it through the single real trigger path.
+    #[test]
+    fn test_now_arms_an_already_expired_deadline() {
+        let duration = preset_duration(AlarmMenuChoice::TestNow)
+            .expect("Test Now is a timer preset");
+
+        assert_eq!(duration, Duration::ZERO);
+
+        let deadline = Instant::now() + duration;
+        assert!(Instant::now() >= deadline);
+    }
+
+    #[test]
+    fn default_snooze_is_five_minutes() {
+        assert_eq!(
+            DEFAULT_SNOOZE_DURATION,
+            Duration::from_secs(300),
         );
     }
 
     #[test]
-    fn custom_and_cancel_are_not_timer_presets() {
-        assert_eq!(
-            preset_duration(AlarmMenuChoice::Custom),
-            None,
-        );
+    fn cancel_is_not_a_timer_preset() {
         assert_eq!(
             preset_duration(AlarmMenuChoice::Cancel),
             None,
@@ -464,11 +601,28 @@ mod tests {
     #[test]
     fn ringing_state_is_detected_without_audio_entity_identity() {
         let state = AlarmState {
-            phase: AlarmPhase::Ringing,
+            phase: AlarmPhase::Ringing {
+                started_at: Instant::now(),
+            },
         };
 
         assert!(state.is_ringing());
         assert!(state.remaining().is_none());
     }
 
+    #[test]
+    fn failed_attention_failsafe_only_applies_while_still_desktop_pet() {
+        assert!(!should_abort_failed_attention(
+            true,
+            ALARM_ATTENTION_FAILSAFE - Duration::from_millis(1),
+        ));
+        assert!(should_abort_failed_attention(
+            true,
+            ALARM_ATTENTION_FAILSAFE,
+        ));
+        assert!(!should_abort_failed_attention(
+            false,
+            ALARM_ATTENTION_FAILSAFE + Duration::from_secs(30),
+        ));
+    }
 }

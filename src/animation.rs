@@ -22,6 +22,7 @@ use crate::{
     interaction::{
         BodyPart, NeraClicked, NeraDragStarted, NeraHeadPatted, NeraReleased,
     },
+    rng::NeraRng,
 };
 
 #[cfg(target_os = "windows")]
@@ -43,6 +44,18 @@ const SUPPORT_BLEND: Duration = Duration::from_millis(100);
 const DEATH_BLEND: Duration = Duration::from_millis(160);
 const ALARM_BLEND: Duration = Duration::from_millis(120);
 
+/// Phase 5.8 idle variation. A desktop pet that repeats one loop for hours
+/// reads as a screensaver, so an idle Nera occasionally fidgets on her own.
+///
+/// The delay band is wide on purpose: a fixed interval is a pattern the user
+/// notices within minutes, which is worse than no variation at all.
+const IDLE_VARIATION_MIN_DELAY: Duration = Duration::from_secs(25);
+const IDLE_VARIATION_MAX_DELAY: Duration = Duration::from_secs(75);
+
+/// Longer than `BASE_BLEND`: a fidget eases in and out of Idle rather than
+/// cutting, so it reads as a continuation of standing rather than a reaction.
+const IDLE_VARIATION_BLEND: Duration = Duration::from_millis(220);
+
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AlarmAnimationCommand {
     Start,
@@ -60,6 +73,40 @@ pub(crate) enum BasePose {
     Sitting,
 }
 
+/// Phase 5.8 idle micro-actions — short one-shot fidgets played on top of Idle.
+///
+/// Deliberately limited to fidgets. `Clapping.vrma`, `Goodbye.vrma` and
+/// `Jump.vrma` are converted and unused too, but a desktop pet that randomly
+/// applauds or waves goodbye while you are trying to work reads as noise
+/// rather than life.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum IdleMicroAction {
+    LookAround,
+    Relax,
+    Sleepy,
+    Blush,
+}
+
+impl IdleMicroAction {
+    /// Stable order, so the scheduler can walk the candidates without
+    /// allocating and so a seeded `NeraRng` replays identically in tests.
+    const ALL: [IdleMicroAction; 4] = [
+        IdleMicroAction::LookAround,
+        IdleMicroAction::Relax,
+        IdleMicroAction::Sleepy,
+        IdleMicroAction::Blush,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            IdleMicroAction::LookAround => "Idle/LookAround",
+            IdleMicroAction::Relax => "Idle/Relax",
+            IdleMicroAction::Sleepy => "Idle/Sleepy",
+            IdleMicroAction::Blush => "Idle/Blush",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
     Floating,
@@ -75,6 +122,8 @@ pub(crate) enum TemporaryAction {
     MenuAnimation(AnimationMenuChoice),
     /// Phase 5.5: persistent while the right-click menu is open.
     Praying,
+    /// Phase 5.8: scheduled fidget, always outranked by real interaction.
+    IdleMicro(IdleMicroAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -86,6 +135,9 @@ enum SupportTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 enum AnimationPriority {
+    /// Phase 5.8 idle fidgets. Below every real interaction layer, so a
+    /// micro-action can never delay a reaction, a drag, physics, or the alarm.
+    IdleVariation = 40,
     Reaction = 60,
     Menu = 70,
     Floating = 80,
@@ -109,6 +161,7 @@ impl TemporaryAction {
             Self::Death => AnimationPriority::Critical,
             Self::AlarmWave => AnimationPriority::Alarm,
             Self::AlarmJump => AnimationPriority::AlarmIntro,
+            Self::IdleMicro(_) => AnimationPriority::IdleVariation,
         }
     }
 
@@ -118,6 +171,13 @@ impl TemporaryAction {
 
     fn is_critical(self) -> bool {
         self.priority() == AnimationPriority::Critical
+    }
+
+    /// True for the Phase 5.8 fidget layer, which holds at most one member at a
+    /// time: two overlapping micro-actions would both sit at priority 40 and
+    /// `highest_action` would pick between them arbitrarily.
+    fn is_idle_variation(self) -> bool {
+        matches!(self, Self::IdleMicro(_))
     }
 }
 
@@ -136,7 +196,7 @@ struct TimedSupportTransition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum VisualState {
+pub(crate) enum VisualState {
     Idle,
     SittingLoop,
     SittingEnter,
@@ -153,6 +213,8 @@ enum VisualState {
     #[cfg(target_os = "windows")]
     MenuAnimation(AnimationMenuChoice),
     Praying,
+    /// Phase 5.8 scheduled fidget.
+    IdleMicro(IdleMicroAction),
 }
 
 // -----------------------------------------------------------------------------
@@ -198,6 +260,19 @@ impl NeraAnimationState {
     }
 
     fn set_base_pose(&mut self, pose: BasePose) {
+        if pose == BasePose::Sitting {
+            // Idle fidgets are standing clips. If Nera becomes seated while one
+            // is active, discard it instead of hiding it under Sitting and
+            // letting the tail resume if she stands again quickly.
+            let before = self.active_actions.len();
+            self.active_actions
+                .retain(|active| !active.action.is_idle_variation());
+
+            if before != self.active_actions.len() {
+                info!("Nera idle variation cancelled by Sitting");
+            }
+        }
+
         if self.base_pose != pose {
             info!("Nera base pose: {:?} -> {:?}", self.base_pose, pose);
             self.base_pose = pose;
@@ -210,9 +285,29 @@ impl NeraAnimationState {
         self.support_transition = None;
         self.was_on_sitting_surface = false;
         self.set_base_pose(BasePose::Idle);
+
+        // Attention owns the avatar completely. Keep only the alarm actions
+        // that are part of the Attention presentation itself; every desktop
+        // interaction action (including persistent Floating and any unfinished
+        // idle/reaction tail) is stale once control crosses this boundary.
+        let before = self.active_actions.len();
+        self.active_actions.retain(|active| {
+            matches!(
+                active.action,
+                TemporaryAction::AlarmWave | TemporaryAction::AlarmJump
+            )
+        });
+        let cleared = before - self.active_actions.len();
+
+        // A pre-alarm 1/3 or 2/3 damage combo must not survive an Attention
+        // round-trip and turn an unrelated later poke into Death.
+        self.reset_damage_combo();
         self.bump_revision();
 
-        info!("Nera support suspended for Attention");
+        info!(
+            "Nera support suspended for Attention | cleared {} desktop action(s)",
+            cleared,
+        );
     }
 
     /// Restore the desktop base pose without replaying SittingEnter.
@@ -249,6 +344,12 @@ impl NeraAnimationState {
             return;
         }
 
+        // Same reasoning as `request_one_shot`: every persistent action
+        // outranks a fidget, so drop it instead of letting its tail resume
+        // when the persistent state ends.
+        self.active_actions
+            .retain(|active| !active.action.is_idle_variation());
+
         self.active_actions.push(ActiveAction {
             action,
             remaining: None,
@@ -270,6 +371,14 @@ impl NeraAnimationState {
             return;
         }
 
+        // A fidget never survives anything else being requested. It is the
+        // lowest layer, so resuming its tail once a reaction ends would look
+        // like a glitch rather than a continuation.
+        if !action.is_idle_variation() {
+            self.active_actions
+                .retain(|active| !active.action.is_idle_variation());
+        }
+
         // Only one semantic reaction at a time. Higher-level persistent
         // states (Floating / future Praying) remain alive independently.
         if action.is_reaction() {
@@ -283,6 +392,12 @@ impl NeraAnimationState {
                 !active.action.is_reaction()
                     && !active.action.is_critical()
             });
+        } else if action.is_idle_variation() {
+            // One fidget at a time: they all sit at `IdleVariation`, so
+            // overlapping members would leave `highest_action` picking between
+            // two equal priorities arbitrarily.
+            self.active_actions
+                .retain(|active| !active.action.is_idle_variation());
         } else {
             self.active_actions
                 .retain(|active| active.action != action);
@@ -369,6 +484,28 @@ impl NeraAnimationState {
         if before != self.active_actions.len() {
             info!("Nera action -{:?}", action);
         }
+    }
+
+    /// Phase 5.8 idle variation entry point.
+    ///
+    /// Returns `false` when Nera is not actually idle, so the scheduler can
+    /// distinguish a rejected fidget from an accepted one and keep its cooldown
+    /// instead of burning it on a frame where nothing could play.
+    pub(crate) fn request_idle_variation(
+        &mut self,
+        action: IdleMicroAction,
+        duration: Duration,
+    ) -> bool {
+        if self.visual_state() != VisualState::Idle {
+            return false;
+        }
+
+        self.request_one_shot(
+            TemporaryAction::IdleMicro(action),
+            duration,
+        );
+
+        true
     }
 
     /// Phase 5.7 menu hook. The menu system should call this when the actual
@@ -510,17 +647,33 @@ impl NeraAnimationState {
     fn highest_action(&self) -> Option<TemporaryAction> {
         self.active_actions
             .iter()
-            .filter(|active| {
-                // While attached/pending, Floating stays logically alive but
-                // never visually pulls Nera out of the sitting pose.
-                !(self.base_pose == BasePose::Sitting
-                    && active.action == TemporaryAction::Floating)
-            })
+            .filter(|active| !self.suppressed_by_sitting(active.action))
             .max_by_key(|active| active.action.priority())
             .map(|active| active.action)
     }
 
-    fn visual_state(&self) -> VisualState {
+    /// Actions that must not play while Nera is attached to a seat.
+    ///
+    /// Both are standing clips. Playing one would visually pull her off the
+    /// surface her Seat anchor was calibrated against, so they stay logically
+    /// alive but never win the pose. A micro-action can only *start* while
+    /// `visual_state()` is Idle, but she can be sat down mid-fidget.
+    fn suppressed_by_sitting(&self, action: TemporaryAction) -> bool {
+        if self.base_pose != BasePose::Sitting {
+            return false;
+        }
+
+        matches!(
+            action,
+            TemporaryAction::Floating | TemporaryAction::IdleMicro(_)
+        )
+    }
+
+    /// The single authoritative answer to "what is Nera doing right now".
+    ///
+    /// Phase 5.8 derives the facial expression from this rather than from raw
+    /// interaction messages, so the face and the body can never disagree.
+    pub(crate) fn visual_state(&self) -> VisualState {
         if let Some(transition) = self.support_transition {
             return match transition.kind {
                 SupportTransition::SittingEnter => VisualState::SittingEnter,
@@ -544,6 +697,9 @@ impl NeraAnimationState {
                     VisualState::MenuAnimation(choice)
                 }
                 TemporaryAction::Praying => VisualState::Praying,
+                TemporaryAction::IdleMicro(action) => {
+                    VisualState::IdleMicro(action)
+                }
             };
         }
 
@@ -664,6 +820,14 @@ pub(crate) struct NeraAnimationClips {
     sitting_loop: Option<ClipSlot>,
     sitting_exit: Option<ClipSlot>,
 
+    // Phase 5.8 idle micro-actions. Loaded asynchronously like everything
+    // else, so the scheduler must treat a missing slot as "not available yet"
+    // rather than as an error.
+    idle_look_around: Option<ClipSlot>,
+    idle_relax: Option<ClipSlot>,
+    idle_sleepy: Option<ClipSlot>,
+    idle_blush: Option<ClipSlot>,
+
     #[cfg(target_os = "windows")]
     wave: Option<ClipSlot>,
     #[cfg(target_os = "windows")]
@@ -681,6 +845,15 @@ impl NeraAnimationClips {
         self.falling_to_landing
             .map(|clip| clip.duration)
             .unwrap_or(Duration::ZERO)
+    }
+
+    fn idle_micro(&self, action: IdleMicroAction) -> Option<ClipSlot> {
+        match action {
+            IdleMicroAction::LookAround => self.idle_look_around,
+            IdleMicroAction::Relax => self.idle_relax,
+            IdleMicroAction::Sleepy => self.idle_sleepy,
+            IdleMicroAction::Blush => self.idle_blush,
+        }
     }
 }
 
@@ -700,6 +873,131 @@ struct AlarmAnimationRuntime {
     waiting_logged: bool,
 }
 
+/// Phase 5.8 idle variation scheduler.
+///
+/// Counts down only while Nera is genuinely idle, so a long interaction
+/// postpones variety rather than spending it on frames where nothing could
+/// play. Shaped like `AlarmAnimationRuntime`: a small runtime resource beside
+/// the authoritative `NeraAnimationState`, not a second state machine.
+#[derive(Resource)]
+pub(crate) struct IdleVariationRuntime {
+    cooldown: Duration,
+    /// Avoids the same fidget twice in a row, which is the pattern users
+    /// notice fastest.
+    last: Option<IdleMicroAction>,
+    rng: NeraRng,
+}
+
+impl Default for IdleVariationRuntime {
+    fn default() -> Self {
+        let mut rng = NeraRng::from_entropy();
+        let cooldown = random_idle_delay(&mut rng);
+
+        Self {
+            cooldown,
+            last: None,
+            rng,
+        }
+    }
+}
+
+impl IdleVariationRuntime {
+    fn tick(
+        &mut self,
+        delta: Duration,
+        state: &mut NeraAnimationState,
+        clips: &NeraAnimationClips,
+    ) {
+        if state.visual_state() != VisualState::Idle {
+            return;
+        }
+
+        self.cooldown = self.cooldown.saturating_sub(delta);
+
+        if !self.cooldown.is_zero() {
+            return;
+        }
+
+        let Some((action, duration)) =
+            pick_idle_micro(clips, self.last, &mut self.rng)
+        else {
+            // No micro-action has finished loading yet. Retry next frame
+            // instead of arming a full 25-75s delay for an asset that may
+            // arrive a moment from now.
+            return;
+        };
+
+        if !state.request_idle_variation(action, duration) {
+            return;
+        }
+
+        self.last = Some(action);
+        self.cooldown = self.next_delay();
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        random_idle_delay(&mut self.rng)
+    }
+}
+
+fn random_idle_delay(rng: &mut NeraRng) -> Duration {
+    Duration::from_secs_f32(rng.range_f32(
+        IDLE_VARIATION_MIN_DELAY.as_secs_f32(),
+        IDLE_VARIATION_MAX_DELAY.as_secs_f32(),
+    ))
+}
+
+/// Choose a loaded micro-action, starting from a random offset.
+///
+/// Walking the list rather than re-rolling means a clip that has not finished
+/// loading is skipped instead of stalling the scheduler, and no allocation is
+/// needed. `avoid` demotes the previous fidget to a fallback, so a single
+/// loaded clip still plays rather than the scheduler giving up.
+fn pick_idle_micro(
+    clips: &NeraAnimationClips,
+    avoid: Option<IdleMicroAction>,
+    rng: &mut NeraRng,
+) -> Option<(IdleMicroAction, Duration)> {
+    let all = IdleMicroAction::ALL;
+
+    let start = rng.pick_index(all.len())?;
+    let mut fallback: Option<(IdleMicroAction, Duration)> = None;
+
+    for offset in 0..all.len() {
+        let candidate = all[(start + offset) % all.len()];
+
+        let Some(clip) = clips.idle_micro(candidate) else {
+            continue;
+        };
+
+        // A zero duration means the VRMA reported no length, which
+        // `request_one_shot` would reject anyway.
+        if clip.duration.is_zero() {
+            continue;
+        }
+
+        let found = (candidate, clip.duration);
+
+        if Some(candidate) == avoid {
+            fallback.get_or_insert(found);
+            continue;
+        }
+
+        return Some(found);
+    }
+
+    fallback
+}
+
+pub(crate) fn schedule_idle_variation(
+    time: Res<Time>,
+    clips: Res<NeraAnimationClips>,
+    mut state: ResMut<NeraAnimationState>,
+    mut runtime: ResMut<IdleVariationRuntime>,
+) {
+    runtime.tick(time.delta(), &mut state, &clips);
+}
+
 pub(crate) struct NeraAnimationPlugin;
 
 impl Plugin for NeraAnimationPlugin {
@@ -708,6 +1006,7 @@ impl Plugin for NeraAnimationPlugin {
             .init_resource::<NeraAnimationClips>()
             .init_resource::<NeraAnimationPlayback>()
             .init_resource::<AlarmAnimationRuntime>()
+            .init_resource::<IdleVariationRuntime>()
             .add_message::<AlarmAnimationCommand>()
             .add_systems(
                 Update,
@@ -781,6 +1080,24 @@ register_clip!(
     sitting_exit,
     "SittingExit"
 );
+
+// Phase 5.8 idle micro-actions.
+register_clip!(
+    register_idle_look_around_animation,
+    idle_look_around,
+    "Idle/LookAround"
+);
+register_clip!(
+    register_idle_relax_animation,
+    idle_relax,
+    "Idle/Relax"
+);
+register_clip!(
+    register_idle_sleepy_animation,
+    idle_sleepy,
+    "Idle/Sleepy"
+);
+register_clip!(register_idle_blush_animation, idle_blush, "Idle/Blush");
 
 #[cfg(target_os = "windows")]
 register_clip!(register_wave_animation, wave, "Menu/Wave");
@@ -1120,6 +1437,11 @@ fn clip_for_visual(
         VisualState::Praying => {
             (clips.praying, RepeatAnimation::Forever, "Praying")
         }
+        VisualState::IdleMicro(action) => (
+            clips.idle_micro(action),
+            RepeatAnimation::Count(1),
+            action.label(),
+        ),
     }
 }
 
@@ -1143,6 +1465,7 @@ fn transition_for_visual(visual: VisualState) -> Duration {
         #[cfg(target_os = "windows")]
         VisualState::MenuAnimation(_) => REACTION_BLEND,
         VisualState::SittingEnter | VisualState::SittingExit => SUPPORT_BLEND,
+        VisualState::IdleMicro(_) => IDLE_VARIATION_BLEND,
         VisualState::Idle
         | VisualState::SittingLoop
         | VisualState::Floating
@@ -1255,6 +1578,35 @@ mod tests {
         assert_eq!(state.visual_state(), VisualState::Floating);
 
         state.finish_action(TemporaryAction::Floating);
+        assert_eq!(state.visual_state(), VisualState::HitHead);
+    }
+
+    /// Phase 5.75 regression: an alarm that fires mid-drag never produces
+    /// `NeraReleased { was_dragging: true }`, because `drag_nera_window` is
+    /// gated off by `desktop_pet_active`. `Floating` is persistent, so it would
+    /// survive the whole Attention round-trip at priority 80 and outrank every
+    /// reaction on the way back.
+    #[test]
+    fn attention_suspend_drops_the_stale_floating_action() {
+        let mut state = NeraAnimationState::default();
+        state.start_persistent_action(TemporaryAction::Floating);
+        assert_eq!(state.visual_state(), VisualState::Floating);
+
+        state.suspend_support_for_attention();
+
+        assert!(!state
+            .active_actions
+            .iter()
+            .any(|active| active.action == TemporaryAction::Floating));
+        assert_eq!(state.visual_state(), VisualState::Idle);
+        assert_eq!(state.base_pose(), BasePose::Idle);
+
+        // The point of the fix: reactions must win again after returning.
+        state.restore_support_after_attention(false);
+        state.request_one_shot(
+            TemporaryAction::HitHead,
+            Duration::from_secs(1),
+        );
         assert_eq!(state.visual_state(), VisualState::HitHead);
     }
 
@@ -1487,6 +1839,328 @@ mod tests {
         assert!(!runtime.requested);
         assert!(!runtime.started);
         assert!(!runtime.waiting_logged);
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 5.8 idle variation
+    // -------------------------------------------------------------------------
+
+    fn clip(seconds: u64) -> ClipSlot {
+        ClipSlot {
+            entity: Entity::PLACEHOLDER,
+            duration: Duration::from_secs(seconds),
+        }
+    }
+
+    fn clips_with_all_micro_actions() -> NeraAnimationClips {
+        NeraAnimationClips {
+            idle_look_around: Some(clip(3)),
+            idle_relax: Some(clip(4)),
+            idle_sleepy: Some(clip(5)),
+            idle_blush: Some(clip(2)),
+            ..Default::default()
+        }
+    }
+
+    fn runtime_with(
+        seed: u64,
+        cooldown: Duration,
+    ) -> IdleVariationRuntime {
+        IdleVariationRuntime {
+            cooldown,
+            last: None,
+            rng: NeraRng::seeded(seed),
+        }
+    }
+
+    /// The whole point of putting fidgets at the bottom: nothing Nera does in
+    /// response to the user may ever be delayed by variety.
+    #[test]
+    fn idle_variation_outranks_nothing() {
+        let idle = AnimationPriority::IdleVariation;
+
+        assert!(idle < AnimationPriority::Reaction);
+        assert!(idle < AnimationPriority::Menu);
+        assert!(idle < AnimationPriority::Floating);
+        assert!(idle < AnimationPriority::Physics);
+        assert!(idle < AnimationPriority::Critical);
+        assert!(idle < AnimationPriority::Alarm);
+        assert!(idle < AnimationPriority::AlarmIntro);
+    }
+
+    #[test]
+    fn a_reaction_cancels_a_fidget_rather_than_letting_its_tail_resume() {
+        let mut state = NeraAnimationState::default();
+
+        assert!(state.request_idle_variation(
+            IdleMicroAction::LookAround,
+            Duration::from_secs(4),
+        ));
+        assert!(matches!(
+            state.visual_state(),
+            VisualState::IdleMicro(_)
+        ));
+
+        state.request_one_shot(
+            TemporaryAction::HeadStroke,
+            Duration::from_secs(2),
+        );
+        assert_eq!(state.visual_state(), VisualState::HeadStroke);
+
+        // The fidget must be *gone*, not merely outranked: resuming its last
+        // two seconds after a head pat would read as a glitch.
+        state.advance(Duration::from_secs(3));
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn sitting_cancels_a_fidget_instead_of_resuming_its_tail_later() {
+        let mut state = NeraAnimationState::default();
+
+        assert!(state.request_idle_variation(
+            IdleMicroAction::Relax,
+            Duration::from_secs(4),
+        ));
+
+        // Micro-action clips are standing clips. Once Nera becomes seated, the
+        // fidget is invalidated rather than merely hidden under the seat pose.
+        state.set_base_pose(BasePose::Sitting);
+
+        assert_eq!(state.visual_state(), VisualState::SittingLoop);
+        assert!(!state
+            .active_actions
+            .iter()
+            .any(|active| active.action.is_idle_variation()));
+
+        // Standing again must not reveal the old fidget tail.
+        state.set_base_pose(BasePose::Idle);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn request_idle_variation_is_rejected_when_nera_is_not_idle() {
+        let mut state = NeraAnimationState::default();
+        state.start_persistent_action(TemporaryAction::Floating);
+
+        assert!(!state.request_idle_variation(
+            IdleMicroAction::Sleepy,
+            Duration::from_secs(3),
+        ));
+        assert_eq!(state.visual_state(), VisualState::Floating);
+    }
+
+    #[test]
+    fn scheduler_waits_out_its_cooldown_before_fidgeting() {
+        let clips = clips_with_all_micro_actions();
+        let mut state = NeraAnimationState::default();
+        let mut runtime =
+            runtime_with(5, Duration::from_secs(10));
+
+        runtime.tick(Duration::from_millis(500), &mut state, &clips);
+
+        assert_eq!(state.visual_state(), VisualState::Idle);
+        assert!(runtime.cooldown < Duration::from_secs(10));
+
+        for _ in 0..24 {
+            runtime.tick(Duration::from_millis(500), &mut state, &clips);
+        }
+
+        assert!(matches!(
+            state.visual_state(),
+            VisualState::IdleMicro(_)
+        ));
+    }
+
+    #[test]
+    fn scheduler_does_not_count_down_while_nera_is_busy() {
+        let clips = clips_with_all_micro_actions();
+        let mut state = NeraAnimationState::default();
+        state.start_persistent_action(TemporaryAction::Floating);
+
+        let mut runtime =
+            runtime_with(5, Duration::from_secs(10));
+
+        for _ in 0..100 {
+            runtime.tick(Duration::from_secs(1), &mut state, &clips);
+        }
+
+        // A long interaction postpones variety instead of spending it.
+        assert_eq!(runtime.cooldown, Duration::from_secs(10));
+        assert_eq!(state.visual_state(), VisualState::Floating);
+    }
+
+    #[test]
+    fn firing_a_fidget_rearms_the_cooldown() {
+        let clips = clips_with_all_micro_actions();
+        let mut state = NeraAnimationState::default();
+        let mut runtime = runtime_with(9, Duration::ZERO);
+
+        runtime.tick(Duration::ZERO, &mut state, &clips);
+
+        assert!(matches!(
+            state.visual_state(),
+            VisualState::IdleMicro(_)
+        ));
+        assert!(runtime.cooldown >= IDLE_VARIATION_MIN_DELAY);
+        assert!(runtime.last.is_some());
+    }
+
+    /// The most noticeable failure mode of a fidget system is the same clip
+    /// twice in a row, which is a pattern rather than variety.
+    #[test]
+    fn scheduler_avoids_repeating_the_same_fidget() {
+        let clips = clips_with_all_micro_actions();
+        let mut state = NeraAnimationState::default();
+        let mut runtime = runtime_with(11, Duration::ZERO);
+
+        let mut played = Vec::new();
+
+        for _ in 0..12 {
+            runtime.cooldown = Duration::ZERO;
+            runtime.tick(Duration::ZERO, &mut state, &clips);
+
+            let VisualState::IdleMicro(action) = state.visual_state()
+            else {
+                panic!(
+                    "expected a fidget, got {:?}",
+                    state.visual_state()
+                );
+            };
+            played.push(action);
+
+            // Let the clip run out so the scheduler may fire again.
+            state.advance(Duration::from_secs(30));
+            assert_eq!(state.visual_state(), VisualState::Idle);
+        }
+
+        assert!(
+            played.windows(2).all(|pair| pair[0] != pair[1]),
+            "repeated a fidget back to back: {played:?}",
+        );
+    }
+
+    #[test]
+    fn next_delay_stays_inside_the_variation_band() {
+        let mut runtime = runtime_with(77, Duration::ZERO);
+
+        for _ in 0..1000 {
+            let delay = runtime.next_delay();
+
+            assert!(delay >= IDLE_VARIATION_MIN_DELAY, "{delay:?}");
+            assert!(delay <= IDLE_VARIATION_MAX_DELAY, "{delay:?}");
+        }
+    }
+
+    #[test]
+    fn pick_idle_micro_skips_clips_that_have_not_loaded() {
+        let clips = NeraAnimationClips {
+            idle_sleepy: Some(clip(5)),
+            ..Default::default()
+        };
+
+        let mut rng = NeraRng::seeded(3);
+
+        // Any random start offset must still land on the one usable clip.
+        for _ in 0..50 {
+            let picked = pick_idle_micro(&clips, None, &mut rng)
+                .expect("one clip is loaded");
+
+            assert_eq!(picked.0, IdleMicroAction::Sleepy);
+            assert_eq!(picked.1, Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn pick_idle_micro_returns_none_when_nothing_is_usable() {
+        let mut rng = NeraRng::seeded(3);
+
+        assert!(pick_idle_micro(
+            &NeraAnimationClips::default(),
+            None,
+            &mut rng,
+        )
+        .is_none());
+
+        // A zero duration means the VRMA reported no length, which
+        // `request_one_shot` would reject anyway.
+        let zero_length = NeraAnimationClips {
+            idle_relax: Some(clip(0)),
+            ..Default::default()
+        };
+
+        assert!(
+            pick_idle_micro(&zero_length, None, &mut rng).is_none()
+        );
+    }
+
+    /// With only one clip loaded the anti-repeat rule must degrade to a
+    /// fallback, never to silence.
+    #[test]
+    fn avoid_falls_back_rather_than_giving_up() {
+        let clips = NeraAnimationClips {
+            idle_blush: Some(clip(2)),
+            ..Default::default()
+        };
+
+        let mut rng = NeraRng::seeded(3);
+
+        let picked = pick_idle_micro(
+            &clips,
+            Some(IdleMicroAction::Blush),
+            &mut rng,
+        );
+
+        assert_eq!(
+            picked.map(|(action, _)| action),
+            Some(IdleMicroAction::Blush),
+        );
+    }
+
+    /// VRMAs load asynchronously, so at startup there is a window where the
+    /// scheduler is ready but no clip is. It must wait rather than arm a full
+    /// delay for an asset that is about to arrive.
+    #[test]
+    fn scheduler_keeps_waiting_while_clips_are_still_loading() {
+        let clips = NeraAnimationClips::default();
+        let mut state = NeraAnimationState::default();
+        let mut runtime = runtime_with(13, Duration::ZERO);
+
+        for _ in 0..100 {
+            runtime.tick(Duration::from_secs(1), &mut state, &clips);
+        }
+
+        assert_eq!(state.visual_state(), VisualState::Idle);
+        assert!(runtime.cooldown.is_zero());
+        assert!(runtime.last.is_none());
+    }
+
+    #[test]
+    fn fidget_blend_is_longer_than_the_base_blend() {
+        // A fidget eases in and out of Idle; cutting would read as a twitch.
+        assert!(IDLE_VARIATION_BLEND > BASE_BLEND);
+        assert_eq!(
+            transition_for_visual(VisualState::IdleMicro(
+                IdleMicroAction::LookAround
+            )),
+            IDLE_VARIATION_BLEND,
+        );
+    }
+
+    #[test]
+    fn every_micro_action_has_a_clip_slot_and_a_label() {
+        let clips = clips_with_all_micro_actions();
+
+        for action in IdleMicroAction::ALL {
+            assert!(
+                clips.idle_micro(action).is_some(),
+                "{action:?} has no clip slot",
+            );
+            assert!(!action.label().is_empty());
+        }
+
+        // The clip lookup must be a bijection over the candidate list, or the
+        // scheduler would silently play the wrong animation.
+        assert_eq!(IdleMicroAction::ALL.len(), 4);
     }
 
 }

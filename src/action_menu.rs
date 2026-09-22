@@ -118,7 +118,13 @@ pub(crate) enum AlarmMenuChoice {
     FiveMinutes,
     TenMinutes,
     ThirtyMinutes,
-    Custom,
+    FifteenMinutes,
+    FortyFiveMinutes,
+    OneHour,
+    TwoHours,
+    /// Rings immediately. Replaces the old Ctrl+Alt+A debug shortcut so the
+    /// alarm can be auditioned without a keyboard hack.
+    TestNow,
     Cancel,
 }
 
@@ -174,6 +180,10 @@ enum RadialPage {
     Root,
     Animation,
     Alarm,
+    /// Longer presets + "Test Now", reached from the Alarm page. Replaces the
+    /// old `Custom` slot, which was an enabled menu item that did nothing but
+    /// write a `warn!` to the log.
+    AlarmMore,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -303,11 +313,9 @@ const ALARM_ITEMS: [RadialItem; 6] = [
         ),
     },
     RadialItem {
-        glyph: "+",
-        label: "Custom",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::Custom),
-        ),
+        glyph: "›",
+        label: "More",
+        action: RadialItemAction::Open(RadialPage::AlarmMore),
     },
     RadialItem {
         glyph: "×",
@@ -323,11 +331,78 @@ const ALARM_ITEMS: [RadialItem; 6] = [
     },
 ];
 
+const ALARM_MORE_ITEMS: [RadialItem; 6] = [
+    RadialItem {
+        glyph: "15",
+        label: "15 min",
+        action: RadialItemAction::Command(
+            NeraActionMenuCommand::Alarm(AlarmMenuChoice::FifteenMinutes),
+        ),
+    },
+    RadialItem {
+        glyph: "45",
+        label: "45 min",
+        action: RadialItemAction::Command(
+            NeraActionMenuCommand::Alarm(AlarmMenuChoice::FortyFiveMinutes),
+        ),
+    },
+    RadialItem {
+        glyph: "1h",
+        label: "1 hour",
+        action: RadialItemAction::Command(
+            NeraActionMenuCommand::Alarm(AlarmMenuChoice::OneHour),
+        ),
+    },
+    RadialItem {
+        glyph: "2h",
+        label: "2 hours",
+        action: RadialItemAction::Command(
+            NeraActionMenuCommand::Alarm(AlarmMenuChoice::TwoHours),
+        ),
+    },
+    RadialItem {
+        glyph: "!",
+        label: "Test Now",
+        action: RadialItemAction::Command(
+            NeraActionMenuCommand::Alarm(AlarmMenuChoice::TestNow),
+        ),
+    },
+    RadialItem {
+        glyph: "‹",
+        label: "Back",
+        action: RadialItemAction::Back,
+    },
+];
+
 fn items_for(page: RadialPage) -> &'static [RadialItem] {
     match page {
         RadialPage::Root => &ROOT_ITEMS,
         RadialPage::Animation => &ANIMATION_ITEMS,
         RadialPage::Alarm => &ALARM_ITEMS,
+        RadialPage::AlarmMore => &ALARM_MORE_ITEMS,
+    }
+}
+
+/// Page hierarchy for "go up one level".
+///
+/// `None` means the page has no parent, so going up closes the wheel instead.
+/// Single source of truth: center-click, the Back item, right-click and Escape
+/// all navigate through this, so a deeper page cannot accidentally dump the
+/// user straight back to Root.
+fn parent_page(page: RadialPage) -> Option<RadialPage> {
+    match page {
+        RadialPage::Root => None,
+        RadialPage::Animation | RadialPage::Alarm => {
+            Some(RadialPage::Root)
+        }
+        RadialPage::AlarmMore => Some(RadialPage::Alarm),
+    }
+}
+
+fn navigate_back(hwnd: HWND, page: RadialPage) {
+    match parent_page(page) {
+        Some(parent) => set_page(hwnd, parent),
+        None => finish_menu(hwnd, None),
     }
 }
 
@@ -784,10 +859,7 @@ fn activate_item(hwnd: HWND, x: i32, y: i32) {
     // Center behaves as Close on root and Back on sub-pages. This makes the
     // transparent hole useful without covering Nera with another button.
     if radius < INNER_RADIUS {
-        match page {
-            RadialPage::Root => finish_menu(hwnd, None),
-            _ => set_page(hwnd, RadialPage::Root),
-        }
+        navigate_back(hwnd, page);
         return;
     }
 
@@ -807,7 +879,7 @@ fn activate_item(hwnd: HWND, x: i32, y: i32) {
     match item.action {
         RadialItemAction::Disabled => {}
         RadialItemAction::Open(next) => set_page(hwnd, next),
-        RadialItemAction::Back => set_page(hwnd, RadialPage::Root),
+        RadialItemAction::Back => navigate_back(hwnd, page),
         RadialItemAction::Command(command) => {
             finish_menu(hwnd, Some(command));
         }
@@ -872,11 +944,7 @@ unsafe extern "system" fn radial_window_proc(
                 .map(|state| state.page)
                 .unwrap_or(RadialPage::Root);
 
-            if page == RadialPage::Root {
-                finish_menu(hwnd, None);
-            } else {
-                set_page(hwnd, RadialPage::Root);
-            }
+            navigate_back(hwnd, page);
 
             LRESULT(0)
         }
@@ -887,11 +955,7 @@ unsafe extern "system" fn radial_window_proc(
                 .map(|state| state.page)
                 .unwrap_or(RadialPage::Root);
 
-            if page == RadialPage::Root {
-                finish_menu(hwnd, None);
-            } else {
-                set_page(hwnd, RadialPage::Root);
-            }
+            navigate_back(hwnd, page);
 
             LRESULT(0)
         }
@@ -1073,5 +1137,64 @@ mod tests {
                 NeraActionMenuCommand::Alarm(AlarmMenuChoice::TenMinutes)
             )
         ));
+    }
+
+    /// Wheel geometry is derived from `items.len()`, so pages may legitimately
+    /// differ in segment count. The invariant that matters is navigation: every
+    /// page that has a parent must offer a way back, and Root — which has no
+    /// parent — must not.
+    #[test]
+    fn every_sub_page_ends_with_a_back_item() {
+        for page in [
+            RadialPage::Root,
+            RadialPage::Animation,
+            RadialPage::Alarm,
+            RadialPage::AlarmMore,
+        ] {
+            let items = items_for(page);
+            assert!(!items.is_empty(), "{page:?}");
+
+            let last_is_back = matches!(
+                items[items.len() - 1].action,
+                RadialItemAction::Back
+            );
+
+            assert_eq!(
+                last_is_back,
+                parent_page(page).is_some(),
+                "{page:?}",
+            );
+        }
+    }
+
+    /// `AlarmMore` is nested one level below `Alarm`, so going up must not dump
+    /// the user straight back to Root.
+    #[test]
+    fn page_hierarchy_nests_alarm_more_under_alarm() {
+        assert_eq!(parent_page(RadialPage::Root), None);
+        assert_eq!(
+            parent_page(RadialPage::Animation),
+            Some(RadialPage::Root)
+        );
+        assert_eq!(
+            parent_page(RadialPage::Alarm),
+            Some(RadialPage::Root)
+        );
+        assert_eq!(
+            parent_page(RadialPage::AlarmMore),
+            Some(RadialPage::Alarm)
+        );
+    }
+
+    /// The old `Custom` slot was a `Command(..)` item whose handler only wrote
+    /// a `warn!` to the log: an enabled-looking wheel segment that silently did
+    /// nothing. Every alarm slot must now carry a real preset.
+    #[test]
+    fn alarm_pages_have_no_dead_end_slots() {
+        for page in [RadialPage::Alarm, RadialPage::AlarmMore] {
+            for item in items_for(page) {
+                assert!(item.enabled(), "{page:?} -> {}", item.label);
+            }
+        }
     }
 }

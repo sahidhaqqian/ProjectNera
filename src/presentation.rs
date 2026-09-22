@@ -38,6 +38,9 @@ use crate::{
         DesktopEnvironment,
         PlacementState,
     },
+    interaction::HoveredBodyPart,
+    DesktopPetInteraction,
+    HeadPatGesture,
 };
 
 // -----------------------------------------------------------------------------
@@ -228,6 +231,23 @@ fn debug_toggle_attention(
 // Enter / Exit
 // -----------------------------------------------------------------------------
 
+/// Drop all pointer state when Attention takes over or hands back.
+///
+/// `drag_nera_window` is gated on `desktop_pet_active`, so an alarm firing
+/// mid-gesture means the LMB release edge is never observed. Left alone,
+/// `update_click_through` keeps forcing `hit_test = true` for the whole
+/// captured session *and after it*, swallowing desktop clicks until the user
+/// happens to complete another full press+release over Nera.
+fn reset_pointer_state(
+    interaction: &mut DesktopPetInteraction,
+    hovered: &mut HoveredBodyPart,
+    head_pat: &mut HeadPatGesture,
+) {
+    interaction.reset_for_attention();
+    hovered.part = None;
+    head_pat.reset_stroke();
+}
+
 fn handle_presentation_commands(
     mut requests: MessageReader<PresentationCommand>,
     mut entered: MessageWriter<PresentationEntered>,
@@ -235,6 +255,9 @@ fn handle_presentation_commands(
     mut state: ResMut<PresentationState>,
     mut environment: ResMut<DesktopEnvironment>,
     mut animation: ResMut<NeraAnimationState>,
+    mut interaction: ResMut<DesktopPetInteraction>,
+    mut hovered: ResMut<HoveredBodyPart>,
+    mut head_pat: ResMut<HeadPatGesture>,
     mut window_query: Query<
         (&mut Window, &mut CursorOptions),
         With<PrimaryWindow>,
@@ -254,7 +277,7 @@ fn handle_presentation_commands(
                     continue;
                 }
 
-                let Ok((mut window, cursor)) = window_query.single_mut() else {
+                let Ok((mut window, mut cursor)) = window_query.single_mut() else {
                     warn!("Presentation: primary Nera window unavailable");
                     continue;
                 };
@@ -307,6 +330,19 @@ fn handle_presentation_commands(
                 // Drop Sitting/SittingExit immediately. Alarm presentation is
                 // not part of the sitting state machine.
                 animation.suspend_support_for_attention();
+
+                reset_pointer_state(
+                    &mut interaction,
+                    &mut hovered,
+                    &mut head_pat,
+                );
+
+                // The portrait itself has no Attention-mode pointer action.
+                // Make the primary Nera HWND fully click-through so it cannot
+                // swallow desktop clicks while drag/head-pat/menu input is
+                // intentionally gated. The separate dismiss window owns alarm
+                // interaction and the snapshot restores the previous policy.
+                cursor.hit_test = false;
 
                 state.mode = PresentationMode::Attention(kind);
                 state.attention_enter_progress = 0.0;
@@ -374,45 +410,66 @@ fn handle_presentation_commands(
                     continue;
                 };
 
+                // Runs before every restore attempt on purpose: even a degraded
+                // exit must hand pointer ownership back cleanly.
+                reset_pointer_state(
+                    &mut interaction,
+                    &mut hovered,
+                    &mut head_pat,
+                );
+
                 let Some(snapshot) = state.snapshot.take() else {
                     warn!(
                         "Presentation: attention mode had no restore snapshot"
                     );
+
+                    // `PresentationExited` is a lifecycle guarantee, not a
+                    // success-only notification. Alarm/audio cleanup depends on
+                    // it, so a degraded restore must still close the Attention
+                    // session instead of leaving a looping alarm orphaned.
                     state.mode = PresentationMode::DesktopPet;
+                    state.attention_enter_progress = 0.0;
                     state.attention_locked_center = None;
                     state.attention_locked_window_width = 0;
                     state.attention_peak_camera_z = 0.0;
+
+                    exited.write(PresentationExited { kind });
                     continue;
                 };
 
-                let Ok((mut window, mut cursor)) =
-                    window_query.single_mut()
-                else {
-                    warn!(
-                        "Presentation: primary Nera window unavailable during restore"
-                    );
-                    continue;
-                };
+                let mut window_restored = false;
+                match window_query.single_mut() {
+                    Ok((mut window, mut cursor)) => {
+                        restore_desktop_window(
+                            &mut window,
+                            &mut cursor,
+                            &snapshot,
+                        );
+                        window_restored = true;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Presentation: primary Nera window unavailable during restore;                              continuing degraded exit"
+                        );
+                    }
+                }
 
-                let Ok((_projection, mut camera_transform)) =
-                    camera_query.single_mut()
-                else {
-                    warn!(
-                        "Presentation: Nera camera unavailable during restore"
-                    );
-                    continue;
-                };
+                let mut camera_restored = false;
+                match camera_query.single_mut() {
+                    Ok((_projection, mut camera_transform)) => {
+                        *camera_transform = snapshot.camera_transform.clone();
+                        camera_restored = true;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Presentation: Nera camera unavailable during restore;                              continuing degraded exit"
+                        );
+                    }
+                }
 
-                restore_desktop_window(
-                    &mut window,
-                    &mut cursor,
-                    &snapshot,
-                );
-                *camera_transform = snapshot.camera_transform;
-
-                // Restore the exact desktop attachment that existed before
-                // Attention. If it was sitting, return directly to SittingLoop
-                // instead of replaying SittingEnter.
+                // Restore the desktop-world ownership even if the render/window
+                // side degraded. Leaving PlacementState suspended would make a
+                // later frame fight DesktopPet systems after Attention ended.
                 environment.placement = snapshot.placement;
                 environment.set_attached_anchor(snapshot.attached_anchor);
                 environment.hidden_for_target_suspend =
@@ -437,13 +494,17 @@ fn handle_presentation_commands(
                 state.attention_peak_camera_z = 0.0;
 
                 info!(
-                    "Presentation -> DesktopPet | restored={}x{} @ {},{}",
+                    "Presentation -> DesktopPet | restored={}x{} @ {},{} | window={} camera={}",
                     snapshot.window_width,
                     snapshot.window_height,
                     snapshot.window_left,
                     snapshot.window_top,
+                    window_restored,
+                    camera_restored,
                 );
 
+                // Always emitted once an Attention session is logically closed.
+                // Consumers must never have to infer teardown from window state.
                 exited.write(PresentationExited { kind });
             }
         }
@@ -981,7 +1042,7 @@ mod tests {
             mode: PresentationMode::Attention(
                 AttentionKind::Alarm,
             ),
-            snapshot: None,
+            ..Default::default()
         };
 
         assert!(state.is_attention());
@@ -990,11 +1051,13 @@ mod tests {
 
     #[test]
     fn attention_is_upper_body_portrait() {
+        // Bounds are inclusive: 0.80 is the tightest framing that still keeps
+        // the hips/waist in shot, so a tuned-to-the-edge value is valid.
         assert!(
-            ATTENTION_UPPER_BODY_VIEW_FRACTION > 0.80
+            ATTENTION_UPPER_BODY_VIEW_FRACTION >= 0.80
         );
         assert!(
-            ATTENTION_UPPER_BODY_VIEW_FRACTION < 0.95
+            ATTENTION_UPPER_BODY_VIEW_FRACTION <= 0.95
         );
     }
 
@@ -1096,6 +1159,108 @@ mod tests {
 
         assert_eq!(stable_width, 1200);
         assert!((stable_z - 1.4).abs() < 0.001);
+    }
+
+    /// Phase 5.75 regression: an alarm firing mid-drag freezes the pointer
+    /// state machine, because `drag_nera_window` is gated off and never sees
+    /// the LMB release. A frozen `Pressed`/`Dragging` makes
+    /// `update_click_through` keep `hit_test = true`, so the pet window would
+    /// swallow desktop clicks for the rest of the session.
+    #[test]
+    fn attention_handoff_drops_a_frozen_drag_gesture() {
+        use crate::interaction::{
+            BodyPart,
+            InteractionState,
+        };
+        use std::time::Instant;
+
+        let now = Instant::now();
+
+        let mut interaction = DesktopPetInteraction {
+            state: InteractionState::Dragging,
+            pressed_body_part: Some(BodyPart::Head),
+            right_pressed_body_part: Some(BodyPart::Torso),
+            drag_offset: Some(IVec2::new(12, 34)),
+            drag_start_cursor: Some(IVec2::new(100, 200)),
+            last_drag_cursor: Some(IVec2::new(140, 260)),
+            drag_started_at: Some(now),
+            right_press_origin: Some(IVec2::new(90, 190)),
+            snap_cursor: Some(IVec2::new(80, 180)),
+            sitting_lock_until: Some(now),
+            unsnap_cooldown_until: Some(now),
+            guard_center: Some(IVec2::new(70, 170)),
+            recent_unsnap_surface_y: Some(1080),
+        };
+
+        let mut hovered = HoveredBodyPart {
+            part: Some(BodyPart::Head),
+        };
+
+        let mut head_pat = HeadPatGesture {
+            started_at: Some(now),
+            last_cursor: Some(IVec2::new(10, 10)),
+            total_travel: 120.0,
+            x_reversals: 3,
+            ..Default::default()
+        };
+
+        reset_pointer_state(
+            &mut interaction,
+            &mut hovered,
+            &mut head_pat,
+        );
+
+        assert_eq!(interaction.state, InteractionState::None);
+        assert!(interaction.pressed_body_part.is_none());
+        assert!(interaction.right_pressed_body_part.is_none());
+        assert!(interaction.drag_offset.is_none());
+        assert!(interaction.drag_start_cursor.is_none());
+        assert!(interaction.last_drag_cursor.is_none());
+        assert!(interaction.drag_started_at.is_none());
+        assert!(interaction.right_press_origin.is_none());
+        assert!(interaction.snap_cursor.is_none());
+
+        // Anti-resnap guards are recorded against the pre-Attention window
+        // rect, which Attention resizes and then restores.
+        assert!(interaction.sitting_lock_until.is_none());
+        assert!(interaction.unsnap_cooldown_until.is_none());
+        assert!(interaction.guard_center.is_none());
+        assert!(interaction.recent_unsnap_surface_y.is_none());
+
+        assert!(hovered.part.is_none());
+        assert!(head_pat.started_at.is_none());
+        assert!(head_pat.last_cursor.is_none());
+        assert_eq!(head_pat.total_travel, 0.0);
+        assert_eq!(head_pat.x_reversals, 0);
+    }
+
+    /// The Settings path must keep its original, narrower reset: it only loses
+    /// pointer capture, never the anti-resnap guards, because the pet HWND is
+    /// not resized while Settings is open.
+    #[test]
+    fn settings_reset_preserves_unsnap_guards() {
+        use crate::interaction::InteractionState;
+        use std::time::Instant;
+
+        let now = Instant::now();
+
+        let mut interaction = DesktopPetInteraction {
+            state: InteractionState::Pressed,
+            drag_offset: Some(IVec2::new(4, 5)),
+            unsnap_cooldown_until: Some(now),
+            guard_center: Some(IVec2::new(60, 70)),
+            recent_unsnap_surface_y: Some(900),
+            ..Default::default()
+        };
+
+        interaction.reset_gesture_state();
+
+        assert_eq!(interaction.state, InteractionState::None);
+        assert!(interaction.drag_offset.is_none());
+
+        assert!(interaction.unsnap_cooldown_until.is_some());
+        assert_eq!(interaction.guard_center, Some(IVec2::new(60, 70)));
+        assert_eq!(interaction.recent_unsnap_surface_y, Some(900));
     }
 
 }
