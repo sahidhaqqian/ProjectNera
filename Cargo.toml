@@ -32,16 +32,38 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_UI_Shell",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# ============================================================
+# DEVELOPMENT
+# Prioritas: edit -> compile -> run secepat mungkin
+# ============================================================
+
 [profile.dev]
 opt-level = 0
+debug = 0
+incremental = true
+codegen-units = 256
+lto = "off"
 
 [profile.dev.package."*"]
 opt-level = 1
+debug = false
+codegen-units = 256
+
+[profile.dev.build-override]
+opt-level = 0
+debug = false
+codegen-units = 256
+
+# ============================================================
+# RELEASE
+# Prioritas: runtime performance + binary optimization
+# ============================================================
 
 [profile.release]
 opt-level = 3

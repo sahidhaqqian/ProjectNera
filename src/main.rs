@@ -7,6 +7,8 @@ mod desktop_physics;
 mod action_menu;
 #[cfg(target_os = "windows")]
 mod alarm_dismiss;
+#[cfg(target_os = "windows")]
+mod alarm_settings;
 mod environment;
 mod expression;
 mod interaction;
@@ -107,6 +109,9 @@ use action_menu::ActionMenuPlugin;
 
 #[cfg(target_os = "windows")]
 use alarm_dismiss::AlarmDismissPlugin;
+
+#[cfg(target_os = "windows")]
+use alarm_settings::AlarmSettingsPlugin;
 
 #[cfg(target_os = "windows")]
 use tray::TrayPlugin;
@@ -417,6 +422,38 @@ fn nera_asset_path() -> String {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn nera_utility_input_available(
+    settings_gate: Res<settings::SettingsInputGate>,
+    alarm_gate: Res<alarm_settings::AlarmSettingsInputGate>,
+) -> bool {
+    settings::nera_input_available(settings_gate)
+        && alarm_settings::nera_input_available(alarm_gate)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn nera_utility_input_available(
+    settings_gate: Res<settings::SettingsInputGate>,
+) -> bool {
+    settings::nera_input_available(settings_gate)
+}
+
+#[cfg(target_os = "windows")]
+fn nera_utility_input_blocked(
+    settings_gate: Res<settings::SettingsInputGate>,
+    alarm_gate: Res<alarm_settings::AlarmSettingsInputGate>,
+) -> bool {
+    settings::nera_input_blocked(settings_gate)
+        || alarm_settings::nera_input_blocked(alarm_gate)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn nera_utility_input_blocked(
+    settings_gate: Res<settings::SettingsInputGate>,
+) -> bool {
+    settings::nera_input_blocked(settings_gate)
+}
+
 fn main() {
     let mut app = App::new();
 
@@ -481,6 +518,7 @@ fn main() {
         TrayPlugin,
         ActionMenuPlugin,
         AlarmDismissPlugin,
+        AlarmSettingsPlugin,
     ));
 
     app.insert_resource(ClearColor(Color::NONE))
@@ -502,13 +540,13 @@ fn main() {
                 // it is open. Reset Nera capture state first so Settings clicks
                 // cannot become body hits / drags through global ButtonInput.
                 suspend_nera_interaction_for_settings
-                    .run_if(settings::nera_input_blocked),
+                    .run_if(nera_utility_input_blocked),
                 // Native placement changes first, then Phase 5.3 derives the
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window
                     .run_if(presentation::desktop_pet_active)
-                    .run_if(settings::nera_input_available),
+                    .run_if(nera_utility_input_available),
                 desktop_physics::update_desktop_physics
                     .run_if(presentation::desktop_pet_active),
                 sync_environment_animation_state,
@@ -531,14 +569,14 @@ fn main() {
             update_click_through
                 .after(VrmSystemSets::SpringBone)
                 .run_if(presentation::desktop_pet_active)
-                .run_if(settings::nera_input_available),
+                .run_if(nera_utility_input_available),
         )
         .add_systems(
             PostUpdate,
             detect_head_pat
                 .after(update_click_through)
                 .run_if(presentation::desktop_pet_active)
-                .run_if(settings::nera_input_available),
+                .run_if(nera_utility_input_available),
         )
         // Pose-first support calibration: Sitting_Enter starts in Update,
         // then Last samples its animated Seat and commits the attachment.

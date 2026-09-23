@@ -25,7 +25,7 @@ use bevy::{
 };
 
 use crate::{
-    alarm::{AlarmControlCommand, DEFAULT_SNOOZE_DURATION},
+    alarm::{AlarmControlCommand, AlarmDisplayInfo, DEFAULT_SNOOZE_DURATION},
     environment::DesktopEnvironment,
     platform::{
         self, LocalDateTime, NativeWindowHandle, PhysicalPoint, PhysicalRect,
@@ -40,8 +40,8 @@ use crate::{
 // Tuning
 // -----------------------------------------------------------------------------
 
-const PANEL_WIDTH_LOGICAL: u32 = 500;
-const PANEL_HEIGHT_LOGICAL: u32 = 470;
+const PANEL_WIDTH_LOGICAL: u32 = 520;
+const PANEL_HEIGHT_LOGICAL: u32 = 520;
 
 /// Native placement margin in physical desktop pixels. The panel is parked on
 /// the right side of the active monitor, visually beside Nera's Attention pose.
@@ -110,16 +110,19 @@ struct AlarmPanelSnapshot {
     time: String,
     meridiem: &'static str,
     date: String,
+    label: String,
 }
 
 impl AlarmPanelSnapshot {
-    fn from_local(local: LocalDateTime) -> Self {
-        let (time, meridiem) = format_alarm_time(local.hour, local.minute);
+    fn from_alarm(local: LocalDateTime, alarm: &AlarmDisplayInfo) -> Self {
+        let (time, meridiem) =
+            format_alarm_time(alarm.hour as u16, alarm.minute as u16);
 
         Self {
             time,
             meridiem,
             date: format_alarm_date(local),
+            label: alarm.label.clone(),
         }
     }
 }
@@ -202,6 +205,7 @@ fn spawn_dismiss_panel(
     mut entered: MessageReader<PresentationEntered>,
     mut runtime: ResMut<AlarmDismissRuntime>,
     windows: Query<Entity, With<AlarmDismissWindow>>,
+    alarm: Res<AlarmDisplayInfo>,
     mut commands: Commands,
 ) {
     if !entered
@@ -258,7 +262,10 @@ fn spawn_dismiss_panel(
         ))
         .id();
 
-    let snapshot = AlarmPanelSnapshot::from_local(platform::local_datetime());
+    let snapshot = AlarmPanelSnapshot::from_alarm(
+        platform::local_datetime(),
+        &alarm,
+    );
 
     spawn_alarm_panel_ui(
         &mut commands,
@@ -302,7 +309,7 @@ fn spawn_alarm_panel_ui(
                 Node {
                     width: percent(100),
                     height: percent(100),
-                    padding: UiRect::all(px(18)),
+                    padding: UiRect::all(px(20)),
                     flex_direction: FlexDirection::Column,
                     row_gap: px(12),
                     border_radius: BorderRadius::all(px(28)),
@@ -322,14 +329,36 @@ fn spawn_alarm_panel_ui(
                 spawn_alarm_header(panel);
                 spawn_alarm_card(panel, &snapshot);
 
-                panel.spawn((
-                    Text::new("Project Nera"),
-                    TextFont {
-                        font_size: FontSize::Px(12.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.32, 0.37, 0.5)),
-                ));
+                // Actions live outside the information card. Keeping them in a
+                // dedicated footer prevents the old layout from overflowing the
+                // rounded shell on smaller DPI/font combinations.
+                spawn_alarm_action_button(
+                    panel,
+                    "Nera Turn Off Alarm Button",
+                    "Turn off the Alarm",
+                    AlarmPanelAction::Dismiss,
+                    PRIMARY_COLOR,
+                    PRIMARY_HOVER,
+                    PRIMARY_PRESSED,
+                    PRIMARY_OUTLINE,
+                    PRIMARY_TEXT,
+                    60.0,
+                    18.0,
+                );
+
+                spawn_alarm_action_button(
+                    panel,
+                    "Nera Snooze Alarm Button",
+                    "Snooze 5 min",
+                    AlarmPanelAction::SnoozeFiveMinutes,
+                    SECONDARY_COLOR,
+                    SECONDARY_HOVER,
+                    SECONDARY_PRESSED,
+                    SECONDARY_OUTLINE,
+                    SECONDARY_TEXT,
+                    50.0,
+                    15.0,
+                );
             });
         });
 }
@@ -342,7 +371,7 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
             AlarmDismissDragRegion,
             Node {
                 width: percent(100),
-                height: px(58),
+                height: px(54),
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
@@ -354,7 +383,7 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
             header
                 .spawn(Node {
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(3),
+                    row_gap: px(2),
                     ..default()
                 })
                 .with_children(|copy| {
@@ -370,7 +399,7 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
                     copy.spawn((
                         Text::new("Project Nera"),
                         TextFont {
-                            font_size: FontSize::Px(12.0),
+                            font_size: FontSize::Px(11.0),
                             ..default()
                         },
                         TextColor(MUTED_TEXT),
@@ -380,12 +409,16 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
             header
                 .spawn((
                     Node {
-                        padding: UiRect::axes(px(10), px(5)),
+                        padding: UiRect::axes(px(11), px(6)),
                         border_radius: BorderRadius::all(px(999)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.22, 0.43, 0.92, 0.12)),
-                    Outline::new(px(1), Val::ZERO, Color::srgba(0.34, 0.52, 1.0, 0.28)),
+                    BackgroundColor(Color::srgba(0.22, 0.43, 0.92, 0.14)),
+                    Outline::new(
+                        px(1),
+                        Val::ZERO,
+                        Color::srgba(0.34, 0.52, 1.0, 0.32),
+                    ),
                 ))
                 .with_children(|pill| {
                     pill.spawn((
@@ -410,31 +443,40 @@ fn spawn_alarm_card(
             Node {
                 width: percent(100),
                 flex_grow: 1.0,
-                padding: UiRect::all(px(20)),
+                min_height: px(250),
+                padding: UiRect::axes(px(22), px(18)),
                 flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: px(12),
-                border_radius: BorderRadius::all(px(18)),
+                row_gap: px(10),
+                border_radius: BorderRadius::all(px(20)),
                 ..default()
             },
             BackgroundColor(CARD_COLOR),
             Outline::new(px(1), Val::ZERO, CARD_OUTLINE),
         ))
         .with_children(|card| {
-            // Large wall-clock readout, matching the approved visual preview.
+            card.spawn((
+                Text::new(snapshot.label.clone()),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(SUBTLE_TEXT),
+            ));
+
             card.spawn(Node {
                 width: percent(100),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Baseline,
-                column_gap: px(9),
-                margin: UiRect::top(px(4)),
+                column_gap: px(10),
                 ..default()
             })
             .with_children(|time| {
                 time.spawn((
                     Text::new(snapshot.time.clone()),
                     TextFont {
-                        font_size: FontSize::Px(58.0),
+                        font_size: FontSize::Px(62.0),
                         ..default()
                     },
                     TextColor(PRIMARY_TEXT),
@@ -443,7 +485,7 @@ fn spawn_alarm_card(
                 time.spawn((
                     Text::new(snapshot.meridiem),
                     TextFont {
-                        font_size: FontSize::Px(26.0),
+                        font_size: FontSize::Px(25.0),
                         ..default()
                     },
                     TextColor(Color::srgb(0.42, 0.61, 1.0)),
@@ -453,7 +495,7 @@ fn spawn_alarm_card(
             card.spawn((
                 Text::new(snapshot.date.clone()),
                 TextFont {
-                    font_size: FontSize::Px(16.0),
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
                 TextColor(BODY_TEXT),
@@ -461,9 +503,9 @@ fn spawn_alarm_card(
 
             card.spawn((
                 Node {
-                    width: percent(72),
+                    width: percent(64),
                     height: px(1),
-                    margin: UiRect::axes(px(0), px(4)),
+                    margin: UiRect::axes(px(0), px(5)),
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.23, 0.28, 0.42, 0.52)),
@@ -472,46 +514,11 @@ fn spawn_alarm_card(
             card.spawn((
                 Text::new("A small reminder from Nera."),
                 TextFont {
-                    font_size: FontSize::Px(14.0),
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
                 TextColor(SUBTLE_TEXT),
             ));
-
-            // Spacer keeps both actions anchored toward the bottom even when
-            // font metrics differ slightly across systems.
-            card.spawn(Node {
-                flex_grow: 1.0,
-                ..default()
-            });
-
-            spawn_alarm_action_button(
-                card,
-                "Nera Turn Off Alarm Button",
-                "Turn off the Alarm",
-                AlarmPanelAction::Dismiss,
-                PRIMARY_COLOR,
-                PRIMARY_HOVER,
-                PRIMARY_PRESSED,
-                PRIMARY_OUTLINE,
-                PRIMARY_TEXT,
-                58.0,
-                18.0,
-            );
-
-            spawn_alarm_action_button(
-                card,
-                "Nera Snooze Alarm Button",
-                "Snooze 5 min",
-                AlarmPanelAction::SnoozeFiveMinutes,
-                SECONDARY_COLOR,
-                SECONDARY_HOVER,
-                SECONDARY_PRESSED,
-                SECONDARY_OUTLINE,
-                SECONDARY_TEXT,
-                52.0,
-                16.0,
-            );
         });
 }
 

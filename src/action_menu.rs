@@ -90,6 +90,7 @@ use windows::{
 };
 
 use crate::{
+    alarm_settings::OpenAlarmSettingsWindow,
     animation::NeraAnimationState,
     interaction::NeraRightClicked,
     settings::{OpenSettingsWindow, ReturnToActionMenu},
@@ -132,6 +133,7 @@ pub(crate) enum AlarmMenuChoice {
 pub(crate) enum NeraActionMenuCommand {
     Animation(AnimationMenuChoice),
     Alarm(AlarmMenuChoice),
+    AlarmSettings,
     Settings,
 }
 
@@ -331,7 +333,7 @@ const ALARM_ITEMS: [RadialItem; 6] = [
     },
 ];
 
-const ALARM_MORE_ITEMS: [RadialItem; 6] = [
+const ALARM_MORE_ITEMS: [RadialItem; 7] = [
     RadialItem {
         glyph: "15",
         label: "15 min",
@@ -358,6 +360,13 @@ const ALARM_MORE_ITEMS: [RadialItem; 6] = [
         label: "2 hours",
         action: RadialItemAction::Command(
             NeraActionMenuCommand::Alarm(AlarmMenuChoice::TwoHours),
+        ),
+    },
+    RadialItem {
+        glyph: "⚙",
+        label: "Custom",
+        action: RadialItemAction::Command(
+            NeraActionMenuCommand::AlarmSettings,
         ),
     },
     RadialItem {
@@ -556,6 +565,7 @@ fn poll_action_menu_result(
     tray: Option<Res<TrayRuntime>>,
     mut commands: MessageWriter<NeraActionMenuCommand>,
     mut open_settings: MessageWriter<OpenSettingsWindow>,
+    mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
 ) {
     let Some(tray) = tray else {
         return;
@@ -578,6 +588,10 @@ fn poll_action_menu_result(
                 info!(
                     "Nera radial menu -> Alarm::{choice:?} (timer logic in Phase 5.6)"
                 );
+            }
+            NeraActionMenuCommand::AlarmSettings => {
+                info!("Nera radial menu -> Alarm Settings");
+                open_alarm_settings.write(OpenAlarmSettingsWindow);
             }
             NeraActionMenuCommand::Settings => {
                 info!("Nera radial menu -> Settings");
@@ -1186,9 +1200,17 @@ mod tests {
         );
     }
 
-    /// The old `Custom` slot was a `Command(..)` item whose handler only wrote
-    /// a `warn!` to the log: an enabled-looking wheel segment that silently did
-    /// nothing. Every alarm slot must now carry a real preset.
+    /// Every alarm slot must perform a real action. `Custom` now opens the
+    /// Settings alarm editor instead of looking enabled and only logging a warn.
+    #[test]
+    fn custom_alarm_opens_the_dedicated_alarm_editor() {
+        assert!(matches!(
+            ALARM_MORE_ITEMS[4].action,
+            RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings)
+        ));
+        assert_eq!(ALARM_MORE_ITEMS[4].label, "Custom");
+    }
+
     #[test]
     fn alarm_pages_have_no_dead_end_slots() {
         for page in [RadialPage::Alarm, RadialPage::AlarmMore] {
