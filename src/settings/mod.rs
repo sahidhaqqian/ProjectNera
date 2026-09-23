@@ -779,15 +779,12 @@ struct StartupRuntime {
     enabled: bool,
 }
 
-/// One-shot gate for the primary native window.
-///
-/// main.rs creates Nera hidden so Windows never flashes the pet before
-/// persistent settings are available. On the first update we either reveal it
-/// or intentionally leave it hidden according to `start_hidden`.
-#[derive(Resource, Default)]
-struct LaunchVisibilityRuntime {
-    applied: bool,
-}
+// Persisted WindowMoved coordinates are desktop physical pixels. These values
+// match Nera's normal 600x950 launch canvas closely enough to detect stale
+// positions after monitor/DPI/layout changes.
+const STARTUP_WINDOW_WIDTH_PX: i32 = 600;
+const STARTUP_WINDOW_HEIGHT_PX: i32 = 950;
+const STARTUP_MIN_VISIBLE_PX: i32 = 64;
 
 #[derive(Resource)]
 struct PositionRuntime {
@@ -819,7 +816,6 @@ impl Plugin for NeraSettingsPlugin {
         app.add_plugins(shadow::NeraShadowPlugin)
             .init_resource::<SettingsInputGate>()
             .init_resource::<StartupRuntime>()
-            .init_resource::<LaunchVisibilityRuntime>()
             .init_resource::<PositionRuntime>()
             .add_message::<OpenSettingsWindow>()
             .add_message::<ReturnToActionMenu>()
@@ -827,7 +823,6 @@ impl Plugin for NeraSettingsPlugin {
             .add_systems(
                 Update,
                 (
-                    apply_launch_visibility,
                     apply_remembered_position,
                     record_primary_window_position,
                     flush_position_save,
@@ -855,28 +850,6 @@ impl Plugin for NeraSettingsPlugin {
 // Runtime application
 // =============================================================================
 
-fn apply_launch_visibility(
-    settings: Res<NeraSettings>,
-    mut runtime: ResMut<LaunchVisibilityRuntime>,
-    mut primary: Query<&mut Window, With<PrimaryWindow>>,
-) {
-    if runtime.applied {
-        return;
-    }
-
-    let Ok(mut window) = primary.single_mut() else {
-        return;
-    };
-
-    window.visible = !settings.start_hidden;
-    runtime.applied = true;
-
-    info!(
-        "Settings: startup visibility -> {}",
-        if settings.start_hidden { "HIDDEN" } else { "VISIBLE" }
-    );
-}
-
 fn initialize_startup_state(mut state: ResMut<StartupRuntime>) {
     match startup::is_enabled() {
         Ok(enabled) => {
@@ -890,10 +863,74 @@ fn initialize_startup_state(mut state: ResMut<StartupRuntime>) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn safe_startup_position(requested: IVec2) -> (IVec2, bool) {
+    let monitors = crate::platform::enumerate_monitors();
+
+    // Do not rewrite persistent state if Windows has not exposed monitor
+    // information yet. Visibility retry will keep running independently.
+    if monitors.is_empty() {
+        return (requested, true);
+    }
+
+    let requested_right =
+        requested.x.saturating_add(STARTUP_WINDOW_WIDTH_PX);
+    let requested_bottom =
+        requested.y.saturating_add(STARTUP_WINDOW_HEIGHT_PX);
+
+    let reachable = monitors.iter().any(|monitor| {
+        let bounds = monitor.bounds;
+
+        let overlap_width = requested_right
+            .min(bounds.right)
+            .saturating_sub(requested.x.max(bounds.left));
+
+        let overlap_height = requested_bottom
+            .min(bounds.bottom)
+            .saturating_sub(requested.y.max(bounds.top));
+
+        overlap_width >= STARTUP_MIN_VISIBLE_PX
+            && overlap_height >= STARTUP_MIN_VISIBLE_PX
+    });
+
+    if reachable {
+        return (requested, true);
+    }
+
+    // A remembered coordinate can become invalid after unplugging a monitor,
+    // changing resolution/DPI, or a previous native presentation transition.
+    // Recover to the primary monitor work area automatically.
+    let monitor = monitors
+        .iter()
+        .find(|monitor| monitor.is_primary)
+        .or_else(|| monitors.first())
+        .copied()
+        .expect("monitor list is known to be non-empty");
+
+    let work = monitor.work_area;
+    let width = STARTUP_WINDOW_WIDTH_PX.min(work.width().max(1));
+    let height = STARTUP_WINDOW_HEIGHT_PX.min(work.height().max(1));
+
+    let x = work
+        .left
+        .saturating_add(work.width().saturating_sub(width) / 2);
+    let y = work
+        .top
+        .saturating_add(work.height().saturating_sub(height) / 2);
+
+    (IVec2::new(x, y), false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn safe_startup_position(requested: IVec2) -> (IVec2, bool) {
+    (requested, true)
+}
+
 fn apply_remembered_position(
-    settings: Res<NeraSettings>,
+    mut settings: ResMut<NeraSettings>,
     mut runtime: ResMut<PositionRuntime>,
     mut primary: Query<&mut Window, With<PrimaryWindow>>,
+    mut commands: Commands,
 ) {
     if runtime.restore_applied {
         return;
@@ -903,12 +940,36 @@ fn apply_remembered_position(
         return;
     };
 
-    let position = IVec2::new(settings.window_x, settings.window_y);
+    let requested = IVec2::new(settings.window_x, settings.window_y);
+    let (position, remembered_position_valid) =
+        safe_startup_position(requested);
+
     runtime.last_known = position;
 
     if settings.remember_position {
         window.position = WindowPosition::At(position);
-        info!("Settings: restored Nera position -> ({}, {})", position.x, position.y);
+
+        if remembered_position_valid {
+            info!(
+                "Settings: restored Nera position -> ({}, {})",
+                position.x,
+                position.y
+            );
+        } else {
+            warn!(
+                "Settings: remembered position ({}, {}) was off-screen; recovered -> ({}, {})",
+                requested.x,
+                requested.y,
+                position.x,
+                position.y
+            );
+
+            // Heal the saved coordinates so the invalid position does not
+            // repeat on every launch.
+            settings.window_x = position.x;
+            settings.window_y = position.y;
+            save_settings_deferred(&mut commands);
+        }
     }
 
     runtime.restore_applied = true;

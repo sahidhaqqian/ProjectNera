@@ -474,8 +474,21 @@ fn resolve_support_surface(
                 }
             }
 
-            x_inside(feet_x, rect)
-                .then(|| (rect.top, rect.left.saturating_add(nera_left_offset)))
+            if !x_inside(feet_x, rect) {
+                return None;
+            }
+
+            // Alt-Tab / clicking another app does not move or minimize the
+            // supporting window, but another normal window can now cover it
+            // in z-order at the exact point Nera stands. Geometry alone would
+            // keep reporting the (now hidden) top edge as valid support,
+            // which is what made Nera look like she was floating in place
+            // when the app she stood on disappeared behind another window.
+            if !window_surface_visible(environment, feet_x, rect, target) {
+                return None;
+            }
+
+            Some((rect.top, rect.left.saturating_add(nera_left_offset)))
         }
 
         PhysicsSupport::Taskbar { monitor, edge } => environment
@@ -541,7 +554,9 @@ fn collect_surfaces(
             continue;
         };
 
-        if x_inside(feet_x, window_rect) {
+        if x_inside(feet_x, window_rect)
+            && window_surface_visible(environment, feet_x, window_rect, window.handle)
+        {
             surfaces.push(SurfaceHit {
                 y: window_rect.top,
                 support: PhysicsSupport::Window {
@@ -614,6 +629,32 @@ fn collect_surfaces(
 
 fn x_inside(x: i32, rect: PhysicalRect) -> bool {
     x >= rect.left && x <= rect.right
+}
+
+/// True when `handle` is actually the topmost/visible window at the point
+/// where Nera would stand on it, instead of merely being alive and untouched
+/// geometrically. Alt-Tabbing to another app, or any other window being
+/// raised above it, changes nothing about a window's rect or minimized/
+/// cloaked flags, so those checks alone cannot detect it. Uses the same
+/// native hit-test approach as the initial sit probe in `sitting.rs`.
+fn window_surface_visible(
+    environment: &DesktopEnvironment,
+    feet_x: i32,
+    rect: PhysicalRect,
+    handle: NativeWindowHandle,
+) -> bool {
+    let Some(nera_hwnd) = environment.nera_hwnd else {
+        // No Nera HWND to exclude from the hit test yet; do not treat this
+        // as a valid surface until it can be verified.
+        return false;
+    };
+
+    let probe = PhysicalPoint::new(
+        feet_x.clamp(rect.left, rect.right.saturating_sub(1)),
+        rect.top.saturating_add(1),
+    );
+
+    platform::window_at_point(probe, nera_hwnd, &environment.discovered_windows) == Some(handle)
 }
 
 fn keep_feet_on_surface(

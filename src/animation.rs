@@ -1141,6 +1141,7 @@ pub(crate) fn sync_interaction_animation_actions(
     mut released: MessageReader<NeraReleased>,
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
+    mut environment: ResMut<DesktopEnvironment>,
 ) {
     if drag_started.read().next().is_some() {
         state.start_persistent_action(TemporaryAction::Floating);
@@ -1184,6 +1185,18 @@ pub(crate) fn sync_interaction_animation_actions(
                 state.reset_damage_combo();
             }
         }
+    }
+
+    // Death01 depicts Nera collapsing to the ground. Keeping her glued to a
+    // window/taskbar attachment while that plays is what produced the
+    // "floating" death: the sitting follow-system kept re-snapping her native
+    // window to the seat surface every frame, and the ground-reconciliation
+    // pass below only runs for `PlacementState::Free`. Detach immediately so
+    // she visually falls off whatever she was sitting on before the ground
+    // pass takes over.
+    if state.death_active() && environment.placement != PlacementState::Free {
+        environment.detach_nera();
+        info!("Nera detached: Death01 triggered while sitting/attached");
     }
 
     if head_patted.read().next().is_some() {
