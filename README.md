@@ -1,552 +1,320 @@
-# Project Nera Desktop Pet
+# Project Nera
 
-Project Nera is a Windows desktop pet built with **Rust**, **Bevy 0.19**, and **bevy_vrm1 0.9.2**.
-Nera is rendered as a transparent VRM character that can interact with the desktop, react to the user, sit on native windows/taskbars, play VRMA animations, use a native radial action menu, run alarms, and fall through desktop space using window-aware support physics.
+Project Nera is a 3D desktop pet for Windows built with Rust and Bevy. It renders a VRM avatar in a transparent native window and combines avatar interaction, VRMA animation, desktop-aware movement, utility windows, alarms, and Win32 integration.
 
-> Current application version: **0.1.0**  
-> Current milestone: **Phase 5 implemented**
+> Application version: **0.1.0** · Current milestone: **Phase 5.9 — Refactor / Cleanup / Robustness complete**
 
-## Run
+## Overview
+
+Nera lives in a frameless transparent window above the Windows desktop. The visible avatar receives pointer input while transparent areas pass clicks through to applications underneath. Nera can be dragged, react to body-part interactions, sit on taskbars and supported windows, fall onto desktop surfaces, and switch into an attention presentation for alarms.
+
+The application uses Bevy resources, components, messages, and systems for behavior. Native Windows APIs provide global cursor coordinates, HWND movement and tracking, monitor/taskbar information, system tray support, and the radial action menu.
+
+## Current Features
+
+### Desktop pet and interaction
+
+- Transparent, frameless primary window with configurable always-on-top behavior.
+- Native click-through outside the avatar's current hit regions.
+- DPI-aware click-versus-drag classification with captured pointer state.
+- Native desktop-window dragging with semantic drag start, movement, and release messages.
+- Animated body-part hit detection for the head, torso, arms, hands, legs, and feet.
+- Left-click reactions and right-click action-menu activation.
+- Button-free headpat recognition from deliberate back-and-forth cursor strokes.
+- Input isolation while Settings or Alarm Settings owns application mouse input.
+
+### Desktop environment and placement
+
+- Native HWND, monitor, DPI, work-area, taskbar, and external-window discovery.
+- External support-window tracking across movement, resizing, minimizing, cloaking, restoration, and closure.
+- Sitting on supported native-window top edges and taskbar edges using a pose-derived Seat anchor.
+- Attachment following, target-relative z-order, temporary suspension, and drag-to-unsnap behavior.
+- Desktop-space gravity, falling, landing, and support detection in global physical pixels.
+- Standing support on monitor work-area floors, taskbars, and visible native-window top edges.
+- Support revalidation when a window moves or disappears, plus tray-based position recovery.
+- Multi-monitor and non-zero/negative desktop coordinate handling in native geometry paths.
+
+### Character behavior
+
+- VRM 1.0 avatar loading through `bevy_vrm1`.
+- VRMA clip loading with real clip durations and explicit looping/one-shot behavior.
+- Prioritized animation state for idle, sitting, dragging/floating, physics, reactions, death, menu, and alarm behavior.
+- Sitting entry and seated loop animation tied to pose-first Seat-anchor calibration.
+- Falling and landing animation integrated with desktop support physics.
+- Head/chest hit reactions, head-stroke reaction, and a three-hit death combo.
+- Random idle micro-actions: Look Around, Relax, Sleepy, and Blush.
+- Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.
+- Facial expression crossfades derived from the resolved body-animation state.
+- Cursor-driven eye/head gaze with animation-aware temporary ownership.
+- VRM spring-bone simulation and configurable simple or character shadows.
+
+### Utilities
+
+- Native Windows radial action menu opened by right-clicking Nera.
+- Animation controls, quick alarms, custom alarm editor, and Settings access from the menu.
+- Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
+- Persistent one-time and weekly alarms, with enable/disable, edit, and delete controls for up to 12 entries.
+- Alarm attention mode with a reframed upper-body presentation, looping sound, intro/loop animation, dismiss, and five-minute snooze.
+- Persistent Settings window with controls for:
+  - always on top, Start with Windows, Start Hidden, and remembered position;
+  - character size and ground offset;
+  - mouse, eye, and upper-body gaze behavior;
+  - shadow type, opacity, softness, and scene brightness;
+  - master volume, mute, and FPS limit;
+  - reset defaults, return to the action menu, exit, and application information.
+- System tray commands for Show, Hide, Reset Position, Always On Top, and Exit.
+- Saved settings, position recovery, deferred persistence during editing, and synchronous save on controlled exit paths.
+
+The radial menu currently shows **Chat**, **Productivity**, and **Games** as disabled placeholders. They are not implemented features.
+
+## Tech Stack
+
+Versions are taken from `Cargo.toml`.
+
+| Technology | Version | Role |
+|---|---:|---|
+| Rust | Edition 2024 | Application language |
+| Bevy | 0.19 | ECS, rendering, windows, UI, audio, input, and application runtime |
+| `bevy_vrm1` | 0.9.2 | VRM 1.0 avatars, VRMA playback, LookAt, expressions, and spring bones |
+| `windows` | 0.62.2 | Win32 windowing, shell/tray, registry, monitor, DPI, GDI, and DWM integration |
+| `raw-window-handle` | 0.6.2 | Native window-handle interoperability on Windows |
+| VRM / VRMA | Repository assets | Avatar model and animation formats |
+
+Bevy default features are disabled; `Cargo.toml` enables the specific 3D rendering, winit, UI, picking, settings, audio, MP3, PNG, and JPEG features used by Nera.
+
+## Requirements
+
+- **Windows.** The desktop, tray, utility-window, and platform implementations use Win32 APIs and Windows-only modules.
+- A current stable Rust toolchain capable of compiling Rust 2024 edition code.
+- The `x86_64-pc-windows-msvc` Rust target used by the checked-in Cargo configuration.
+- The repository's `assets/` directory at runtime. It contains the active VRM, VRMA, MP3, and shader assets.
+
+The checked-in `.cargo/config.toml` configures `sccache` as `rustc-wrapper` and points the Windows MSVC target at a user-specific `rust-lld.exe` path. On another machine, install/configure `sccache` and adjust that linker path if it does not match the local Rust toolchain.
+
+No minimum hardware specification is defined by the repository.
+
+## Getting Started
+
+### Clone
+
+The configured Git remote uses SSH:
+
+```powershell
+git clone git@github.com:sahidhaqqian/ProjectNera.git
+cd ProjectNera
+```
+
+### Build
+
+Debug build:
+
+```powershell
+cargo build
+```
+
+Optimized release build:
+
+```powershell
+cargo build --release
+```
+
+Keep the `assets/` directory available with packaged builds. During repository development, the application resolves assets from the manifest directory; packaged execution falls back to an `assets` directory beside the executable.
+
+### Run
 
 ```powershell
 cargo run
 ```
 
-Release build:
+To run the optimized profile:
 
 ```powershell
 cargo run --release
 ```
 
-## Current source layout
+### Tests
 
-```text
-src/
-├── main.rs
-├── interaction.rs
-├── animation.rs
-├── action_menu.rs
-├── alarm.rs
-├── presentation.rs
-├── desktop_physics.rs
-├── tray.rs
-├── environment/
-│   ├── mod.rs
-│   ├── sitting.rs
-│   ├── taskbar.rs
-│   ├── window_discovery.rs
-│   └── window_tracking.rs
-├── platform/
-│   ├── mod.rs
-│   └── windows.rs
-└── settings/
-    ├── mod.rs
-    ├── startup.rs
-    └── shadow.rs
+Run the complete automated suite:
+
+```powershell
+cargo test
 ```
 
----
+For a fast compile-only validation:
 
-# Phase 1 — VRM Desktop Foundation
-
-- Transparent borderless Bevy window.
-- VRM 1.0 avatar rendering.
-- VRMA idle animation.
-- Cursor-driven VRM LookAt.
-- SpringBone simulation for hair/accessories.
-- Always-on-top desktop-pet presentation.
-
-```text
-Transparent Window
-       ↓
-     Nera
-    VRM 1.0
-       ↓
-  VRMA Idle
-       ↓
-Cursor LookAt
-       ↓
- SpringBone
+```powershell
+cargo check
 ```
 
----
+Subsystem tests can be filtered with standard Cargo test filters, for example:
 
-# Phase 2 — Desktop Interaction
-
-- Clickable character while the rest of the transparent window remains click-through.
-- Native desktop dragging.
-- Animated bone-based hit areas.
-- Right-click support.
-- Native system tray integration.
-- Always-on-top control.
-
-```text
-cursor over Nera → hit test ON  → Nera receives input
-transparent area → hit test OFF → click passes to desktop/app below
+```powershell
+cargo test animation::tests
+cargo test settings::
 ```
 
----
+## Project Structure
 
-# Phase 3 — Windows Environment Foundation
-
-## 3.1 Native Platform Layer
-
-- Nera HWND discovery.
-- Global cursor coordinates.
-- Read/move Nera's native window.
-- Monitor information.
-- DPI / logical-to-physical coordinate conversion.
-
-## 3.2 Window Discovery
-
-- `EnumWindows` desktop discovery.
-- `WindowFromPoint` / `GetAncestor` target resolution.
-- Native window rectangles and visibility checks.
-- Ignores Nera's own HWND and invalid/system windows.
-
-## 3.3 Window Tracking
-
-Tracks a persistent native target and detects:
-
-- moved,
-- resized,
-- minimized/restored,
-- closed,
-- monitor changed.
+The tree below shows the important tracked runtime and documentation paths. Large animation libraries are grouped rather than listed asset-by-asset.
 
 ```text
-FIRST
-  └─ sync Nera HWND / monitor / DPI
-
-PREUPDATE
-  ├─ refresh desktop windows
-  ├─ discover window under cursor
-  └─ track persistent target
+ProjectNera/
+├── .cargo/
+│   └── config.toml
+├── assets/
+│   ├── animations/
+│   │   ├── Falling.vrma
+│   │   ├── Falling_To_Landing.vrma
+│   │   ├── animasi_basic/
+│   │   ├── Clawatar_animations/
+│   │   ├── FreeMotionPack1_converted_21_vrma/
+│   │   ├── UAL1_converted_43_vrma/
+│   │   └── VRMA/
+│   ├── shaders/
+│   │   └── nera_shadow_only.wgsl
+│   ├── sound/
+│   │   └── alarm.mp3
+│   └── vrm/
+│       ├── nera_256.vrm
+│       ├── nera.vrm
+│       └── nera0.0.vrm
+├── src/
+│   ├── main.rs
+│   ├── avatar/
+│   │   ├── mod.rs
+│   │   ├── anchors.rs
+│   │   ├── gaze.rs
+│   │   └── spawn.rs
+│   ├── interaction.rs
+│   ├── interaction/
+│   │   ├── headpat.rs
+│   │   ├── hit_testing.rs
+│   │   └── pointer.rs
+│   ├── animation.rs
+│   ├── animation/
+│   │   ├── clips.rs
+│   │   ├── idle.rs
+│   │   ├── playback.rs
+│   │   ├── state.rs
+│   │   └── systems.rs
+│   ├── environment/
+│   │   ├── mod.rs
+│   │   ├── sitting.rs
+│   │   ├── taskbar.rs
+│   │   ├── window_discovery.rs
+│   │   └── window_tracking.rs
+│   ├── desktop_physics.rs
+│   ├── desktop_physics/
+│   │   └── geometry.rs
+│   ├── expression.rs
+│   ├── presentation.rs
+│   ├── alarm.rs
+│   ├── alarm_settings.rs
+│   ├── alarm_dismiss.rs
+│   ├── action_menu.rs
+│   ├── settings/
+│   │   ├── mod.rs
+│   │   ├── model.rs
+│   │   ├── runtime.rs
+│   │   ├── shadow.rs
+│   │   ├── startup.rs
+│   │   └── ui.rs
+│   ├── tray.rs
+│   ├── tray/
+│   │   └── native.rs
+│   ├── platform/
+│   │   ├── mod.rs
+│   │   └── windows.rs
+│   └── rng.rs
+├── ARCHITECTURE.md
+├── Cargo.toml
+├── Cargo.lock
+└── README.md
 ```
 
-## 3.4 Z-Order / Occlusion
+Major ownership boundaries:
 
-- Target-relative z-order.
-- Detects windows above/below a tracked target.
-- Tracks occluders overlapping the target.
-- Allows natural desktop occlusion when Always On Top is disabled.
+- `main.rs` — app bootstrap, resources, plugin registration, and explicit cross-subsystem scheduling.
+- `avatar/` — avatar spawning, gaze, pose-derived Feet/Seat anchors, and death visual grounding.
+- `interaction/` — pointer capture, click/drag classification, hit testing, headpat recognition, and semantic messages.
+- `animation/` — animation state and priorities, clip registry, playback mapping, idle scheduling, and request synchronization.
+- `environment/` — native desktop snapshot, window/taskbar discovery, tracking, and sitting attachments.
+- `desktop_physics*` — gravity, falling/landing, standing support, and pure support geometry.
+- `presentation.rs` — attention-mode ownership of the main window and camera.
+- `alarm*` and `action_menu.rs` — alarms and Windows utility surfaces.
+- `settings/` — persistent model/defaults, runtime application, settings UI, startup integration, and shadows.
+- `tray*` and `platform/` — tray-thread bridge and general Win32 integration.
 
-## 3.5 Taskbar Detection
+## Architecture
 
-- Primary and monitor-aware taskbar discovery.
-- Native taskbar rectangle.
-- Top / bottom / left / right edge detection.
-- Multi-monitor foundation.
+Phase 5.9 separated the main architectural hotspots into subsystem-focused modules. `main.rs` now remains focused on bootstrap and the ordering that connects those subsystems.
 
-## 3.6 System Tray
-
-Current tray commands:
-
-- **Show Nera**
-- **Hide Nera**
-- **Reset Position**
-- **Always On Top**
-- **Exit**
-
-`Reset Position` is the emergency recovery path if Nera falls or is moved outside the visible desktop. It detaches current placement, clears falling/support state, moves Nera to the center of the primary monitor work area, shows the pet again, and updates the remembered position when enabled.
-
----
-
-# Phase 4 — Window / Taskbar Sitting
-
-## 4.1 Snap & Attachment
-
-`PlacementState` supports:
+A simplified runtime flow is:
 
 ```text
-Free
-Window(HWND)
-Taskbar(monitor/edge)
+Windows / Bevy input and desktop facts
+                 ↓
+       Interaction + Environment
+                 ↓
+       Placement / Physics / Alarm
+                 ↓
+        Animation state resolution
+                 ↓
+     Playback + Expression + Avatar
 ```
 
-Features:
+This diagram is intentionally simplified. Sitting, presentation, physics, and avatar anchors share carefully ordered Bevy state, and native attention mode temporarily transfers ownership of the main window.
 
-- Standing support anchor projected from the avatar feet.
-- Drag start detaches the old placement.
-- Drag release uses Nera's landing/support point, not just the cursor.
-- Visible window top-edge validation.
-- Taskbar inner-edge snapping.
-- Sitting attachment uses the avatar seat/hips anchor.
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before making cross-subsystem changes. It is the authoritative guide for:
 
-## 4.2 Follow & Lifecycle
+- module and state ownership;
+- meaningful dependency directions;
+- interaction, sitting, alarm, settings, and tray message flows;
+- Bevy startup/update/post-update/last-stage ordering;
+- behavior-sensitive areas and architecture guardrails;
+- the practical “Where do I change X?” lookup table.
 
-When attached to another window:
+## Current Development Status
 
-- target move → Nera follows,
-- target resize → offset is preserved and clamped,
-- dragging Nera → detach,
-- target close → detach,
-- target minimize → suspend/hide,
-- target restore → resume,
-- monitor/DPI changes → support coordinates are recalculated.
+Phase 5.9 completed the architecture-focused refactor without intentionally changing application behavior.
 
-## 4.3 Desktop Integration
+| Checkpoint | Status |
+|---|---|
+| 5.9.1 — `main.rs` decomposition | Complete |
+| 5.9.2 — animation architecture | Complete |
+| 5.9.3 — settings architecture | Complete |
+| 5.9.4 — physics/sitting/window robustness | Complete |
+| 5.9.5 — platform/tray/native integration | Complete |
+| 5.9.6 — final architectural cleanup | Complete |
 
-- Natural target-relative z-order when Always On Top is OFF.
-- Always On Top can override native desktop layering.
-- Multi-monitor taskbar support.
-- Sitting transitions use the evaluated VRMA seat anchor.
+Validation recorded at Phase 5.9 completion:
 
 ```text
-drag Nera
-   ↓
-detach old placement
-   ↓
-release
-   ↓
-landing/support point
-   ├─ window top edge → Window attachment
-   ├─ taskbar edge    → Taskbar attachment
-   └─ otherwise       → Free
+cargo check: PASS
+cargo test: 116 passed, 0 failed, 0 ignored
 ```
 
----
+The suite covers state transitions and pure decision logic, including animation priority, interaction hit testing, presentation, settings persistence, desktop support geometry, and native helper boundaries. It does not replace manual Windows GUI testing.
 
-# Phase 5 — Interaction, Reactions, Menus, Alarm & Desktop Physics
+## Known Limitations and Notes
 
-Phase 5 turns Nera from a movable VRM window into a desktop character with semantic interaction, animation ownership, native action menus, attention presentation, alarms, and gravity/support behavior.
+- Project Nera currently targets Windows; native desktop functionality is not implemented for other operating systems.
+- Automated tests do not fully exercise real HWND focus, click-through, z-order, tray callbacks, Explorer restarts, multi-monitor movement, or mixed-DPI behavior.
+- The native application should be smoke-tested on Windows after changes to interaction, sitting, presentation, settings windows, tray, or platform code.
+- `environment/sitting.rs`, `platform/windows.rs`, and `settings/ui.rs` remain relatively large because their current responsibilities are cohesive or behavior-sensitive. File size alone is not a reason to split them.
+- The repository contains many stock VRMA files that are not registered by the runtime. Their presence does not imply that every animation is exposed as a feature.
+- `cargo check` currently passes with non-fatal dead-code warnings for retained helpers and state variants.
+- The checked-in Cargo linker configuration may require a local path adjustment, as described under Requirements.
 
-## 5.1 Semantic Click vs Drag
+## Development
 
-The old "mouse down = drag" behavior was replaced by an explicit interaction state machine:
+Before changing behavior across module boundaries:
 
-```text
-None
- ↓
-Hover
- ↓ mouse down
-Pressed
- ├─ release before threshold → Click
- └─ move beyond threshold    → Dragging
-                                ↓
-                              Released
-```
+1. Read [ARCHITECTURE.md](ARCHITECTURE.md).
+2. Identify the authoritative resource or message owner.
+3. Preserve existing Bevy ordering and run conditions.
+4. Add focused regression coverage for changed state transitions or pure decisions.
+5. Run `cargo check` and relevant targeted tests before the full suite.
+6. Manually exercise affected native Windows behavior when HWND, input, positioning, tray, or utility-window code changes.
 
-The interaction layer emits typed Bevy messages instead of forcing every feature to inspect raw mouse input:
-
-- `NeraClicked`
-- `NeraRightClicked`
-- `NeraDragStarted`
-- `NeraDragged`
-- `NeraReleased`
-- `NeraHeadPatted`
-
-This keeps clicking, reactions, dragging, sitting, and menus on one input pipeline.
-
-## 5.2 Semantic Body-Part Hit Detection
-
-Nera now knows **what part of the avatar is being interacted with**.
-
-Supported body regions:
-
-- Head
-- Torso
-- Left / Right Arm
-- Left / Right Hand
-- Left / Right Leg
-- Left / Right Foot
-
-Implementation:
-
-- Head uses a visual screen-space test derived from the animated head/eyes.
-- Torso/arms/legs use animated humanoid-bone capsules.
-- Hands/feet use animated bone spheres.
-- The selected body part is captured at press time so an animation cannot change the meaning of an active gesture.
-- Transparent pixels outside the avatar remain click-through.
-
-## 5.3 Animation State Foundation
-
-Phase 5 introduced a single animation controller instead of letting individual features play arbitrary VRMAs directly.
-
-The controller separates:
-
-```text
-Base Pose
-├─ Idle
-└─ Sitting
-
-Support Transition
-├─ SittingEnter
-└─ SittingExit
-
-Temporary Action
-├─ reactions
-├─ menu animation
-├─ Floating
-├─ Falling / Landing
-├─ Death
-└─ Alarm
-```
-
-Temporary actions use priorities so a lower-priority reaction cannot overwrite a critical state such as Death or Alarm.
-
-VRMA one-shots use their real `VrmaDuration`, while persistent states such as Floating/Falling keep ownership until another system explicitly releases them.
-
-## 5.4 Reactions & Head Pat
-
-Current interaction reactions include:
-
-- Head click → head-hit reaction.
-- Torso/chest click → chest-hit reaction.
-- Three deliberate damage hits inside the combo window → `Death01`.
-- Cursor stroke back-and-forth over the head → head-pat/head-stroke reaction.
-- Dragging → persistent `Floating` pose.
-- Sitting → `Sitting_Enter → Sitting_Idle_Loop → Sitting_Exit`.
-
-The head-pat detector does not require a mouse button, so it does not conflict with click-vs-drag classification.
-
-Head-dominant animations temporarily suppress cursor LookAt/body tracking when the animation needs ownership of those bones.
-
-## 5.5 Native Radial Action Menu
-
-Right-clicking Nera opens a native Windows radial action wheel.
-
-### Root menu
-
-```text
-Chat           (reserved / disabled)
-Settings
-Animation
-Alarm
-Productivity   (reserved / disabled)
-Games          (reserved / disabled)
-```
-
-Nera uses the persistent `Praying` pose while the menu is open.
-
-### Animation submenu
-
-- Wave
-- Thinking
-- Angry
-- Sad
-- Surprised
-- Reset base pose
-- Back
-
-Only the animations actually used by the runtime are preloaded. The larger VRMA library remains stored as stock assets without occupying active runtime animation slots.
-
-### Alarm submenu
-
-- 5 minutes
-- 10 minutes
-- 30 minutes
-- Custom
-- Cancel
-- Back
-
-`Custom` is currently a reserved menu entry; the implemented alarm presets are 5 / 10 / 30 minutes.
-
-The Settings window can return to the same radial-menu position through its Back button.
-
-## 5.55 Attention / Presentation Mode
-
-Alarm presentation uses a dedicated `PresentationMode` layer.
-
-Instead of expanding Nera into a monitor-sized transparent Bevy window, the existing compact transparent HWND is moved and reframed into a prominent portrait presentation.
-
-On entry, the system snapshots:
-
-- native window position and size,
-- window level,
-- cursor hit-test state,
-- camera transform,
-- desktop placement/support state.
-
-On exit, the original desktop-pet presentation is restored.
-
-Development shortcut:
-
-```text
-Ctrl + Alt + P → toggle Attention(Alarm)
-```
-
-## 5.6 Alarm Runtime
-
-Alarm flow:
-
-```text
-Radial Alarm preset
-        ↓
-      deadline
-        ↓
-Presentation::Attention(Alarm)
-        ↓
-    alarm.mp3 loop
-        ↓
-   JumpHappy once
-        ↓
-      Wave loop
-        ↓
-dismiss presentation
-        ↓
-stop sound + animation
-        ↓
-restore DesktopPet
-```
-
-Implemented:
-
-- 5-minute preset.
-- 10-minute preset.
-- 30-minute preset.
-- Cancel armed alarm.
-- Dismiss ringing alarm through the presentation exit path.
-- Alarm sound cleanup stops/despawns every active alarm player.
-- Alarm animation safely waits if its VRMA assets have not loaded yet.
-
-Development shortcut:
-
-```text
-Ctrl + Alt + A → trigger the current alarm immediately
-```
-
-## 5.7 Desktop Gravity & Support Physics
-
-Phase 5.7 adds desktop-space gravity using **global physical pixels** rather than treating the transparent Nera HWND as collision geometry.
-
-The avatar's standing feet anchor is the physical support point.
-
-Supported surfaces:
-
-- desktop / monitor work-area floor,
-- visible native window top edges,
-- taskbar support.
-
-Runtime behavior:
-
-```text
-Nera unsupported
-      ↓
-    Falling
-      ↓
-vertical desktop-space sweep
-      ↓
-first valid support crossed
-      ↓
-Falling_To_Landing
-      ↓
-     Idle
-```
-
-Physics features:
-
-- gravity acceleration and terminal velocity,
-- sub-pixel vertical accumulation,
-- stable frozen support anchor during Falling/Landing animation,
-- revalidation of window support every frame,
-- automatic fall when a supporting window disappears/moves away,
-- hard-floor recovery if Nera begins below the monitor work-area floor,
-- Phase 4 sitting remains authoritative while Nera is attached,
-- dragging cancels physics ownership immediately,
-- Death grounding remains independent from normal freefall physics,
-- system-tray `Reset Position` clears stale fall/support state before recovery.
-
----
-
-# Current Settings Layer
-
-The current repository also contains the persistent Settings window used by the Phase 5 runtime.
-
-Available controls include:
-
-- Always On Top
-- Start with Windows
-- Start Hidden
-- Remember Position
-- Character Size
-- Ground Offset
-- Follow Mouse
-- Follow Eyes
-- Follow Head / Upper Body
-- Follow Intensity
-- Shadow enable
-- Simple / Character shadow
-- Shadow opacity
-- Shadow softness
-- Brightness
-- Master Volume
-- Mute Audio
-- FPS limit
-- Reset to Defaults
-- About / application version
-
-The Settings window is independently resizable and scrollable. Its input is isolated from the primary Nera window so UI clicks cannot accidentally become character clicks or drags.
-
----
-
-# Phase 5 Runtime Animation Set
-
-Stable animations currently used by runtime behavior include:
-
-```text
-Idle
-Floating
-Falling
-Falling_To_Landing
-Sitting_Enter
-Sitting_Idle_Loop
-Sitting_Exit
-Hit_Head
-Hit_Chest
-ShakeHeadNo1
-Death01
-Praying
-Wave
-Thinking
-Angry
-Sad
-Surprised
-Alarm JumpHappy
-Alarm Wave
-```
-
-The repository may contain many additional VRMA assets, but they are intentionally not all registered into the active controller.
-
----
-
-# Phase 5 Acceptance Test
-
-1. Hover transparent space around Nera → clicks pass through to the desktop/window below.
-2. Click Nera without moving → semantic click/reaction, not drag.
-3. Hold and move beyond the drag threshold → Nera enters Floating and follows the cursor.
-4. Click head and torso → the correct reaction is selected.
-5. Perform repeated damage hits → Death01 triggers at the configured combo threshold.
-6. Stroke the cursor back-and-forth across the head → head-pat reaction triggers without mouse press.
-7. Right-click Nera → radial root menu opens and Praying stays active while it is open.
-8. Play Wave/Thinking/Angry/Sad/Surprised from the animation submenu → one-shot animation returns to the correct base pose.
-9. Set a 5/10/30-minute alarm → deadline arms correctly; Cancel removes it.
-10. Trigger an alarm → Attention Mode + alarm audio + JumpHappy → Wave loop.
-11. Dismiss the alarm → audio/animation stop and the previous desktop-pet presentation is restored.
-12. Drop Nera above open desktop space → Falling begins and lands on the first valid support surface.
-13. Remove/move a supporting window → support is revalidated and Nera falls if no longer supported.
-14. Use tray **Reset Position** after moving/falling Nera off-screen → Nera returns to the primary monitor work-area center and physics state is reset.
-15. Open Settings while Nera overlaps it → Settings receives the input and Nera does not start a click/drag underneath it.
-
----
-
-# Phase 4 / 5 Tuning Knobs
-
-- `SNAP_DISTANCE_AT_96_DPI` in `src/environment/sitting.rs` controls release snap tolerance.
-- `WINDOW_EDGE_MARGIN_AT_96_DPI` controls resize clamping near native-window corners.
-- `FOOT_SOLE_OFFSET_LOGICAL` in `src/main.rs` adjusts the standing foot/sole support plane.
-- `DRAG_START_DISTANCE_AT_96_DPI` controls click-vs-drag movement threshold.
-- Head-stroke tuning constants in `src/main.rs` control jitter filtering, minimum travel, reversals, gesture window, and cooldown.
-- Gravity / terminal velocity / support epsilon are defined near the top of `src/desktop_physics.rs`.
-
----
-
-# Technology
-
-- Rust 2024 edition
-- Bevy 0.19
-- bevy_vrm1 0.9.2
-- Windows API through `windows` crate 0.62.2
-- VRM 1.0 / VRMA
-- Native Win32 HWND, system tray, window discovery, monitor/taskbar integration
-
+In particular, preserve the `Pressed -> Dragging -> Released` lifecycle, sitting/unsnapping handoff, animation priority and completion semantics, attention snapshot restoration, settings compatibility, and native thread boundaries.
