@@ -38,9 +38,7 @@ use crate::{
         DesktopEnvironment,
         PlacementState,
     },
-    interaction::HoveredBodyPart,
-    DesktopPetInteraction,
-    HeadPatGesture,
+    interaction::{DesktopPetInteraction, HeadPatGesture, HoveredBodyPart},
 };
 
 // -----------------------------------------------------------------------------

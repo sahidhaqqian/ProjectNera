@@ -21,8 +21,7 @@ use bevy_vrm1::prelude::VrmBone;
 use crate::{
     desktop_physics::DesktopPhysicsState,
     environment::{DesktopEnvironment, PlacementState},
-    interaction::InteractionState,
-    DesktopPetInteraction,
+    interaction::{DesktopPetInteraction, InteractionState},
 };
 
 use super::NeraSettings;

@@ -1,12 +1,18 @@
-//! Phase 5.1–5.4 — semantic interaction messages + body-part/reaction vocabulary.
-//!
-//! This module owns the public vocabulary produced by Nera's existing input
-//! pipeline. The actual native-window drag/sitting mechanics stay in `main.rs`
-//! so there is still only one state machine deciding whether a pointer gesture
-//! is a click or a drag. Phase 5.2 adds semantic `BodyPart` data to those same
-//! messages without creating a second input pipeline.
+//! Semantic interaction vocabulary and its single native pointer pipeline.
+//! System scheduling stays in main to preserve ordering with animation,
+//! desktop physics, presentation ownership, and pose-derived avatar anchors.
+mod headpat;
+mod hit_testing;
+mod pointer;
 
 use bevy::prelude::*;
+pub(crate) use headpat::{HeadPatGesture, detect_head_pat};
+pub(crate) use hit_testing::attach_bone_colliders;
+pub(crate) use pointer::{
+    DesktopPetInteraction, cursor_position_in_nera_window, drag_nera_window,
+    nera_utility_input_available, nera_utility_input_blocked, settle_pending_sit,
+    suspend_nera_interaction_for_settings, update_click_through,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum InteractionState {
@@ -148,8 +154,7 @@ fn log_interaction_messages(
     for event in dragged.read() {
         trace!(
             "Nera interaction -> Dragged @ {:?}, delta={:?}",
-            event.screen,
-            event.delta
+            event.screen, event.delta
         );
     }
 
@@ -163,10 +168,7 @@ fn log_interaction_messages(
     for event in released.read() {
         info!(
             "Nera interaction -> Released {:?} screen={:?} local={:?} (was_dragging={})",
-            event.body_part,
-            event.pointer.screen,
-            event.pointer.local,
-            event.was_dragging
+            event.body_part, event.pointer.screen, event.pointer.local, event.was_dragging
         );
     }
 }
