@@ -69,8 +69,12 @@ use windows::{
             RegisterClassExW,
             SetForegroundWindow,
             SetLayeredWindowAttributes,
+            SetWindowPos,
             ShowWindow,
             LWA_COLORKEY,
+            SWP_NOACTIVATE,
+            SWP_NOMOVE,
+            SWP_NOSIZE,
             SW_SHOW,
             WM_DESTROY,
             WM_ERASEBKGND,
@@ -81,6 +85,7 @@ use windows::{
             WM_PAINT,
             WM_RBUTTONUP,
             WNDCLASSEXW,
+            HWND_TOPMOST,
             WS_EX_LAYERED,
             WS_EX_TOOLWINDOW,
             WS_EX_TOPMOST,
@@ -286,7 +291,7 @@ const ANIMATION_ITEMS: [RadialItem; 7] = [
         ),
     },
     RadialItem {
-        glyph: "‹",
+        glyph: "<",
         label: "Back",
         action: RadialItemAction::Back,
     },
@@ -327,7 +332,7 @@ const ALARM_ITEMS: [RadialItem; 6] = [
         ),
     },
     RadialItem {
-        glyph: "‹",
+        glyph: "<",
         label: "Back",
         action: RadialItemAction::Back,
     },
@@ -377,7 +382,7 @@ const ALARM_MORE_ITEMS: [RadialItem; 7] = [
         ),
     },
     RadialItem {
-        glyph: "‹",
+        glyph: "<",
         label: "Back",
         action: RadialItemAction::Back,
     },
@@ -469,6 +474,7 @@ impl Plugin for ActionMenuPlugin {
                     open_action_menu,
                     reopen_action_menu_from_settings,
                     poll_action_menu_result,
+                    keep_action_menu_front,
                 )
                     .chain(),
             );
@@ -557,6 +563,35 @@ fn reopen_action_menu_from_settings(
         screen.x,
         screen.y,
     );
+}
+
+fn keep_action_menu_front(menu: Res<ActionMenuState>) {
+    if !menu.open {
+        return;
+    }
+
+    let raw = RADIAL_HWND.load(Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+
+    let hwnd = HWND(raw as *mut c_void);
+
+    // Environment/taskbar maintenance can legitimately reassert Nera's own
+    // TOPMOST HWND. Run this in Update after those PreUpdate systems so the
+    // radial wheel remains the front-most topmost window for the whole time it
+    // is open, including Settings -> Back.
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    };
 }
 
 fn poll_action_menu_result(
@@ -1087,6 +1122,22 @@ pub(crate) unsafe fn show_nera_action_menu(
     }
 
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+
+    // Nera itself is normally AlwaysOnTop. WS_EX_TOPMOST alone does not
+    // guarantee a newly re-opened wheel becomes the front-most member of the
+    // topmost band after returning from Settings, so explicitly promote it.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )?;
+    }
+
     let _ = unsafe { SetForegroundWindow(hwnd) };
     let _ = unsafe { InvalidateRect(Some(hwnd), None, true) };
 

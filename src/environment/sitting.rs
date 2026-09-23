@@ -770,9 +770,81 @@ pub(super) fn follow_sitting_attachment(
             follow_taskbar_attachment(
                 &mut environment,
                 attachment,
+                refresh_z_order,
             );
         }
     }
+}
+
+/// True when another normal top-level application sits above the attached
+/// target at Nera's actual seat/support point.
+///
+/// `EnumWindows`/`enumerate_windows` preserves desktop z-order. Walk only until
+/// the target is reached: any earlier window covering the support point is an
+/// occluder. Nera's own main HWND is excluded by enumeration, and normal
+/// utility/tool windows are filtered by the platform layer.
+fn window_attachment_occluded(
+    environment: &DesktopEnvironment,
+    attachment: WindowAttachment,
+) -> bool {
+    let Some(nera_hwnd) = environment.nera_hwnd else {
+        return false;
+    };
+
+    let Some(target) = environment
+        .target_window
+        .as_ref()
+        .filter(|target| target.handle == attachment.target)
+    else {
+        return false;
+    };
+
+    let support_x = target
+        .rect
+        .left
+        .saturating_add(attachment.support_offset_x)
+        .clamp(target.rect.left, target.rect.right.saturating_sub(1));
+
+    // Sample a few pixels *inside* the target instead of exactly on its top
+    // border. That avoids frame/shadow ambiguity while still representing the
+    // surface Nera is visibly sitting on.
+    let support_y = target
+        .rect
+        .top
+        .saturating_add(8)
+        .min(target.rect.bottom.saturating_sub(1));
+
+    let Ok(windows) = platform::enumerate_windows(nera_hwnd) else {
+        return false;
+    };
+
+    for window in windows {
+        if window.handle == attachment.target {
+            // We reached the target in z-order without finding a covering app.
+            return false;
+        }
+
+        if !platform::is_window_alive(window.handle)
+            || platform::is_window_minimized(window.handle)
+            || platform::is_window_cloaked(window.handle)
+        {
+            continue;
+        }
+
+        let Some(rect) = platform::window_rect(window.handle) else {
+            continue;
+        };
+
+        if support_x >= rect.left
+            && support_x < rect.right
+            && support_y >= rect.top
+            && support_y < rect.bottom
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn follow_window_attachment(
@@ -800,20 +872,29 @@ fn follow_window_attachment(
         return;
     }
 
-    // Minimize or DWM cloaking suspends the attachment without destroying it.
-    // This covers normal minimize/restore plus switching virtual desktops, where
-    // the target HWND remains alive but is temporarily hidden by DWM.
-    if target.minimized || target.cloaked {
+    // A minimized window is no longer physical support. Detach immediately and
+    // let desktop physics make Nera fall instead of hiding/minimizing the pet
+    // together with the application.
+    if target.minimized {
+        if let Ok(mut window) = window_query.single_mut() {
+            window.visible = true;
+        }
+        environment.hidden_for_target_suspend = false;
+        environment.detach_nera();
+        info!("Nera detached: target window minimized -> freefall");
+        return;
+    }
+
+    // DWM cloaking is different from minimize: the HWND may simply live on a
+    // different virtual desktop. Preserve the attachment and suspend visibility
+    // until that desktop/window becomes visible again.
+    if target.cloaked {
         if !environment.hidden_for_target_suspend {
             if let Ok(mut window) = window_query.single_mut() {
                 if window.visible {
                     window.visible = false;
                     environment.hidden_for_target_suspend = true;
-                    info!(
-                        "Nera suspended because target is unavailable: minimized={} cloaked={}",
-                        target.minimized,
-                        target.cloaked,
-                    );
+                    info!("Nera suspended because target is DWM-cloaked");
                 }
             }
         }
@@ -828,6 +909,35 @@ fn follow_window_attachment(
 
         environment.hidden_for_target_suspend = false;
         info!("Nera resumed after target became visible again");
+    }
+
+    // A top edge flush with the monitor top (typical maximized/fullscreen
+    // Chrome) is not a usable sitting surface: keeping Seat attached there
+    // pushes almost the whole avatar above the screen. Detach before applying
+    // the resized geometry so Nera remains visible and falls naturally.
+    if let Some(monitor) = platform::monitor_info(target.handle) {
+        let top_guard =
+            (24.0 * environment.nera_scale_factor.max(0.5)).round() as i32;
+
+        if target.rect.top <= monitor.bounds.top.saturating_add(top_guard) {
+            environment.detach_nera();
+            info!(
+                "Nera detached: target top edge has no sitting headroom | target_top={} monitor_top={}",
+                target.rect.top,
+                monitor.bounds.top,
+            );
+            return;
+        }
+    }
+
+    // When Alt-Tab (or another normal app) actually covers the support point,
+    // keeping an AlwaysOnTop Nera attached makes her look like she is sitting
+    // in mid-air. Do not make the target app topmost; detach Nera instead so
+    // gravity can hand her to whatever surface is currently visible.
+    if refresh_z_order && window_attachment_occluded(environment, attachment) {
+        environment.detach_nera();
+        info!("Nera detached: sitting target occluded at support point -> freefall");
+        return;
     }
 
     let Some(nera_hwnd) = environment.nera_hwnd else {
@@ -879,6 +989,7 @@ fn follow_window_attachment(
 fn follow_taskbar_attachment(
     environment: &mut DesktopEnvironment,
     attachment: TaskbarAttachment,
+    refresh_z_order: bool,
 ) {
     let Some(taskbar) = environment
         .taskbar
@@ -923,5 +1034,14 @@ fn follow_taskbar_attachment(
             along_offset: clamped_offset,
             ..attachment
         });
+    }
+
+    // Shell_TrayWnd can jump in front of another topmost HWND after the taskbar
+    // itself is clicked. While Nera is sitting on it, periodically reassert her
+    // at the front of the topmost band without stealing focus.
+    if refresh_z_order {
+        if let Err(error) = platform::place_window_topmost_noactivate(nera_hwnd) {
+            debug!("Failed to refresh taskbar sitting z-order: {error}");
+        }
     }
 }

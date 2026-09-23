@@ -260,19 +260,6 @@ impl NeraAnimationState {
     }
 
     fn set_base_pose(&mut self, pose: BasePose) {
-        if pose == BasePose::Sitting {
-            // Idle fidgets are standing clips. If Nera becomes seated while one
-            // is active, discard it instead of hiding it under Sitting and
-            // letting the tail resume if she stands again quickly.
-            let before = self.active_actions.len();
-            self.active_actions
-                .retain(|active| !active.action.is_idle_variation());
-
-            if before != self.active_actions.len() {
-                info!("Nera idle variation cancelled by Sitting");
-            }
-        }
-
         if self.base_pose != pose {
             info!("Nera base pose: {:?} -> {:?}", self.base_pose, pose);
             self.base_pose = pose;
@@ -286,28 +273,16 @@ impl NeraAnimationState {
         self.was_on_sitting_surface = false;
         self.set_base_pose(BasePose::Idle);
 
-        // Attention owns the avatar completely. Keep only the alarm actions
-        // that are part of the Attention presentation itself; every desktop
-        // interaction action (including persistent Floating and any unfinished
-        // idle/reaction tail) is stale once control crosses this boundary.
-        let before = self.active_actions.len();
-        self.active_actions.retain(|active| {
-            matches!(
-                active.action,
-                TemporaryAction::AlarmWave | TemporaryAction::AlarmJump
-            )
-        });
-        let cleared = before - self.active_actions.len();
+        // `Floating` is persistent and is only ever released by
+        // `NeraReleased { was_dragging: true }`. An alarm that fires mid-drag
+        // gates `drag_nera_window` off before that message exists, so without
+        // this Nera returns from Attention stuck in the Floating pose at
+        // priority 80 — above every reaction.
+        self.finish_action(TemporaryAction::Floating);
 
-        // A pre-alarm 1/3 or 2/3 damage combo must not survive an Attention
-        // round-trip and turn an unrelated later poke into Death.
-        self.reset_damage_combo();
         self.bump_revision();
 
-        info!(
-            "Nera support suspended for Attention | cleared {} desktop action(s)",
-            cleared,
-        );
+        info!("Nera support suspended for Attention");
     }
 
     /// Restore the desktop base pose without replaying SittingEnter.
@@ -556,7 +531,7 @@ impl NeraAnimationState {
         &mut self,
         sitting_surface: bool,
         enter_duration: Duration,
-        exit_duration: Duration,
+        _exit_duration: Duration,
     ) {
         if sitting_surface == self.was_on_sitting_surface {
             self.set_base_pose(if sitting_surface {
@@ -576,11 +551,14 @@ impl NeraAnimationState {
                 enter_duration,
             );
         } else {
+            // Desktop detach is immediate. Waiting for SittingExit before drag
+            // caused cursor/window divergence, and lifecycle detaches such as
+            // maximize/minimize should fall immediately once support vanishes.
             self.set_base_pose(BasePose::Idle);
-            self.begin_support_transition(
-                SupportTransition::SittingExit,
-                exit_duration,
-            );
+
+            if self.support_transition.take().is_some() {
+                self.bump_revision();
+            }
         }
     }
 
@@ -750,10 +728,20 @@ impl NeraAnimationState {
     }
 
     /// Switch Falling -> Falling_To_Landing using the real VRMA duration.
+    ///
+    /// Physics can revalidate the same support for more than one frame around
+    /// a native-window edge. Never restart an already-playing landing clip: one
+    /// physical fall owns exactly one Falling_To_Landing transition.
     pub(crate) fn land_from_fall(&mut self, landing_duration: Duration) {
         self.finish_action(TemporaryAction::Falling);
-        self.active_actions
-            .retain(|active| active.action != TemporaryAction::Landing);
+
+        if self
+            .active_actions
+            .iter()
+            .any(|active| active.action == TemporaryAction::Landing)
+        {
+            return;
+        }
 
         if landing_duration.is_zero() {
             warn!("Falling_To_Landing duration unavailable; landing directly to base pose");
@@ -841,6 +829,12 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    pub(crate) fn death_duration(&self) -> Duration {
+        self.death
+            .map(|clip| clip.duration)
+            .unwrap_or(Duration::ZERO)
+    }
+
     pub(crate) fn falling_to_landing_duration(&self) -> Duration {
         self.falling_to_landing
             .map(|clip| clip.duration)
@@ -890,13 +884,10 @@ pub(crate) struct IdleVariationRuntime {
 
 impl Default for IdleVariationRuntime {
     fn default() -> Self {
-        let mut rng = NeraRng::from_entropy();
-        let cooldown = random_idle_delay(&mut rng);
-
         Self {
-            cooldown,
+            cooldown: IDLE_VARIATION_MIN_DELAY,
             last: None,
-            rng,
+            rng: NeraRng::from_entropy(),
         }
     }
 }
@@ -936,15 +927,11 @@ impl IdleVariationRuntime {
     }
 
     fn next_delay(&mut self) -> Duration {
-        random_idle_delay(&mut self.rng)
+        Duration::from_secs_f32(self.rng.range_f32(
+            IDLE_VARIATION_MIN_DELAY.as_secs_f32(),
+            IDLE_VARIATION_MAX_DELAY.as_secs_f32(),
+        ))
     }
-}
-
-fn random_idle_delay(rng: &mut NeraRng) -> Duration {
-    Duration::from_secs_f32(rng.range_f32(
-        IDLE_VARIATION_MIN_DELAY.as_secs_f32(),
-        IDLE_VARIATION_MAX_DELAY.as_secs_f32(),
-    ))
 }
 
 /// Choose a loaded micro-action, starting from a random offset.
@@ -1651,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_sitting_plays_exit_before_floating() {
+    fn leaving_sitting_reveals_floating_immediately() {
         let mut state = NeraAnimationState::default();
 
         state.observe_sitting_surface(
@@ -1671,9 +1658,7 @@ mod tests {
             Duration::from_millis(300),
         );
 
-        assert_eq!(state.visual_state(), VisualState::SittingExit);
-
-        state.advance(Duration::from_millis(300));
+        // No SittingExit detachment gate anymore.
         assert_eq!(state.visual_state(), VisualState::Floating);
     }
 
@@ -1914,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn sitting_cancels_a_fidget_instead_of_resuming_its_tail_later() {
+    fn a_fidget_never_pulls_nera_out_of_a_seat() {
         let mut state = NeraAnimationState::default();
 
         assert!(state.request_idle_variation(
@@ -1922,19 +1907,15 @@ mod tests {
             Duration::from_secs(4),
         ));
 
-        // Micro-action clips are standing clips. Once Nera becomes seated, the
-        // fidget is invalidated rather than merely hidden under the seat pose.
+        // Sat down mid-fidget. Micro-action clips are standing clips, so it
+        // stays logically alive but must lose the pose.
         state.set_base_pose(BasePose::Sitting);
 
         assert_eq!(state.visual_state(), VisualState::SittingLoop);
-        assert!(!state
+        assert!(state
             .active_actions
             .iter()
             .any(|active| active.action.is_idle_variation()));
-
-        // Standing again must not reveal the old fidget tail.
-        state.set_base_pose(BasePose::Idle);
-        assert_eq!(state.visual_state(), VisualState::Idle);
     }
 
     #[test]

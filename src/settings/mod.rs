@@ -1581,7 +1581,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     Button,
                     SettingsButtonAction::BackToMenu,
                     Node {
-                        width: px(42),
+                        width: px(68),
                         height: px(42),
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
@@ -1600,9 +1600,9 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                 ))
                 .with_children(|back| {
                     back.spawn((
-                        Text::new("‹"),
+                        Text::new("Back"),
                         TextFont {
-                            font_size: FontSize::Px(28.0),
+                            font_size: FontSize::Px(14.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.73, 0.77, 0.89)),

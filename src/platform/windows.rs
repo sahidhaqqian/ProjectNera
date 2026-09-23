@@ -69,6 +69,7 @@ use windows::Win32::{
             SWP_NOSIZE,
             SWP_NOZORDER,
             HWND_NOTOPMOST,
+            HWND_TOPMOST,
             WS_EX_TOOLWINDOW,
             WS_EX_TOPMOST,
         },
@@ -625,6 +626,27 @@ pub fn move_window(
             0,
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+}
+
+
+/// Reassert an HWND at the front of the Windows topmost band without moving,
+/// resizing, or activating it. Taskbar sitting uses this because Shell_TrayWnd
+/// can otherwise visually cover part of an always-on-top pet after the taskbar
+/// itself is clicked.
+pub fn place_window_topmost_noactivate(
+    handle: NativeWindowHandle,
+) -> windows::core::Result<()> {
+    unsafe {
+        SetWindowPos(
+            handle.hwnd(),
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
     }
 }

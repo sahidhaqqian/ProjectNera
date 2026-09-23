@@ -277,7 +277,7 @@ fn handle_presentation_commands(
                     continue;
                 }
 
-                let Ok((mut window, mut cursor)) = window_query.single_mut() else {
+                let Ok((mut window, cursor)) = window_query.single_mut() else {
                     warn!("Presentation: primary Nera window unavailable");
                     continue;
                 };
@@ -336,13 +336,6 @@ fn handle_presentation_commands(
                     &mut hovered,
                     &mut head_pat,
                 );
-
-                // The portrait itself has no Attention-mode pointer action.
-                // Make the primary Nera HWND fully click-through so it cannot
-                // swallow desktop clicks while drag/head-pat/menu input is
-                // intentionally gated. The separate dismiss window owns alarm
-                // interaction and the snapshot restores the previous policy.
-                cursor.hit_test = false;
 
                 state.mode = PresentationMode::Attention(kind);
                 state.attention_enter_progress = 0.0;
@@ -410,8 +403,9 @@ fn handle_presentation_commands(
                     continue;
                 };
 
-                // Runs before every restore attempt on purpose: even a degraded
-                // exit must hand pointer ownership back cleanly.
+                // Runs before the snapshot check on purpose: even a degraded
+                // exit that cannot restore the window must still hand input
+                // ownership back cleanly.
                 reset_pointer_state(
                     &mut interaction,
                     &mut hovered,
@@ -422,54 +416,41 @@ fn handle_presentation_commands(
                     warn!(
                         "Presentation: attention mode had no restore snapshot"
                     );
-
-                    // `PresentationExited` is a lifecycle guarantee, not a
-                    // success-only notification. Alarm/audio cleanup depends on
-                    // it, so a degraded restore must still close the Attention
-                    // session instead of leaving a looping alarm orphaned.
                     state.mode = PresentationMode::DesktopPet;
-                    state.attention_enter_progress = 0.0;
                     state.attention_locked_center = None;
                     state.attention_locked_window_width = 0;
                     state.attention_peak_camera_z = 0.0;
-
-                    exited.write(PresentationExited { kind });
                     continue;
                 };
 
-                let mut window_restored = false;
-                match window_query.single_mut() {
-                    Ok((mut window, mut cursor)) => {
-                        restore_desktop_window(
-                            &mut window,
-                            &mut cursor,
-                            &snapshot,
-                        );
-                        window_restored = true;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "Presentation: primary Nera window unavailable during restore;                              continuing degraded exit"
-                        );
-                    }
-                }
+                let Ok((mut window, mut cursor)) =
+                    window_query.single_mut()
+                else {
+                    warn!(
+                        "Presentation: primary Nera window unavailable during restore"
+                    );
+                    continue;
+                };
 
-                let mut camera_restored = false;
-                match camera_query.single_mut() {
-                    Ok((_projection, mut camera_transform)) => {
-                        *camera_transform = snapshot.camera_transform.clone();
-                        camera_restored = true;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "Presentation: Nera camera unavailable during restore;                              continuing degraded exit"
-                        );
-                    }
-                }
+                let Ok((_projection, mut camera_transform)) =
+                    camera_query.single_mut()
+                else {
+                    warn!(
+                        "Presentation: Nera camera unavailable during restore"
+                    );
+                    continue;
+                };
 
-                // Restore the desktop-world ownership even if the render/window
-                // side degraded. Leaving PlacementState suspended would make a
-                // later frame fight DesktopPet systems after Attention ended.
+                restore_desktop_window(
+                    &mut window,
+                    &mut cursor,
+                    &snapshot,
+                );
+                *camera_transform = snapshot.camera_transform;
+
+                // Restore the exact desktop attachment that existed before
+                // Attention. If it was sitting, return directly to SittingLoop
+                // instead of replaying SittingEnter.
                 environment.placement = snapshot.placement;
                 environment.set_attached_anchor(snapshot.attached_anchor);
                 environment.hidden_for_target_suspend =
@@ -494,17 +475,13 @@ fn handle_presentation_commands(
                 state.attention_peak_camera_z = 0.0;
 
                 info!(
-                    "Presentation -> DesktopPet | restored={}x{} @ {},{} | window={} camera={}",
+                    "Presentation -> DesktopPet | restored={}x{} @ {},{}",
                     snapshot.window_width,
                     snapshot.window_height,
                     snapshot.window_left,
                     snapshot.window_top,
-                    window_restored,
-                    camera_restored,
                 );
 
-                // Always emitted once an Attention session is logically closed.
-                // Consumers must never have to infer teardown from window state.
                 exited.write(PresentationExited { kind });
             }
         }
@@ -1137,11 +1114,9 @@ mod tests {
             top_y: 1.7,
         };
 
-        let horizontal_half_extent = (
-            (bounds.max_x - locked.x)
-                .abs()
-                .max((locked.x - bounds.min_x).abs())
-        );
+        let horizontal_half_extent = (bounds.max_x - locked.x)
+            .abs()
+            .max((locked.x - bounds.min_x).abs());
 
         assert!((locked.x - 0.0).abs() < f32::EPSILON);
         assert!((horizontal_half_extent - 1.0).abs() < 0.001);

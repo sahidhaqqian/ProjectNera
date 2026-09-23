@@ -30,7 +30,7 @@ pub struct TrackedWindow {
     /// Window sedang minimized.
     pub minimized: bool,
 
-    /// Window sedang DWM-cloaked, biasanya karena berada di virtual desktop lain.
+    /// DWM currently hides the HWND (for example another virtual desktop).
     pub cloaked: bool,
 
     /// Posisi berubah pada update ini.
@@ -63,7 +63,7 @@ impl TrackedWindow {
 
             alive: true,
             minimized: false,
-            cloaked: false,
+            cloaked: platform::is_window_cloaked(handle),
 
             moved: false,
             resized: false,
@@ -96,9 +96,7 @@ impl DesktopEnvironment {
         //
         // Window yang SUDAH menjadi target boleh kemudian minimized;
         // itu ditangani oleh tracking system.
-        if platform::is_window_minimized(handle)
-            || platform::is_window_cloaked(handle)
-        {
+        if platform::is_window_minimized(handle) {
             return false;
         }
 
@@ -198,39 +196,21 @@ pub(super) fn track_target_window(
         }
     }
 
-    // -------------------------------------------------------------------------
-    // DWM cloaking / Virtual Desktop
-    // -------------------------------------------------------------------------
+    let was_cloaked = target.cloaked;
+    target.cloaked = platform::is_window_cloaked(target.handle);
 
-    let was_cloaked =
-        target.cloaked;
-
-    let cloaked =
-        platform::is_window_cloaked(
+    if target.cloaked != was_cloaked {
+        debug!(
+            "Tracked window DWM cloak changed: {:?} -> {}",
             target.handle,
+            target.cloaked,
         );
-
-    target.cloaked = cloaked;
-
-    if cloaked != was_cloaked {
-        if cloaked {
-            info!(
-                "Tracked window cloaked (likely another virtual desktop): {:?}",
-                target.handle,
-            );
-        } else {
-            info!(
-                "Tracked window uncloaked: {:?}",
-                target.handle,
-            );
-        }
     }
 
-    // Jangan update rect ketika minimized.
-    //
-    // Kita pertahankan rect normal terakhir supaya Nera
-    // tidak tiba-tiba bergerak ke koordinat minimized/icon.
-    if minimized || cloaked {
+    // Keep the last normal rect while Windows has no meaningful visible
+    // geometry. Minimize is handled as support loss by sitting.rs; DWM cloak
+    // remains a temporary virtual-desktop suspension.
+    if minimized || target.cloaked {
         return;
     }
 

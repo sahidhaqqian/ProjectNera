@@ -21,6 +21,7 @@ mod settings;
 mod tray;
 
 use animation::{
+    NeraAnimationClips,
     NeraAnimationPlugin,
     NeraAnimationState,
     apply_animation_state,
@@ -208,9 +209,15 @@ const FOOT_SOLE_OFFSET_LOGICAL: f32 = 12.0;
 /// the current avatar orientation.
 const SEAT_OFFSET_WORLD: Vec3 = Vec3::new(0.0, -0.12, 0.08);
 
-/// Additional visual clearance used when a horizontal Death01 pose is grounded.
-/// The support point is measured from animated body bones in screen space.
-const DEATH_GROUND_MARGIN_LOGICAL: f32 = 8.0;
+/// VRMA is a 3D pose, while the Windows desktop support surface is a 2D
+/// screen-space line. During Death01 we gently reconcile those two spaces by
+/// translating only Nera's 3D root after the fall has begun. We never move the
+/// native HWND for this correction.
+const DEATH_GROUND_START_FRACTION: f32 = 0.18;
+const DEATH_GROUND_FULL_FRACTION: f32 = 0.72;
+const DEATH_GROUND_RESPONSE: f32 = 16.0;
+const DEATH_CONTACT_MARGIN_LOGICAL: f32 = 10.0;
+const DEATH_MAX_ROOT_DROP_WORLD: f32 = 1.50;
 
 // -----------------------------------------------------------------------------
 // Mate-Engine-style sitting interaction tuning
@@ -294,6 +301,7 @@ struct DesktopPetInteraction {
     unsnap_cooldown_until: Option<Instant>,
     guard_center: Option<IVec2>,
     recent_unsnap_surface_y: Option<i32>,
+
 }
 
 impl DesktopPetInteraction {
@@ -372,19 +380,31 @@ impl HeadPatGesture {
     }
 }
 
-#[derive(Resource, Default)]
-struct DeathGrounding {
-    /// Desktop-space Y of Nera's standing floor. Refreshed while Nera is
-    /// normally standing and then frozen throughout Death01.
-    ground_y_physical: Option<i32>,
-    was_death_active: bool,
-}
 
 #[derive(Component)]
 struct NeraAvatar;
 
 #[derive(Component)]
 struct LookAtTarget;
+
+#[derive(Resource, Debug)]
+struct DeathVisualGrounding {
+    active: bool,
+    base_root_y: f32,
+    floor_y_logical: Option<f32>,
+    elapsed: Duration,
+}
+
+impl Default for DeathVisualGrounding {
+    fn default() -> Self {
+        Self {
+            active: false,
+            base_root_y: 0.0,
+            floor_y_logical: None,
+            elapsed: Duration::ZERO,
+        }
+    }
+}
 
 #[derive(Component)]
 struct NeraCollider {
@@ -524,9 +544,9 @@ fn main() {
     app.insert_resource(ClearColor(Color::NONE))
         .init_resource::<DesktopPetInteraction>()
         .init_resource::<HoveredBodyPart>()
-        .init_resource::<DeathGrounding>()
         .init_resource::<HeadPatGesture>()
         .init_resource::<desktop_physics::DesktopPhysicsState>()
+        .init_resource::<DeathVisualGrounding>()
         .add_systems(
             Startup,
             (setup_camera, setup_lighting, spawn_nera),
@@ -957,19 +977,21 @@ fn nera_pointer_position(
 
 #[cfg(target_os = "windows")]
 fn update_avatar_anchors(
+    time: Res<Time>,
     interaction: Res<DesktopPetInteraction>,
     animation: Res<NeraAnimationState>,
+    clips: Res<NeraAnimationClips>,
     settings: Res<NeraSettings>,
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
-    mut grounding: ResMut<DeathGrounding>,
+    mut grounding: ResMut<DeathVisualGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut avatar_query: Query<(&mut Transform, &GlobalTransform), With<NeraAvatar>>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
     // Seat/hips must keep updating even during a free drag because it is the
-    // live sitting probe. Feet, on the other hand, stays cached from the last
-    // standing frame so dangling feet from sitting.vrma never become the
-    // standing support anchor.
+    // live sitting probe. Feet stay cached from the last standing frame so
+    // dangling feet from sitting/death clips never become the rigid support.
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
@@ -979,50 +1001,37 @@ fn update_avatar_anchors(
         FOOT_SOLE_OFFSET_LOGICAL * character_scale + settings.ground_offset_logical();
 
     let mut feet = Vec::with_capacity(2);
-    let mut death_support_points = Vec::with_capacity(12);
+    let mut death_support_points = Vec::with_capacity(24);
     let mut seat = None;
 
     for (bone, transform) in &bone_query {
-        if matches!(
-            bone.as_str(),
-            "head"
-                | "hips"
-                | "chest"
-                | "leftHand"
-                | "rightHand"
-                | "leftFoot"
-                | "rightFoot"
-                | "leftLowerLeg"
-                | "rightLowerLeg"
-        ) {
-            if let Ok(viewport) = camera.world_to_viewport(
-                camera_transform,
-                transform.translation(),
-            ) {
+        let world = transform.translation();
+
+        if animation.death_active() {
+            if let Ok(viewport) =
+                camera.world_to_viewport(camera_transform, world)
+            {
                 death_support_points.push(viewport);
             }
         }
 
         match bone.as_str() {
             "leftFoot" | "rightFoot" => {
-                if let Ok(viewport) = camera.world_to_viewport(
-                    camera_transform,
-                    transform.translation(),
-                ) {
+                if let Ok(viewport) =
+                    camera.world_to_viewport(camera_transform, world)
+                {
                     feet.push(viewport);
                 }
             }
 
             "hips" => {
                 // The hips bone is the pelvis center, not the actual contact
-                // point with a chair/window edge. Offset it slightly down/back
-                // to approximate the seat/butt support point.
+                // point with a chair/window edge.
                 let seat_world = transform.transform_point(SEAT_OFFSET_WORLD);
 
-                if let Ok(viewport) = camera.world_to_viewport(
-                    camera_transform,
-                    seat_world,
-                ) {
+                if let Ok(viewport) =
+                    camera.world_to_viewport(camera_transform, seat_world)
+                {
                     seat = Some(viewport);
                 }
             }
@@ -1031,12 +1040,12 @@ fn update_avatar_anchors(
         }
     }
 
-    // Feet means *standing support*. Do not overwrite it with the dangling
-    // feet from sitting.vrma. That cached idle anchor is what allows a clean
-    // Seat -> Feet handoff when Nera is unpinned.
+    // Feet means *standing support*. Never rewrite the cached support anchor
+    // from a Death/Sitting/Floating pose.
     if environment.placement == PlacementState::Free
         && interaction.state != InteractionState::Dragging
         && interaction.drag_offset.is_none()
+        && !animation.death_active()
         && !feet.is_empty()
     {
         let x =
@@ -1050,112 +1059,136 @@ fn update_avatar_anchors(
 
         environment.set_feet_anchor(Vec2::new(x, y));
 
-        // Physics intentionally freezes its standing anchor during normal
-        // animation. A settings change can alter avatar scale/ground contact,
-        // so refresh that rigid-body anchor from the newly evaluated geometry.
-        if settings.is_changed() && !physics.falling && !animation.death_active() {
+        if settings.is_changed() && !physics.falling {
             physics.refresh_support_anchor(environment.feet_anchor_logical);
         }
     }
 
     // ---------------------------------------------------------------------
-    // Death01 ground stabilization
+    // Death01 visual grounding
     // ---------------------------------------------------------------------
     //
-    // Cache the standing floor continuously *before* Death starts. A death
-    // animation can move the feet on its very first evaluated frame, so using
-    // the current Death-frame feet would capture the wrong baseline.
+    // VRMA animates a 3D humanoid pose. The desktop/taskbar/window support is a
+    // 2D screen-space line. A normal VRM viewer owns a 3D floor plane, so a
+    // "lying down" clip naturally reads as grounded there; Project Nera has no
+    // such world floor. Keep the native HWND fixed and reconcile the mismatch
+    // inside the 3D scene by gently lowering only Nera's root near the latter
+    // half of Death01.
     //
-    // During Death, keep the lowest animated body point on that frozen
-    // desktop-space floor line. When the one-shot finishes, re-align the
-    // standing feet to the exact same floor before normal anchor sampling
-    // resumes.
-    if environment.placement == PlacementState::Free
+    // This deliberately waits for the fall to begin instead of pinning the
+    // lowest bone to the floor from frame zero, which would erase the visible
+    // falling motion.
+    let death_active = animation.death_active();
+
+    if death_active
+        && environment.placement == PlacementState::Free
         && interaction.state != InteractionState::Dragging
         && interaction.drag_offset.is_none()
     {
-        let death_active = animation.death_active();
-        let scale = environment.nera_scale_factor.max(0.25) as f32;
+        let Ok((mut avatar_transform, avatar_global)) = avatar_query.single_mut() else {
+            return;
+        };
 
-        if let Some(rect) = environment.nera_rect {
-            let standing_feet_y = (!feet.is_empty()).then(|| {
-                feet
+        if !grounding.active {
+            grounding.active = true;
+            grounding.base_root_y = avatar_transform.translation.y;
+            grounding.floor_y_logical = environment.feet_anchor_logical.map(|anchor| anchor.y);
+            grounding.elapsed = Duration::ZERO;
+
+            info!(
+                "Death01 visual grounding armed | floor_y={:?} root_y={:.3}",
+                grounding.floor_y_logical,
+                grounding.base_root_y,
+            );
+        }
+
+        grounding.elapsed = grounding.elapsed.saturating_add(time.delta());
+
+        let duration = clips.death_duration().as_secs_f32().max(0.001);
+        let progress =
+            (grounding.elapsed.as_secs_f32() / duration).clamp(0.0, 1.0);
+
+        let ramp = if DEATH_GROUND_FULL_FRACTION <= DEATH_GROUND_START_FRACTION {
+            1.0
+        } else {
+            ((progress - DEATH_GROUND_START_FRACTION)
+                / (DEATH_GROUND_FULL_FRACTION - DEATH_GROUND_START_FRACTION))
+                .clamp(0.0, 1.0)
+        };
+        let ramp = ramp * ramp * (3.0 - 2.0 * ramp);
+
+        if ramp > 0.0 {
+            if let (Some(floor_y), Some(lowest_y)) = (
+                grounding.floor_y_logical,
+                death_support_points
                     .iter()
                     .map(|point| point.y)
-                    .fold(f32::NEG_INFINITY, f32::max)
-                    + standing_support_offset
-            });
+                    .max_by(|a, b| a.total_cmp(b)),
+            ) {
+                // Humanoid bones sit near the center of hands/feet/body volume,
+                // not exactly at the visible mesh surface. Leave a small
+                // contact margin so the mesh, not the bone center, meets the
+                // desktop floor.
+                let desired_lowest_y =
+                    floor_y - DEATH_CONTACT_MARGIN_LOGICAL * character_scale;
 
-            if !death_active && !grounding.was_death_active {
-                // Normal standing frame: continuously refresh the floor.
-                if let Some(feet_y) = standing_feet_y {
-                    grounding.ground_y_physical = Some(
-                        rect.top + (feet_y * scale).round() as i32
-                    );
-                }
-            }
+                let missing_drop_px = desired_lowest_y - lowest_y;
 
-            if death_active {
-                if !grounding.was_death_active {
-                    info!(
-                        "Death grounding locked floor y={:?}",
-                        grounding.ground_y_physical
-                    );
-                }
+                if missing_drop_px > 0.5 {
+                    let root_world = avatar_global.translation();
 
-                if let (Some(hwnd), Some(ground_y), Some(lowest_y)) = (
-                    environment.nera_hwnd,
-                    grounding.ground_y_physical,
-                    death_support_points
-                        .iter()
-                        .map(|point| point.y)
-                        .max_by(|a, b| a.total_cmp(b)),
-                ) {
-                    let support_y =
-                        lowest_y + DEATH_GROUND_MARGIN_LOGICAL * character_scale;
+                    let pixels_per_world_y = camera
+                        .world_to_viewport(camera_transform, root_world)
+                        .ok()
+                        .zip(
+                            camera
+                                .world_to_viewport(
+                                    camera_transform,
+                                    root_world + Vec3::Y,
+                                )
+                                .ok(),
+                        )
+                        .map(|(a, b)| (b.y - a.y).abs())
+                        .filter(|value| value.is_finite() && *value > 0.001);
 
-                    let desired_top =
-                        ground_y - (support_y * scale).round() as i32;
+                    if let Some(pixels_per_world_y) = pixels_per_world_y {
+                        let needed_world = missing_drop_px / pixels_per_world_y;
+                        let max_drop =
+                            DEATH_MAX_ROOT_DROP_WORLD * character_scale.max(0.25);
 
-                    if (desired_top - rect.top).abs() >= 1 {
-                        let desired = platform::PhysicalPoint::new(
-                            rect.left,
-                            desired_top,
-                        );
+                        let already_dropped =
+                            (grounding.base_root_y - avatar_transform.translation.y)
+                                .max(0.0);
 
-                        if platform::move_window(hwnd, desired).is_ok() {
-                            environment.nera_rect =
-                                platform::window_rect(hwnd);
+                        let remaining_drop =
+                            (max_drop - already_dropped).max(0.0);
+
+                        let response =
+                            1.0 - (-DEATH_GROUND_RESPONSE * time.delta_secs()).exp();
+
+                        let step =
+                            needed_world.min(remaining_drop) * response * ramp;
+
+                        if step > 0.0001 {
+                            avatar_transform.translation.y -= step;
                         }
                     }
                 }
-            } else if grounding.was_death_active {
-                if let (Some(hwnd), Some(ground_y), Some(feet_y)) = (
-                    environment.nera_hwnd,
-                    grounding.ground_y_physical,
-                    standing_feet_y,
-                ) {
-                    let desired_top =
-                        ground_y - (feet_y * scale).round() as i32;
-
-                    let desired = platform::PhysicalPoint::new(
-                        rect.left,
-                        desired_top,
-                    );
-
-                    if platform::move_window(hwnd, desired).is_ok() {
-                        environment.nera_rect =
-                            platform::window_rect(hwnd);
-                    }
-                }
-
-                info!("Death grounding released -> standing floor restored");
             }
-
-            grounding.was_death_active = death_active;
         }
-    } else if !animation.death_active() {
-        grounding.was_death_active = false;
+    } else if grounding.active {
+        // Restore the authored desktop-pet root as soon as Death01 releases
+        // ownership. The next VRMA transition then starts from the same root
+        // position as every normal animation.
+        if let Ok((mut avatar_transform, _)) = avatar_query.single_mut() {
+            avatar_transform.translation.y = grounding.base_root_y;
+        }
+
+        grounding.active = false;
+        grounding.floor_y_logical = None;
+        grounding.elapsed = Duration::ZERO;
+
+        info!("Death01 visual grounding released");
     }
 
     // Seat is pose-dependent and should follow the evaluated hips while Nera
@@ -1739,6 +1772,7 @@ fn drag_nera_window(
     mouse: Res<ButtonInput<MouseButton>>,
     mut interaction: ResMut<DesktopPetInteraction>,
     mut environment: ResMut<DesktopEnvironment>,
+    animation: Res<NeraAnimationState>,
     hovered: Res<HoveredBodyPart>,
     mut clicked: MessageWriter<NeraClicked>,
     mut right_clicked: MessageWriter<NeraRightClicked>,
@@ -1859,16 +1893,12 @@ fn drag_nera_window(
         && interaction.state == InteractionState::Dragging
         && interaction.drag_offset.is_some()
     {
-        if let Some(previous) = interaction.last_drag_cursor {
-            let delta = cursor - previous;
-            if delta != IVec2::ZERO {
-                dragged.write(NeraDragged { screen: cursor, delta });
-            }
-        }
-        interaction.last_drag_cursor = Some(cursor);
-
         // ------------------------------------------------------------------
-        // Attached -> user pulls away -> unsnap without Seat->Feet rebase.
+        // Attached -> user pulls away -> detach immediately.
+        //
+        // SittingExit is intentionally not part of desktop detachment anymore.
+        // Cursor ownership stays continuous, so drag never accumulates a large
+        // offset while an exit animation is playing.
         // ------------------------------------------------------------------
         if matches!(
             environment.placement,
@@ -1908,8 +1938,16 @@ fn drag_nera_window(
             }
         }
 
+        if let Some(previous) = interaction.last_drag_cursor {
+            let delta = cursor - previous;
+            if delta != IVec2::ZERO {
+                dragged.write(NeraDragged { screen: cursor, delta });
+            }
+        }
+        interaction.last_drag_cursor = Some(cursor);
+
         // ------------------------------------------------------------------
-        // Free drag -> native HWND follows cursor.
+        // Free drag -> native HWND follows cursor immediately after detach.
         // Pending/attached states intentionally keep the HWND pinned.
         // ------------------------------------------------------------------
         if environment.placement == PlacementState::Free {
