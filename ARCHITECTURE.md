@@ -234,7 +234,12 @@ Windows-only companion modules:
 - `animation_manager.rs` owns the gallery window and input gate. Its registry
   scans physical VRMA files and persists bookmarks under AppData; its preview
   module creates independent VRM/VRMA instances only for cards near the scroll
-  viewport. Desktop animation state and clip ownership remain in `animation`.
+  viewport. Every preview uses a separate render layer and animation target
+  namespace before loading VRMA, avoiding global retarget-table collisions.
+  Card clicks emit `PlayLibraryAnimation`; `animation/library.rs` loads a clip
+  on the desktop rig and requests a timed action through the normal controller.
+  Loaded desktop clip children stay cached so graph node indices remain stable.
+  Desktop animation state and clip ownership remain in `animation`.
 
 ### `src/settings/` — persistent configuration and runtime application
 

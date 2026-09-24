@@ -167,7 +167,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         // Neutral means "no override". Idle has no facial intent of its own,
         // and the short transitional clips are moments where a held emotion
         // would read as stuck rather than as expression.
-        Body::Idle | Body::SittingExit | Body::Landing => Face::Neutral,
+        Body::Idle | Body::SittingExit | Body::Landing | Body::LibraryAnimation(_) => Face::Neutral,
     }
 }
 

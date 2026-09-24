@@ -95,6 +95,7 @@ pub(crate) enum TemporaryAction {
     AlarmJump,
     #[cfg(target_os = "windows")]
     MenuAnimation(AnimationMenuChoice),
+    LibraryAnimation(Entity),
     /// Phase 5.5: persistent while the right-click menu is open.
     Praying,
     /// Phase 5.8: scheduled fidget, always outranked by real interaction.
@@ -127,6 +128,7 @@ impl TemporaryAction {
         match self {
             Self::HitHead | Self::HitChest | Self::HeadStroke => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
+            Self::LibraryAnimation(_) => AnimationPriority::Reaction,
             #[cfg(target_os = "windows")]
             Self::MenuAnimation(_) => AnimationPriority::Reaction,
             Self::Floating => AnimationPriority::Floating,
@@ -185,6 +187,7 @@ pub(crate) enum VisualState {
     AlarmJump,
     #[cfg(target_os = "windows")]
     MenuAnimation(AnimationMenuChoice),
+    LibraryAnimation(Entity),
     Praying,
     /// Phase 5.8 scheduled fidget.
     IdleMicro(IdleMicroAction),
@@ -604,6 +607,7 @@ impl NeraAnimationState {
                 #[cfg(target_os = "windows")]
                 TemporaryAction::MenuAnimation(choice) => VisualState::MenuAnimation(choice),
                 TemporaryAction::Praying => VisualState::Praying,
+                TemporaryAction::LibraryAnimation(entity) => VisualState::LibraryAnimation(entity),
                 TemporaryAction::IdleMicro(action) => VisualState::IdleMicro(action),
             };
         }
@@ -699,6 +703,8 @@ impl NeraAnimationState {
             | VisualState::Praying
             | VisualState::SittingEnter
             | VisualState::SittingExit => true,
+
+            VisualState::LibraryAnimation(_) => true,
 
             #[cfg(target_os = "windows")]
             VisualState::MenuAnimation(_) => true,

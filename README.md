@@ -303,7 +303,7 @@ The suite covers state transitions and pure decision logic, including animation 
 - Automated tests do not fully exercise real HWND focus, click-through, z-order, tray callbacks, Explorer restarts, multi-monitor movement, or mixed-DPI behavior.
 - The native application should be smoke-tested on Windows after changes to interaction, sitting, presentation, settings windows, tray, or platform code.
 - `environment/sitting.rs`, `platform/windows.rs`, and `settings/ui.rs` remain relatively large because their current responsibilities are cohesive or behavior-sensitive. File size alone is not a reason to split them.
-- The gallery lists stock VRMA files even when they are not registered by the production animation state machine. Gallery previews have independent VRM instances and do not assign those files to desktop behavior.
+- The gallery lists stock VRMA files and uses independent VRM instances with unique animation target IDs for previews. Clicking a card restarts its preview and plays that file once on the desktop pet through the animation controller, then returns to the current base pose.
 - `cargo check` currently passes with non-fatal dead-code warnings for retained helpers and state variants.
 - The checked-in Cargo linker configuration may require a local path adjustment, as described under Requirements.
 

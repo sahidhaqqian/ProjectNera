@@ -155,6 +155,8 @@ impl Plugin for AnimationManagerPlugin {
                     scroll_gallery,
                     sync_gallery_scrollbar,
                     preview::sync_visible_previews,
+                    preview::prepare_preview_rigs,
+                    preview::start_ready_previews,
                     close_after_release,
                     cleanup_closed_window,
                 )
@@ -178,6 +180,12 @@ fn open_window(
         return;
     }
     state.registry.refresh();
+    // A newly opened manager should always start on a clean viewport. Keeping
+    // the previous ScrollPosition made the first row reopen half-clipped.
+    state.scroll_y = 0.0;
+    state.menu_key = None;
+    state.dialog = None;
+    state.focus = TextFocus::None;
     state.dirty = true;
     state.close_requested = false;
     state.return_to_menu = false;
@@ -295,6 +303,7 @@ fn handle_actions(
     mut images: ResMut<Assets<Image>>,
     mut animation_players: Query<&mut AnimationPlayer>,
     children: Query<&Children>,
+    mut desktop_requests: MessageWriter<crate::animation::PlayLibraryAnimation>,
 ) {
     for (interaction, action, mut color) in &mut actions {
         *color = BackgroundColor(match interaction {
@@ -393,7 +402,10 @@ fn handle_actions(
                 state.dirty = true;
             }
             ManagerAction::Restart(key) => {
-                previews.restart(key, &mut commands, &mut animation_players, &children)
+                previews.restart(key, &mut commands, &mut animation_players, &children);
+                desktop_requests.write(crate::animation::PlayLibraryAnimation {
+                    path: format!("animations/{key}"),
+                });
             }
         }
     }
