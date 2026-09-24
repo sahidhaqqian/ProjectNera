@@ -1,11 +1,79 @@
-//! Cursor-following gaze and animation ownership of head/eye tracking.
-use super::{LookAtTarget, NeraAvatar};
+//! Avatar scene, gaze ownership, and pose-derived support anchors.
+//! Scheduling remains in main so cross-subsystem ordering stays explicit.
+mod anchors;
+
+pub(crate) use anchors::{DeathVisualGrounding, update_avatar_anchors};
+
 use crate::{
-    animation::NeraAnimationState, environment::DesktopEnvironment,
-    interaction::cursor_position_in_nera_window, settings::NeraSettings,
+    animation::{NeraAnimationState, spawn_animation_library},
+    environment::DesktopEnvironment,
+    interaction::cursor_position_in_nera_window,
+    settings::NeraSettings,
 };
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_vrm1::{prelude::*, vrm::body_tracking::BodyTracking};
+
+#[derive(Component)]
+pub(crate) struct NeraAvatar;
+
+#[derive(Component)]
+pub(crate) struct LookAtTarget;
+
+const VRM_PATH: &str = "vrm/nera_256.vrm";
+
+pub(crate) fn setup_camera(mut commands: Commands) {
+    commands.spawn((
+        Name::new("Nera Camera"),
+        Camera3d::default(),
+        Camera {
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            ..default()
+        },
+        Msaa::Off,
+        Transform::from_xyz(0.0, 0.8, 4.5).looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
+    ));
+}
+
+pub(crate) fn setup_lighting(mut commands: Commands) {
+    commands.spawn((
+        Name::new("Nera Key Light"),
+        DirectionalLight {
+            illuminance: 10_000.0,
+            shadow_maps_enabled: false,
+            contact_shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, -0.5, 0.0)),
+    ));
+}
+
+// -----------------------------------------------------------------------------
+// Nera Spawning
+// -----------------------------------------------------------------------------
+
+pub(crate) fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>) {
+    info!("Loading Nera VRM 1.0...");
+
+    let target = commands
+        .spawn((
+            Name::new("LookAt Target"),
+            LookAtTarget,
+            Transform::from_xyz(0.0, 1.0, 2.0),
+        ))
+        .id();
+
+    commands
+        .spawn((
+            Name::new("Nera"),
+            NeraAvatar,
+            VrmHandle(asset_server.load(VRM_PATH)),
+            LookAt::Target(target),
+            Transform::from_xyz(0.0, -0.85, 0.0),
+        ))
+        .with_children(|parent| {
+            spawn_animation_library(parent, &asset_server);
+        });
+}
 
 #[cfg(target_os = "windows")]
 pub(crate) fn update_look_at_target(

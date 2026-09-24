@@ -1,5 +1,5 @@
 //! Button-free head-stroke recognition and its independent cooldown.
-use super::pointer::nera_pointer_position;
+use super::nera_pointer_position;
 use super::{BodyPart, HoveredBodyPart, NeraHeadPatted};
 use crate::{environment::DesktopEnvironment, platform};
 use bevy::prelude::*;

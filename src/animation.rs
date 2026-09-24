@@ -17,14 +17,10 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
-mod clips;
-mod idle;
 mod playback;
 mod state;
 mod systems;
 
-pub(crate) use clips::*;
-pub(crate) use idle::*;
 pub(crate) use playback::*;
 pub(crate) use state::*;
 pub(crate) use systems::*;

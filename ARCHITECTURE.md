@@ -1,7 +1,8 @@
 # Project Nera Architecture
 
-This document describes the repository after Phase 5.9. The current code is the
-source of truth. It focuses on ownership, state flow, and ordering constraints
+This document describes the repository after Phase 5.9 and its module
+consolidation. The current code is the source of truth. It focuses on ownership,
+state flow, and ordering constraints
 that are easy to break when changing a Bevy desktop pet with native Windows
 integration.
 
@@ -40,11 +41,11 @@ points, especially `DesktopEnvironment`, `NeraAnimationState`, and
 ```text
 src/
   main.rs
-  avatar/{mod,spawn,gaze,anchors}.rs
-  interaction.rs + interaction/{pointer,headpat,hit_testing}.rs
-  animation.rs + animation/{state,clips,playback,idle,systems}.rs
+  avatar.rs + avatar/anchors.rs
+  interaction.rs + interaction/{headpat,hit_testing}.rs
+  animation.rs + animation/{state,systems,playback}.rs
   expression.rs
-  environment/{mod,window_discovery,window_tracking,taskbar,sitting}.rs
+  environment.rs + environment/{taskbar,sitting}.rs
   desktop_physics.rs + desktop_physics/geometry.rs
   presentation.rs
   alarm.rs
@@ -66,7 +67,7 @@ src/
 - **Should NOT own:** Pointer rules, animation decisions, physics calculations,
   settings UI, avatar setup details, or Win32 implementation.
 
-### `src/avatar/` — avatar scene and pose-derived data
+### `src/avatar.rs` and `src/avatar/anchors.rs` — avatar scene and pose-derived data
 
 - **Purpose:** Create the camera/light/VRM avatar and translate its live pose
   into gaze and desktop-support information.
@@ -80,7 +81,13 @@ src/
   physics support anchor after deliberate geometry changes; visual death-root
   correction.
 - **Should NOT own:** Native attachment selection, pointer gesture state,
-  animation priority, or freefall simulation.
+  animation assets/observers, animation priority, or freefall simulation.
+
+`avatar.rs` creates the model, camera, light, and gaze target. It calls
+`animation::spawn_animation_library()` to attach VRMA children to the model;
+`animation/playback.rs` owns the avatar runtime clips' paths, load observers,
+and registry. `alarm.rs` still spawns its alarm-specific VRMA children.
+`avatar/anchors.rs` keeps pose projection and death grounding separate.
 
 ### `src/interaction.rs` and `src/interaction/` — semantic pointer interaction
 
@@ -96,10 +103,11 @@ src/
 - **Should NOT own:** Animation selection, freefall support, attention layout,
   or settings values.
 
-Submodule boundaries:
+File boundaries:
 
-- `pointer.rs`: click/right-click capture, `Pressed -> Dragging` classification,
-  window dragging, sitting/unsnapping handoff, click-through, utility input gates.
+- `interaction.rs`: semantic message contracts, click/right-click capture,
+  `Pressed -> Dragging` classification, window dragging, sitting/unsnapping
+  handoff, click-through, and utility input gates.
 - `hit_testing.rs`: avatar body colliders and nearest semantic body-part tests.
 - `headpat.rs`: mouse-button-free head-stroke recognition and cooldown.
 
@@ -116,15 +124,17 @@ Submodule boundaries:
 - **Should NOT own:** Raw mouse handling, native window movement, alarm timing,
   facial override state, or settings persistence.
 
-Submodule boundaries:
+Submodule boundaries, in request-to-playback order:
 
+- `systems.rs`: translates environment, interaction, alarm, and menu activity
+  into state-machine requests; also schedules idle variation with cooldown,
+  selection, and last-choice avoidance.
 - `state.rs`: vocabulary, priorities, requests, locks/timers, damage combo,
   sitting transitions, and the authoritative `visual_state()` resolution.
-- `clips.rs`: VRMA child entities, clip registration, and measured durations.
-- `playback.rs`: `VisualState -> clip/repeat/blend/anchor` mapping and application.
-- `idle.rs`: idle variation cooldown, selection, and last-choice avoidance.
-- `systems.rs`: translates environment, interaction, alarm, and menu activity
-  into state-machine requests.
+- `playback.rs`: VRMA asset paths and child spawning, load observers, clip
+  registry and measured durations, then `VisualState -> clip/repeat/blend/anchor`
+  mapping and application. The avatar's runtime clip paths are here; alarm clip
+  paths remain in `alarm.rs`.
 
 ### `src/expression.rs` — facial expression projection
 
@@ -136,7 +146,7 @@ Submodule boundaries:
 - **Produces/emits:** `SetExpressions` triggers before the VRM expression pass.
 - **Should NOT own:** Independent reaction decisions or raw interaction readers.
 
-### `src/environment/` — desktop snapshot and attached placement
+### `src/environment.rs` and `src/environment/` — desktop snapshot and attached placement
 
 - **Purpose:** Maintain the authoritative current view of Nera's native desktop
   surroundings and sitting attachment.
@@ -151,11 +161,11 @@ Submodule boundaries:
 - **Should NOT own:** Gesture thresholds, animation priorities, or free-placement
   gravity.
 
-Submodule boundaries:
+File boundaries:
 
-- `window_discovery.rs`: periodic external top-level-window snapshot.
-- `window_tracking.rs`: liveness, rect, minimize/cloak, and monitor changes for
-  the selected support window.
+- `environment.rs`: `DesktopEnvironment`, periodic external-window discovery,
+  and liveness, rect, minimize/cloak, and monitor tracking for the selected
+  support window.
 - `taskbar.rs`: taskbar geometry derived from monitor work areas.
 - `sitting.rs`: support probing, pending-to-attached transition, follow behavior,
   suspension, z-order, detach, and attachment geometry.
@@ -314,7 +324,7 @@ and must atomically suspend and restore placement, interaction, and animation.
 
 | State | Authoritative owner | Main readers/writers | Derived or transient state |
 |---|---|---|---|
-| Pointer capture and drag gesture | `interaction::DesktopPetInteraction` | `pointer.rs` writes; physics, anchors, presentation, shadow read/reset | Drag offsets, press body part, snap lock, unsnap guards |
+| Pointer capture and drag gesture | `interaction::DesktopPetInteraction` | `interaction.rs` writes; physics, anchors, presentation, shadow read/reset | Drag offsets, press body part, snap lock, unsnap guards |
 | Hovered semantic body part | `interaction::HoveredBodyPart` | `update_click_through` writes; pointer/headpat/presentation read | Derived each hit-test pass from camera, bones, colliders, cursor |
 | `Pressed -> Dragging -> Released` lifecycle | `InteractionState` plus `DesktopPetInteraction` | `drag_nera_window` is the transition owner | `NeraReleased` is a semantic message; state returns to `Hover` |
 | Headpat recognition | `interaction::HeadPatGesture` | `detect_head_pat` writes; utility/presentation resets | Travel, reversals, timing, cooldown |
@@ -323,7 +333,7 @@ and must atomically suspend and restore placement, interaction, and animation.
 | Pose support anchors | `DesktopEnvironment.feet_anchor_logical` / `seat_anchor_logical` | `avatar::anchors` writes; sitting/physics consume | Screen projection of live avatar bones; feet may be deliberately frozen by physics |
 | Freefall and standing support | `desktop_physics::DesktopPhysicsState` | Physics writes; tray resets; avatar refreshes support anchor; shadow reads | Velocity, support enum, subpixel Y, landing latch |
 | Animation resolution | `animation::NeraAnimationState` | Animation systems, physics, presentation, tray write; playback/expression/avatar read | Base pose, active actions, transition timer, combo state, revision |
-| Animation clips | `animation::NeraAnimationClips` | Clip observers write; state translators/playback/idle/physics read | Handles plus real loaded durations |
+| Animation clips | `animation::NeraAnimationClips` | `animation/playback.rs` load observers write; systems/playback/physics read | Handles plus real loaded durations |
 | Playback cache | `animation::NeraAnimationPlayback` | `apply_animation_state` only | Last applied visual/revision; not a behavior authority |
 | Idle variation | `animation::IdleVariationRuntime` | `schedule_idle_variation` only | Cooldown, RNG, last action |
 | Expression | `expression::NeraExpressionState` | Expression system writes from resolved `VisualState` | Previous/current face, crossfade, last pushed weights/entity |
@@ -346,7 +356,7 @@ message if a transition notification is required.
 platform global cursor + Bevy mouse input + live VRM pose
   -> interaction/hit_testing.rs computes semantic body part
   -> HoveredBodyPart and native cursor hit-test state
-  -> interaction/pointer.rs captures press and classifies click vs drag
+  -> interaction.rs captures press and classifies click vs drag
   -> NeraClicked / NeraRightClicked / NeraDragStarted / NeraDragged / NeraReleased
   -> animation/systems.rs requests reactions/floating
   -> action_menu.rs consumes right-click
@@ -558,7 +568,7 @@ state prevent desktop settling from operating during attention.
 | Area | Preserve | What can break |
 |---|---|---|
 | Pointer lifecycle | `Hover -> Pressed -> Dragging`, then release message and return to hover | Treating press as drag turns clicks into window movement and corrupts captured body parts |
-| Drag threshold | DPI-scaled threshold in `pointer.rs` | Jitter becomes dragging, or deliberate drags become unresponsive |
+| Drag threshold | DPI-scaled threshold in `interaction.rs` | Jitter becomes dragging, or deliberate drags become unresponsive |
 | Pointer capture | Keep native hit-test enabled while a button owns the pet | Release goes to the window underneath, leaving state stuck |
 | Utility input gate | Reset pet gesture state while settings/alarm settings owns input | Utility-window clicks leak into body hits or leave frozen capture |
 | Sitting handoff | Pending placement -> SittingEnter -> Last-stage Seat sample -> commit | The avatar snaps using a standing/stale anchor or floats above support |
@@ -581,21 +591,21 @@ state prevent desktop settling from operating during attention.
 | Change needed | Start here | Also inspect |
 |---|---|---|
 | App/plugin registration or cross-system order | `src/main.rs` | Owning plugin schedule |
-| Avatar asset, camera, or lighting setup | `src/avatar/spawn.rs` | `animation/clips.rs` for animation children |
-| Cursor-follow gaze | `src/avatar/gaze.rs` | `settings/model.rs`, animation visual states |
+| Avatar model, camera, or lighting setup | `src/avatar.rs` | `animation/playback.rs` attaches animation children |
+| Cursor-follow gaze | `src/avatar.rs` | `settings/model.rs`, animation visual states |
 | Feet/Seat projection or death visual grounding | `src/avatar/anchors.rs` | `environment/sitting.rs`, `desktop_physics.rs` |
-| Pointer press/click/drag/right-click behavior | `src/interaction/pointer.rs` | `interaction.rs` message contracts |
-| Body-part hit detection/colliders | `src/interaction/hit_testing.rs` | `avatar/spawn.rs` and VRM bone names |
+| Pointer press/click/drag/right-click behavior | `src/interaction.rs` | Message contracts in the same file; `hit_testing.rs` for body regions |
+| Body-part hit detection/colliders | `src/interaction/hit_testing.rs` | `avatar.rs` and VRM bone names |
 | Headpat recognition | `src/interaction/headpat.rs` | `animation/systems.rs` reaction mapping |
 | Interaction message shape | `src/interaction.rs` | All `MessageReader` consumers |
 | Animation state, action, priority, or transition | `src/animation/state.rs` | Tests in `animation.rs` |
 | Map domain events to animation requests | `src/animation/systems.rs` | Event producer and `state.rs` |
-| Animation asset registration/duration | `src/animation/clips.rs` | `avatar/spawn.rs` |
+| Animation asset paths, child spawning, registration, and duration | `src/animation/playback.rs` | `avatar.rs` calls `spawn_animation_library()` |
 | Visual state to VRMA/repeat/blend/anchor mapping | `src/animation/playback.rs` | `state.rs`; do not add priority logic here |
-| Idle variation eligibility/cooldown/random choice | `src/animation/idle.rs` | `rng.rs`, clip availability |
+| Idle variation eligibility/cooldown/random choice | `src/animation/systems.rs` | `rng.rs`, clip availability |
 | Facial emotion/crossfade | `src/expression.rs` | Exhaustive `VisualState` mapping |
-| External window discovery | `src/environment/window_discovery.rs` | `platform/windows.rs` |
-| Tracked support-window lifecycle | `src/environment/window_tracking.rs` | `environment/sitting.rs` |
+| External window discovery | `src/environment.rs` | `platform/windows.rs` |
+| Tracked support-window lifecycle | `src/environment.rs` | `environment/sitting.rs` |
 | Taskbar geometry/refresh | `src/environment/taskbar.rs` | platform monitor work areas |
 | Sitting probe, attach, follow, detach, z-order | `src/environment/sitting.rs` | pointer handoff and main Last-stage order |
 | Gravity, falling, landing, support runtime | `src/desktop_physics.rs` | `desktop_physics/geometry.rs`, animation state |
@@ -662,7 +672,7 @@ Dependency directions to avoid:
 
 ## 10. Known intentional coupling and debt
 
-- **Drag/click/sitting coupling:** `interaction/pointer.rs` intentionally performs
+- **Drag/click/sitting coupling:** `interaction.rs` intentionally performs
   the drag-to-sit and unsnap handoff because press capture, cursor ownership,
   drag thresholds, attachment locks, and release semantics form one state machine.
 - **Environment/avatar/physics data loop:** Pose-derived anchors flow from avatar

@@ -180,29 +180,22 @@ ProjectNera/
 │       └── nera0.0.vrm
 ├── src/
 │   ├── main.rs
+│   ├── avatar.rs
 │   ├── avatar/
-│   │   ├── mod.rs
-│   │   ├── anchors.rs
-│   │   ├── gaze.rs
-│   │   └── spawn.rs
+│   │   └── anchors.rs
 │   ├── interaction.rs
 │   ├── interaction/
 │   │   ├── headpat.rs
-│   │   ├── hit_testing.rs
-│   │   └── pointer.rs
+│   │   └── hit_testing.rs
 │   ├── animation.rs
 │   ├── animation/
-│   │   ├── clips.rs
-│   │   ├── idle.rs
-│   │   ├── playback.rs
 │   │   ├── state.rs
-│   │   └── systems.rs
+│   │   ├── systems.rs
+│   │   └── playback.rs
+│   ├── environment.rs
 │   ├── environment/
-│   │   ├── mod.rs
 │   │   ├── sitting.rs
-│   │   ├── taskbar.rs
-│   │   ├── window_discovery.rs
-│   │   └── window_tracking.rs
+│   │   └── taskbar.rs
 │   ├── desktop_physics.rs
 │   ├── desktop_physics/
 │   │   └── geometry.rs
@@ -235,10 +228,10 @@ ProjectNera/
 Major ownership boundaries:
 
 - `main.rs` — app bootstrap, resources, plugin registration, and explicit cross-subsystem scheduling.
-- `avatar/` — avatar spawning, gaze, pose-derived Feet/Seat anchors, and death visual grounding.
-- `interaction/` — pointer capture, click/drag classification, hit testing, headpat recognition, and semantic messages.
-- `animation/` — animation state and priorities, clip registry, playback mapping, idle scheduling, and request synchronization.
-- `environment/` — native desktop snapshot, window/taskbar discovery, tracking, and sitting attachments.
+- `avatar.rs` + `avatar/anchors.rs` — avatar spawning and gaze, then pose-derived Feet/Seat anchors and death visual grounding.
+- `interaction.rs` + `interaction/` — pointer capture, click/drag classification, semantic messages, hit testing, and headpat recognition.
+- `animation.rs` + `animation/` — request scheduling, animation state and priorities, clip library, and playback.
+- `environment.rs` + `environment/` — native desktop and external-window state, taskbar data, and sitting attachments.
 - `desktop_physics*` — gravity, falling/landing, standing support, and pure support geometry.
 - `presentation.rs` — attention-mode ownership of the main window and camera.
 - `alarm*` and `action_menu.rs` — alarms and Windows utility surfaces.
@@ -247,7 +240,7 @@ Major ownership boundaries:
 
 ## Architecture
 
-Phase 5.9 separated the main architectural hotspots into subsystem-focused modules. `main.rs` now remains focused on bootstrap and the ordering that connects those subsystems.
+Phase 5.9 separated the main architectural hotspots into subsystem-focused modules. The follow-up consolidation keeps each behavior's closely related code together: pointer messages and capture in `interaction.rs`, desktop-window discovery and tracking in `environment.rs`, avatar spawning and gaze in `avatar.rs`, idle scheduling in `animation/systems.rs`, and clip registration plus playback in `animation/playback.rs`. `main.rs` remains focused on bootstrap and cross-subsystem ordering.
 
 A simplified runtime flow is:
 
@@ -277,6 +270,8 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before making cross-subsystem changes. I
 ## Current Development Status
 
 Phase 5.9 completed the architecture-focused refactor without intentionally changing application behavior.
+
+A follow-up consolidation reduced the Rust source layout from 39 to 32 files without changing the intended runtime behavior. Avatar spawning now calls `spawn_animation_library()`; the avatar's VRMA paths and load observers live beside playback in `animation/playback.rs`.
 
 | Checkpoint | Status |
 |---|---|
