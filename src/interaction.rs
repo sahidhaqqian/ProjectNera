@@ -4,15 +4,22 @@
 mod headpat;
 mod hit_testing;
 
+#[cfg(target_os = "windows")]
+use crate::alarm_settings;
+#[cfg(target_os = "windows")]
+use crate::animation_manager;
 use crate::{
     environment::{DesktopEnvironment, PlacementState},
     platform,
     settings::{self, NeraSettings},
 };
-#[cfg(target_os = "windows")]
-use crate::alarm_settings;
-use bevy::{prelude::*, window::{CursorOptions, PrimaryWindow}};
+use bevy::{
+    prelude::*,
+    window::{CursorOptions, PrimaryWindow},
+};
 use bevy_vrm1::prelude::*;
+pub(crate) use hit_testing::NeraLiveBone;
+pub(crate) use hit_testing::mark_nera_live_bones;
 use hit_testing::{NeraCollider, head_part_at_cursor, nearest_nera_body_part};
 use std::time::{Duration, Instant};
 
@@ -287,9 +294,11 @@ impl DesktopPetInteraction {
 pub(crate) fn nera_utility_input_available(
     settings_gate: Res<settings::SettingsInputGate>,
     alarm_gate: Res<alarm_settings::AlarmSettingsInputGate>,
+    manager_gate: Res<animation_manager::AnimationManagerInputGate>,
 ) -> bool {
     settings::nera_input_available(settings_gate)
         && alarm_settings::nera_input_available(alarm_gate)
+        && !manager_gate.window_open
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -303,8 +312,11 @@ pub(crate) fn nera_utility_input_available(
 pub(crate) fn nera_utility_input_blocked(
     settings_gate: Res<settings::SettingsInputGate>,
     alarm_gate: Res<alarm_settings::AlarmSettingsInputGate>,
+    manager_gate: Res<animation_manager::AnimationManagerInputGate>,
 ) -> bool {
-    settings::nera_input_blocked(settings_gate) || alarm_settings::nera_input_blocked(alarm_gate)
+    settings::nera_input_blocked(settings_gate)
+        || alarm_settings::nera_input_blocked(alarm_gate)
+        || manager_gate.window_open
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -400,9 +412,9 @@ pub(crate) fn update_click_through(
     mut interaction: ResMut<DesktopPetInteraction>,
     mut hovered: ResMut<HoveredBodyPart>,
     mut window_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     colliders_query: Query<(&GlobalTransform, &NeraCollider)>,
-    bone_query: Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) {
     let Ok(mut cursor_options) = window_query.single_mut() else {
         return;

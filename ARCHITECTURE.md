@@ -50,6 +50,7 @@ src/
   presentation.rs
   alarm.rs
   {action_menu,alarm_settings,alarm_dismiss}.rs  # Windows only
+  animation_manager.rs + animation_manager/{registry,preview,ui}.rs  # Windows only
   settings/{mod,model,runtime,ui,shadow,startup}.rs
   tray.rs + tray/native.rs       # Windows only
   platform/{mod,windows}.rs
@@ -230,6 +231,10 @@ Windows-only companion modules:
 - `action_menu.rs` owns the native radial menu lifecycle and typed
   `NeraActionMenuCommand` output. It opens settings/alarm settings and keeps the
   praying animation coupled to the real menu lifetime.
+- `animation_manager.rs` owns the gallery window and input gate. Its registry
+  scans physical VRMA files and persists bookmarks under AppData; its preview
+  module creates independent VRM/VRMA instances only for cards near the scroll
+  viewport. Desktop animation state and clip ownership remain in `animation`.
 
 ### `src/settings/` — persistent configuration and runtime application
 

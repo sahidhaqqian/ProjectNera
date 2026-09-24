@@ -68,7 +68,7 @@ pub(crate) fn update_avatar_anchors(
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
     mut grounding: ResMut<DeathVisualGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
     mut avatar_query: Query<
         (&mut Transform, &GlobalTransform, Option<&HipsBoneEntity>),
         With<NeraAvatar>,

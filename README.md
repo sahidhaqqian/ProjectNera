@@ -51,7 +51,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 ### Utilities
 
 - Native Windows radial action menu opened by right-clicking Nera.
-- Animation controls, quick alarms, custom alarm editor, and Settings access from the menu.
+- Animation Manager gallery, quick alarms, custom alarm editor, and Settings access from the menu.
+- Animation Manager with live per-card VRM previews, search, persistent bookmarks, and physical VRMA import/rename/delete.
 - Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
 - Persistent one-time and weekly alarms, with enable/disable, edit, and delete controls for up to 12 entries.
 - Alarm attention mode with a reframed upper-body presentation, looping sound, intro/loop animation, dismiss, and five-minute snooze.
@@ -205,6 +206,11 @@ ProjectNera/
 │   ├── alarm_settings.rs
 │   ├── alarm_dismiss.rs
 │   ├── action_menu.rs
+│   ├── animation_manager.rs
+│   ├── animation_manager/
+│   │   ├── preview.rs
+│   │   ├── registry.rs
+│   │   └── ui.rs
 │   ├── settings/
 │   │   ├── mod.rs
 │   │   ├── model.rs
@@ -234,7 +240,7 @@ Major ownership boundaries:
 - `environment.rs` + `environment/` — native desktop and external-window state, taskbar data, and sitting attachments.
 - `desktop_physics*` — gravity, falling/landing, standing support, and pure support geometry.
 - `presentation.rs` — attention-mode ownership of the main window and camera.
-- `alarm*` and `action_menu.rs` — alarms and Windows utility surfaces.
+- `alarm*`, `action_menu.rs`, and `animation_manager*` — alarms and Windows utility surfaces.
 - `settings/` — persistent model/defaults, runtime application, settings UI, startup integration, and shadows.
 - `tray*` and `platform/` — tray-thread bridge and general Win32 integration.
 
@@ -297,7 +303,7 @@ The suite covers state transitions and pure decision logic, including animation 
 - Automated tests do not fully exercise real HWND focus, click-through, z-order, tray callbacks, Explorer restarts, multi-monitor movement, or mixed-DPI behavior.
 - The native application should be smoke-tested on Windows after changes to interaction, sitting, presentation, settings windows, tray, or platform code.
 - `environment/sitting.rs`, `platform/windows.rs`, and `settings/ui.rs` remain relatively large because their current responsibilities are cohesive or behavior-sensitive. File size alone is not a reason to split them.
-- The repository contains many stock VRMA files that are not registered by the runtime. Their presence does not imply that every animation is exposed as a feature.
+- The gallery lists stock VRMA files even when they are not registered by the production animation state machine. Gallery previews have independent VRM instances and do not assign those files to desktop behavior.
 - `cargo check` currently passes with non-fatal dead-code warnings for retained helpers and state variants.
 - The checked-in Cargo linker configuration may require a local path adjustment, as described under Requirements.
 

@@ -340,7 +340,7 @@ fn drive_nera_expressions(
     time: Res<Time>,
     animation: Res<NeraAnimationState>,
     mut state: ResMut<NeraExpressionState>,
-    vrms: Query<(Entity, &ExpressionEntityMap)>,
+    vrms: Query<(Entity, &ExpressionEntityMap), With<crate::avatar::NeraAvatar>>,
     mut commands: Commands,
 ) {
     let target = expression_for_visual(animation.visual_state());

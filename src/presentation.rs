@@ -38,7 +38,7 @@ use crate::{
         DesktopEnvironment,
         PlacementState,
     },
-    interaction::{DesktopPetInteraction, HeadPatGesture, HoveredBodyPart},
+    interaction::{DesktopPetInteraction, HeadPatGesture, HoveredBodyPart, NeraLiveBone},
 };
 
 // -----------------------------------------------------------------------------
@@ -262,9 +262,9 @@ fn handle_presentation_commands(
     >,
     mut camera_query: Query<
         (&Projection, &mut Transform),
-        With<Camera3d>,
+        With<crate::avatar::NeraMainCamera>,
     >,
-    bone_query: Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) {
     for request in requests.read() {
         match *request {
@@ -554,7 +554,7 @@ impl UpperBodyBounds {
 ///
 /// Legs remain excluded so the composition stays half-body.
 fn upper_body_world_metrics(
-    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) -> Option<UpperBodyBounds> {
     let mut head_y = None;
     let mut hips_y = None;
@@ -658,7 +658,7 @@ fn compute_attention_layout(
     original_width: u32,
     original_height: u32,
     projection: &Projection,
-    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     locked_center: Option<Vec2>,
 ) -> AttentionLayout {
     let monitor_width = monitor_bounds.width().max(1) as f32;
@@ -897,9 +897,9 @@ fn maintain_attention_presentation(
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
     mut camera_query: Query<
         (&Projection, &mut Transform),
-        With<Camera3d>,
+        With<crate::avatar::NeraMainCamera>,
     >,
-    bone_query: Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) {
     if !state.is_attention() {
         return;
