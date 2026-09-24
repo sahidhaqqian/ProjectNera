@@ -1,8 +1,9 @@
 use bevy::{prelude::*, ui::UiTargetCamera};
 
 use super::{
-    Dialog, GalleryScroll, GalleryTab, ManagerAction, ManagerCamera, ManagerDragRegion,
-    ManagerOwned, ManagerRoot, ManagerState, ManagerWindow, PreviewSlot, TextFocus,
+    Dialog, GalleryScroll, GalleryScrollbarThumb, GalleryTab, ManagerAction, ManagerCamera,
+    ManagerDragRegion, ManagerOwned, ManagerRoot, ManagerState, ManagerWindow, PreviewSlot,
+    TextFocus,
 };
 
 pub(super) const ROW_HEIGHT: f32 = 232.0;
@@ -220,63 +221,106 @@ pub(super) fn rebuild_ui(
                         });
 
                     panel
-                        .spawn((
-                            GalleryScroll,
-                            ScrollPosition(Vec2::new(0.0, state.scroll_y)),
-                            Node {
-                                width: percent(100),
-                                flex_grow: 1.0,
-                                min_height: px(0),
-                                flex_direction: FlexDirection::Column,
-                                row_gap: px(14),
-                                overflow: Overflow::scroll_y(),
-                                scrollbar_width: 8.0,
-                                ..default()
-                            },
-                        ))
-                        .with_children(|gallery| {
-                            if entries.is_empty() {
-                                gallery
-                                    .spawn((
+                        .spawn(Node {
+                            width: percent(100),
+                            flex_grow: 1.0,
+                            min_height: px(0),
+                            position_type: PositionType::Relative,
+                            ..default()
+                        })
+                        .with_children(|viewport| {
+                            viewport
+                                .spawn((
+                                    GalleryScroll,
+                                    ScrollPosition(Vec2::new(0.0, state.scroll_y)),
+                                    Node {
+                                        width: percent(100),
+                                        height: percent(100),
+                                        min_height: px(0),
+                                        padding: UiRect::right(px(12)),
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: px(14),
+                                        overflow: Overflow::scroll_y(),
+                                        ..default()
+                                    },
+                                ))
+                                .with_children(|gallery| {
+                                    if entries.is_empty() {
+                                        gallery
+                                            .spawn((
+                                                Node {
+                                                    width: percent(100),
+                                                    height: px(160),
+                                                    justify_content: JustifyContent::Center,
+                                                    align_items: AlignItems::Center,
+                                                    ..default()
+                                                },
+                                                BackgroundColor(CARD),
+                                                Outline::new(px(1), Val::ZERO, OUTLINE),
+                                            ))
+                                            .with_children(|empty| {
+                                                label(
+                                                    empty,
+                                                    if state.tab == GalleryTab::Bookmarks {
+                                                        "No bookmarked animations"
+                                                    } else {
+                                                        "No animations found"
+                                                    },
+                                                    18.0,
+                                                    MUTED,
+                                                )
+                                            });
+                                    }
+                                    for (row_number, chunk) in entries.chunks(3).enumerate() {
+                                        gallery
+                                            .spawn(Node {
+                                                width: percent(100),
+                                                height: px(218),
+                                                flex_shrink: 0.0,
+                                                flex_direction: FlexDirection::Row,
+                                                column_gap: px(12),
+                                                ..default()
+                                            })
+                                            .with_children(|row| {
+                                                for (column, entry) in chunk.iter().enumerate() {
+                                                    spawn_card(
+                                                        row,
+                                                        entry,
+                                                        row_number * 3 + column,
+                                                        &state,
+                                                    );
+                                                }
+                                            });
+                                    }
+                                });
+
+                            viewport
+                                .spawn((
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        right: px(1),
+                                        top: px(2),
+                                        bottom: px(2),
+                                        width: px(6),
+                                        border_radius: BorderRadius::all(px(4)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(Color::srgba(0.12, 0.16, 0.27, 0.72)),
+                                ))
+                                .with_children(|track| {
+                                    track.spawn((
+                                        GalleryScrollbarThumb,
                                         Node {
+                                            position_type: PositionType::Absolute,
+                                            top: px(0),
                                             width: percent(100),
-                                            height: px(160),
-                                            justify_content: JustifyContent::Center,
-                                            align_items: AlignItems::Center,
+                                            height: px(48),
+                                            border_radius: BorderRadius::all(px(4)),
                                             ..default()
                                         },
-                                        BackgroundColor(CARD),
-                                        Outline::new(px(1), Val::ZERO, OUTLINE),
-                                    ))
-                                    .with_children(|empty| {
-                                        label(
-                                            empty,
-                                            if state.tab == GalleryTab::Bookmarks {
-                                                "No bookmarked animations"
-                                            } else {
-                                                "No animations found"
-                                            },
-                                            18.0,
-                                            MUTED,
-                                        )
-                                    });
-                            }
-                            for (row_number, chunk) in entries.chunks(3).enumerate() {
-                                gallery
-                                    .spawn(Node {
-                                        width: percent(100),
-                                        height: px(218),
-                                        flex_shrink: 0.0,
-                                        flex_direction: FlexDirection::Row,
-                                        column_gap: px(12),
-                                        ..default()
-                                    })
-                                    .with_children(|row| {
-                                        for (column, entry) in chunk.iter().enumerate() {
-                                            spawn_card(row, entry, row_number * 3 + column, &state);
-                                        }
-                                    });
-                            }
+                                        BackgroundColor(BLUE),
+                                    ));
+                                });
                         });
 
                     if let Some(error) = &state.error {

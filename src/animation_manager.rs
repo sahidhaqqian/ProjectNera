@@ -38,6 +38,8 @@ struct ManagerRoot;
 struct ManagerDragRegion;
 #[derive(Component)]
 struct GalleryScroll;
+#[derive(Component)]
+struct GalleryScrollbarThumb;
 #[derive(Component, Clone)]
 struct PreviewSlot {
     key: String,
@@ -151,6 +153,7 @@ impl Plugin for AnimationManagerPlugin {
                     ui::rebuild_ui,
                     drag_window,
                     scroll_gallery,
+                    sync_gallery_scrollbar,
                     preview::sync_visible_previews,
                     close_after_release,
                     cleanup_closed_window,
@@ -290,6 +293,8 @@ fn handle_actions(
     mut previews: ResMut<preview::PreviewRuntime>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    mut animation_players: Query<&mut AnimationPlayer>,
+    children: Query<&Children>,
 ) {
     for (interaction, action, mut color) in &mut actions {
         *color = BackgroundColor(match interaction {
@@ -334,7 +339,9 @@ fn handle_actions(
                     state.dirty = true;
                 }
             }
-            ManagerAction::Reset => previews.restart_all(&mut commands),
+            ManagerAction::Reset => {
+                previews.restart_all(&mut commands, &mut animation_players, &children)
+            }
             ManagerAction::OpenMenu(key) => {
                 state.menu_key = (state.menu_key.as_ref() != Some(key)).then(|| key.clone());
                 state.dirty = true;
@@ -385,7 +392,9 @@ fn handle_actions(
                 state.focus = TextFocus::None;
                 state.dirty = true;
             }
-            ManagerAction::Restart(key) => previews.restart(key, &mut commands),
+            ManagerAction::Restart(key) => {
+                previews.restart(key, &mut commands, &mut animation_players, &children)
+            }
         }
     }
 }
@@ -416,6 +425,34 @@ fn scroll_gallery(
         state.scroll_y = position.0.y;
     }
     state.scroll_y = position.0.y;
+}
+
+fn sync_gallery_scrollbar(
+    scroll: Query<(&ScrollPosition, &ComputedNode), With<GalleryScroll>>,
+    mut thumbs: Query<&mut Node, With<GalleryScrollbarThumb>>,
+) {
+    let Ok((position, computed)) = scroll.single() else {
+        return;
+    };
+    let Ok(mut thumb) = thumbs.single_mut() else {
+        return;
+    };
+
+    let scale = computed.inverse_scale_factor();
+    let viewport_height = (computed.size().y * scale).max(1.0);
+    let content_height = (computed.content_size().y * scale).max(viewport_height);
+    let track_height = (viewport_height - 4.0).max(1.0);
+    let thumb_height = (track_height * viewport_height / content_height)
+        .clamp(28.0_f32.min(track_height), track_height);
+    let max_scroll = (content_height - viewport_height).max(0.0);
+    let progress = if max_scroll > 0.0 {
+        (position.0.y / max_scroll).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    thumb.height = px(thumb_height);
+    thumb.top = px(progress * (track_height - thumb_height));
 }
 
 fn drag_window(
