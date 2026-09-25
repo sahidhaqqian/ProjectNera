@@ -29,14 +29,30 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          shared-key: ${{ github.ref_name }}
 
-      - name: Build Nera release
+      - name: Build debug
+        if: github.ref != 'refs/heads/main'
+        run: cargo build
+
+      - name: Build release
+        if: github.ref == 'refs/heads/main'
         run: cargo build --release
 
-      - name: Upload Nera executable
+      - name: Upload debug executable
+        if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v7
         with:
-          name: nera-windows-${{ github.sha }}
-          path: target/release/nera.exe
+          name: nera-windows-debug-${{ github.sha }}
+          path: target/debug/nera.exe
           retention-days: 3
+          compression-level: 0
+
+      - name: Upload release executable
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nera-windows-release-${{ github.sha }}
+          path: target/release/nera.exe
+          retention-days: 7
           compression-level: 0
