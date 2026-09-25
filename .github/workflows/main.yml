@@ -1,0 +1,38 @@
+name: Build Nera Windows
+
+on:
+  push:
+    branches:
+      - main
+      - codex/animation-manager-redesign
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Show Rust version
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build Nera release
+        run: cargo build --release
+
+      - name: Upload Nera executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: nera-windows-${{ github.sha }}
+          path: target/release/nera.exe
+          retention-days: 3
+          compression-level: 0
