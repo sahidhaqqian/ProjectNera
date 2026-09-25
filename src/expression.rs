@@ -167,7 +167,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         // Neutral means "no override". Idle has no facial intent of its own,
         // and the short transitional clips are moments where a held emotion
         // would read as stuck rather than as expression.
-        Body::Idle | Body::SittingExit | Body::Landing => Face::Neutral,
+        Body::Idle | Body::SittingExit | Body::Landing | Body::LibraryAnimation(_) => Face::Neutral,
     }
 }
 
@@ -340,7 +340,7 @@ fn drive_nera_expressions(
     time: Res<Time>,
     animation: Res<NeraAnimationState>,
     mut state: ResMut<NeraExpressionState>,
-    vrms: Query<(Entity, &ExpressionEntityMap)>,
+    vrms: Query<(Entity, &ExpressionEntityMap), With<crate::avatar::NeraAvatar>>,
     mut commands: Commands,
 ) {
     let target = expression_for_visual(animation.visual_state());

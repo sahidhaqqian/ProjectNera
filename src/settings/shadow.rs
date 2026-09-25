@@ -21,7 +21,7 @@ use bevy_vrm1::prelude::VrmBone;
 use crate::{
     desktop_physics::DesktopPhysicsState,
     environment::{DesktopEnvironment, PlacementState},
-    interaction::{DesktopPetInteraction, InteractionState},
+    interaction::{DesktopPetInteraction, InteractionState, NeraLiveBone},
 };
 
 use super::NeraSettings;
@@ -189,8 +189,8 @@ fn apply_simple_shadow(
     environment: Res<DesktopEnvironment>,
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
-    bones: Query<(&VrmBone, &GlobalTransform)>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut layers: Query<(&SimpleShadowLayer, &mut Transform, &mut Visibility)>,
 ) {
@@ -244,7 +244,7 @@ fn apply_simple_shadow(
 }
 
 fn bone_position(
-    bones: &Query<(&VrmBone, &GlobalTransform)>,
+    bones: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     name: &str,
 ) -> Option<Vec3> {
     bones
@@ -260,7 +260,7 @@ fn bone_position(
 /// lifts one foot does not pull the whole receiver into the air. X/Z are kept
 /// centered between the feet and the generous plane size catches the cast.
 fn character_shadow_ground(
-    bones: &Query<(&VrmBone, &GlobalTransform)>,
+    bones: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) -> Option<Vec3> {
     match (
         bone_position(bones, "leftFoot"),
@@ -291,8 +291,8 @@ fn character_shadow_ground(
 /// against a shadow that is still pinned to the raw foot bones.
 fn shadow_ground_with_user_offset(
     settings: &NeraSettings,
-    bones: &Query<(&VrmBone, &GlobalTransform)>,
-    camera_query: &Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    bones: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    camera_query: &Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
 ) -> Option<Vec3> {
     let mut ground = character_shadow_ground(bones)?;
     let offset_pixels = settings.ground_offset_logical();
@@ -338,8 +338,8 @@ fn apply_character_shadow_receiver(
     environment: Res<DesktopEnvironment>,
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
-    bones: Query<(&VrmBone, &GlobalTransform)>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<ShadowOnlyMaterial>>,
     mut receivers: Query<(
         &CharacterShadowReceiver,

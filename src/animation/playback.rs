@@ -22,6 +22,7 @@ pub(super) struct ClipSlot {
 
 #[derive(Resource, Default)]
 pub(crate) struct NeraAnimationClips {
+    pub(super) library: Option<ClipSlot>,
     pub(super) idle: Option<ClipSlot>,
     pub(super) floating: Option<ClipSlot>,
     pub(super) falling: Option<ClipSlot>,
@@ -338,6 +339,11 @@ pub(super) fn clip_for_visual(
     clips: &NeraAnimationClips,
 ) -> (Option<ClipSlot>, RepeatAnimation, &'static str) {
     match visual {
+        VisualState::LibraryAnimation(entity) => (
+            clips.library.filter(|clip| clip.entity == entity),
+            RepeatAnimation::Count(1),
+            "Library",
+        ),
         VisualState::Idle => (clips.idle, RepeatAnimation::Forever, "Idle"),
         VisualState::SittingLoop => (clips.sitting_loop, RepeatAnimation::Forever, "SittingLoop"),
         VisualState::SittingEnter => (
@@ -397,6 +403,7 @@ fn base_fallback(base: BasePose, clips: &NeraAnimationClips) -> Option<ClipSlot>
 
 pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
     match visual {
+        VisualState::LibraryAnimation(_) => REACTION_BLEND,
         VisualState::HeadStroke => HEAD_STROKE_BLEND,
         VisualState::Falling | VisualState::Landing => SUPPORT_BLEND,
         VisualState::HitHead | VisualState::HitChest => REACTION_BLEND,

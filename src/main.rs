@@ -10,6 +10,8 @@ mod action_menu;
 mod alarm_dismiss;
 #[cfg(target_os = "windows")]
 mod alarm_settings;
+#[cfg(target_os = "windows")]
+mod animation_manager;
 mod environment;
 mod expression;
 mod interaction;
@@ -36,9 +38,9 @@ use expression::NeraExpressionPlugin;
 
 use interaction::{
     DesktopPetInteraction, HeadPatGesture, HoveredBodyPart, InteractionPlugin,
-    attach_bone_colliders, detect_head_pat, drag_nera_window, nera_utility_input_available,
-    nera_utility_input_blocked, settle_pending_sit, suspend_nera_interaction_for_settings,
-    update_click_through,
+    attach_bone_colliders, detect_head_pat, drag_nera_window, mark_nera_live_bones,
+    nera_utility_input_available, nera_utility_input_blocked, settle_pending_sit,
+    suspend_nera_interaction_for_settings, update_click_through,
 };
 
 use std::num::NonZeroU32;
@@ -61,6 +63,8 @@ use settings::{NeraSettings, NeraSettingsPlugin};
 
 #[cfg(target_os = "windows")]
 use action_menu::ActionMenuPlugin;
+#[cfg(target_os = "windows")]
+use animation_manager::process::AnimationManagerHostPlugin;
 
 #[cfg(target_os = "windows")]
 use alarm_dismiss::AlarmDismissPlugin;
@@ -87,6 +91,11 @@ fn nera_asset_path() -> String {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if std::env::args().any(|arg| arg == "--animation-manager-worker") {
+        animation_manager::process::run_worker();
+        return;
+    }
     let mut app = App::new();
 
     // Load persistent Nera settings before the native window is created.
@@ -159,6 +168,7 @@ fn main() {
     app.add_plugins((
         TrayPlugin,
         ActionMenuPlugin,
+        AnimationManagerHostPlugin,
         AlarmDismissPlugin,
         AlarmSettingsPlugin,
     ));
@@ -173,6 +183,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                mark_nera_live_bones,
                 attach_bone_colliders,
                 update_look_at_target,
                 // A secondary Settings window owns application mouse input while

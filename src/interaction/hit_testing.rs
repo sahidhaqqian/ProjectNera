@@ -1,5 +1,6 @@
 //! Semantic body hit testing and the bone colliders that implement it.
 use super::BodyPart;
+use crate::avatar::NeraAvatar;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
@@ -7,6 +8,33 @@ use bevy_vrm1::prelude::*;
 pub(crate) struct NeraCollider {
     body_part: BodyPart,
     shape: NeraColliderShape,
+}
+
+/// Desktop avatar bones only; excludes gallery avatars and VRMA source rigs.
+#[derive(Component)]
+pub(crate) struct NeraLiveBone;
+
+/// The VRM's hips anchor points into its rendered skeleton. Walking from that
+/// anchor avoids tagging separate VRMA source rigs, even while they load.
+pub(crate) fn mark_nera_live_bones(
+    mut commands: Commands,
+    avatar: Query<&HipsBoneEntity, With<NeraAvatar>>,
+    children: Query<&Children>,
+    bones: Query<(), With<VrmBone>>,
+    marked: Query<(), With<NeraLiveBone>>,
+) {
+    let Ok(hips) = avatar.single() else {
+        return;
+    };
+    let mut stack = vec![hips.0];
+    while let Some(entity) = stack.pop() {
+        if bones.contains(entity) && !marked.contains(entity) {
+            commands.entity(entity).insert(NeraLiveBone);
+        }
+        if let Ok(descendants) = children.get(entity) {
+            stack.extend(descendants.iter());
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -91,7 +119,10 @@ fn ray_capsule_distance(
     nearest
 }
 
-fn vrm_bone_position(bone_query: &Query<(&VrmBone, &GlobalTransform)>, name: &str) -> Option<Vec3> {
+fn vrm_bone_position(
+    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    name: &str,
+) -> Option<Vec3> {
     bone_query
         .iter()
         .find_map(|(bone, transform)| (bone.as_str() == name).then(|| transform.translation()))
@@ -101,7 +132,7 @@ fn project_vrm_bone(
     name: &str,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) -> Option<Vec2> {
     let world = vrm_bone_position(bone_query, name)?;
     camera.world_to_viewport(camera_transform, world).ok()
@@ -118,7 +149,7 @@ pub(super) fn head_part_at_cursor(
     cursor: Vec2,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     character_scale: f32,
 ) -> bool {
     let left_eye = project_vrm_bone("leftEye", camera, camera_transform, bone_query);
@@ -160,7 +191,7 @@ pub(super) fn nearest_nera_body_part(
     ray_origin: Vec3,
     ray_dir: Vec3,
     colliders_query: &Query<(&GlobalTransform, &NeraCollider)>,
-    bone_query: &Query<(&VrmBone, &GlobalTransform)>,
+    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     character_scale: f32,
 ) -> Option<BodyPart> {
     let mut nearest: Option<(BodyPart, f32)> = None;
@@ -207,7 +238,7 @@ pub(super) fn nearest_nera_body_part(
 
 pub(crate) fn attach_bone_colliders(
     mut commands: Commands,
-    bones: Query<(Entity, &VrmBone), Added<VrmBone>>,
+    bones: Query<(Entity, &VrmBone), Added<NeraLiveBone>>,
 ) {
     use BodyPart::*;
 
@@ -399,7 +430,7 @@ mod tests {
             let hit = world
                 .run_system_once(
                     |colliders: Query<(&GlobalTransform, &NeraCollider)>,
-                     bones: Query<(&VrmBone, &GlobalTransform)>| {
+                     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>| {
                         nearest_nera_body_part(Vec3::ZERO, Vec3::Z, &colliders, &bones, 1.0)
                     },
                 )

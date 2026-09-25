@@ -17,6 +17,9 @@ use bevy_vrm1::{prelude::*, vrm::body_tracking::BodyTracking};
 pub(crate) struct NeraAvatar;
 
 #[derive(Component)]
+pub(crate) struct NeraMainCamera;
+
+#[derive(Component)]
 pub(crate) struct LookAtTarget;
 
 const VRM_PATH: &str = "vrm/nera_256.vrm";
@@ -24,6 +27,7 @@ const VRM_PATH: &str = "vrm/nera_256.vrm";
 pub(crate) fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Name::new("Nera Camera"),
+        NeraMainCamera,
         Camera3d::default(),
         Camera {
             clear_color: ClearColorConfig::Custom(Color::NONE),

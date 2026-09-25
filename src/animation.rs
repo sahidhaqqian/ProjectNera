@@ -18,14 +18,27 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 mod playback;
+mod library;
 mod state;
 mod systems;
 
 pub(crate) use playback::*;
+pub(crate) use library::PlayLibraryAnimation;
 pub(crate) use state::*;
 pub(crate) use systems::*;
 
 pub(crate) struct NeraAnimationPlugin;
+
+#[cfg(test)]
+pub(crate) fn install_library_test_systems(app: &mut App) {
+    app.init_resource::<NeraAnimationState>()
+        .init_resource::<NeraAnimationClips>()
+        .init_resource::<NeraAnimationPlayback>()
+        .init_resource::<crate::environment::DesktopEnvironment>()
+        .init_resource::<library::LibraryPlayback>()
+        .add_message::<PlayLibraryAnimation>()
+        .add_systems(Update, (library::sync_library_animation, apply_animation_state).chain());
+}
 
 impl Plugin for NeraAnimationPlugin {
     fn build(&self, app: &mut App) {
@@ -34,6 +47,9 @@ impl Plugin for NeraAnimationPlugin {
             .init_resource::<NeraAnimationPlayback>()
             .init_resource::<AlarmAnimationRuntime>()
             .init_resource::<IdleVariationRuntime>()
+            .init_resource::<library::LibraryPlayback>()
+            .add_message::<PlayLibraryAnimation>()
+            .add_systems(Update, library::sync_library_animation.before(tick_animation_actions))
             .add_message::<AlarmAnimationCommand>()
             .add_systems(Update, sync_alarm_animation);
 

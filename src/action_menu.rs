@@ -137,6 +137,7 @@ pub(crate) enum AlarmMenuChoice {
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NeraActionMenuCommand {
     Animation(AnimationMenuChoice),
+    AnimationManager,
     Alarm(AlarmMenuChoice),
     AlarmSettings,
     Settings,
@@ -185,7 +186,6 @@ fn rgb(value: (u8, u8, u8)) -> COLORREF {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RadialPage {
     Root,
-    Animation,
     Alarm,
     /// Longer presets + "Test Now", reached from the Alarm page. Replaces the
     /// old `Custom` slot, which was an enabled menu item that did nothing but
@@ -228,7 +228,7 @@ const ROOT_ITEMS: [RadialItem; 6] = [
     RadialItem {
         glyph: "▶",
         label: "Animation",
-        action: RadialItemAction::Open(RadialPage::Animation),
+        action: RadialItemAction::Command(NeraActionMenuCommand::AnimationManager),
     },
     RadialItem {
         glyph: "◷",
@@ -244,56 +244,6 @@ const ROOT_ITEMS: [RadialItem; 6] = [
         glyph: "◆",
         label: "Games",
         action: RadialItemAction::Disabled,
-    },
-];
-
-const ANIMATION_ITEMS: [RadialItem; 7] = [
-    RadialItem {
-        glyph: "↑",
-        label: "Wave",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Animation(AnimationMenuChoice::Wave),
-        ),
-    },
-    RadialItem {
-        glyph: "…",
-        label: "Thinking",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Animation(AnimationMenuChoice::Thinking),
-        ),
-    },
-    RadialItem {
-        glyph: "!",
-        label: "Angry",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Animation(AnimationMenuChoice::Angry),
-        ),
-    },
-    RadialItem {
-        glyph: "↓",
-        label: "Sad",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Animation(AnimationMenuChoice::Sad),
-        ),
-    },
-    RadialItem {
-        glyph: "○",
-        label: "Surprised",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Animation(AnimationMenuChoice::Surprised),
-        ),
-    },
-    RadialItem {
-        glyph: "↺",
-        label: "Reset",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Animation(AnimationMenuChoice::ResetBasePose),
-        ),
-    },
-    RadialItem {
-        glyph: "<",
-        label: "Back",
-        action: RadialItemAction::Back,
     },
 ];
 
@@ -391,7 +341,6 @@ const ALARM_MORE_ITEMS: [RadialItem; 7] = [
 fn items_for(page: RadialPage) -> &'static [RadialItem] {
     match page {
         RadialPage::Root => &ROOT_ITEMS,
-        RadialPage::Animation => &ANIMATION_ITEMS,
         RadialPage::Alarm => &ALARM_ITEMS,
         RadialPage::AlarmMore => &ALARM_MORE_ITEMS,
     }
@@ -406,7 +355,7 @@ fn items_for(page: RadialPage) -> &'static [RadialItem] {
 fn parent_page(page: RadialPage) -> Option<RadialPage> {
     match page {
         RadialPage::Root => None,
-        RadialPage::Animation | RadialPage::Alarm => {
+        RadialPage::Alarm => {
             Some(RadialPage::Root)
         }
         RadialPage::AlarmMore => Some(RadialPage::Alarm),
@@ -601,6 +550,7 @@ fn poll_action_menu_result(
     mut commands: MessageWriter<NeraActionMenuCommand>,
     mut open_settings: MessageWriter<OpenSettingsWindow>,
     mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
+    mut open_animation_manager: MessageWriter<crate::animation_manager::OpenAnimationManager>,
 ) {
     let Some(tray) = tray else {
         return;
@@ -616,6 +566,10 @@ fn poll_action_menu_result(
         };
 
         match command {
+            NeraActionMenuCommand::AnimationManager => {
+                info!("Nera radial menu -> Animation Manager");
+                open_animation_manager.write(crate::animation_manager::OpenAnimationManager);
+            }
             NeraActionMenuCommand::Animation(choice) => {
                 info!("Nera radial menu -> Animation::{choice:?}");
             }
@@ -1188,12 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn animation_and_alarm_keep_typed_commands() {
+    fn animation_manager_and_alarm_keep_typed_commands() {
         assert!(matches!(
-            ANIMATION_ITEMS[0].action,
-            RadialItemAction::Command(
-                NeraActionMenuCommand::Animation(AnimationMenuChoice::Wave)
-            )
+            ROOT_ITEMS[2].action,
+            RadialItemAction::Command(NeraActionMenuCommand::AnimationManager)
         ));
 
         assert!(matches!(
@@ -1212,7 +1164,6 @@ mod tests {
     fn every_sub_page_ends_with_a_back_item() {
         for page in [
             RadialPage::Root,
-            RadialPage::Animation,
             RadialPage::Alarm,
             RadialPage::AlarmMore,
         ] {
@@ -1237,10 +1188,6 @@ mod tests {
     #[test]
     fn page_hierarchy_nests_alarm_more_under_alarm() {
         assert_eq!(parent_page(RadialPage::Root), None);
-        assert_eq!(
-            parent_page(RadialPage::Animation),
-            Some(RadialPage::Root)
-        );
         assert_eq!(
             parent_page(RadialPage::Alarm),
             Some(RadialPage::Root)

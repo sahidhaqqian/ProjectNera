@@ -20,3 +20,9 @@ Desktop.ini
 # Logs
 *.log
 tools/fbx2vrma-converter/
+
+# Local Mixamo VRMA library
+assets/animations/Mixamo-VRMA/
+
+# Local animation assets
+assets/animations/
