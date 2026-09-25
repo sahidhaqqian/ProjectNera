@@ -1,6 +1,7 @@
 //! Animation gallery utility window. Preview instances never carry `NeraAvatar`
 //! and never enter the production animation state resolver.
 mod preview;
+pub(crate) mod process;
 mod registry;
 mod ui;
 
@@ -24,6 +25,33 @@ pub(crate) struct OpenAnimationManager;
 #[derive(Resource, Default)]
 pub(crate) struct AnimationManagerInputGate {
     pub window_open: bool,
+    /// ButtonInput is application-global, so block Nera only while the pointer
+    /// is physically inside the manager window. Once the cursor leaves the
+    /// manager, the exposed desktop pet can become hittable and draggable even
+    /// while the utility window stays open.
+    pub pointer_over_window: bool,
+}
+
+#[derive(Resource)]
+struct CaretBlink {
+    timer: Timer,
+    visible: bool,
+}
+
+impl Default for CaretBlink {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(0.52, TimerMode::Repeating),
+            visible: true,
+        }
+    }
+}
+
+impl CaretBlink {
+    fn reset_visible(&mut self) {
+        self.visible = true;
+        self.timer.reset();
+    }
 }
 
 #[derive(Component)]
@@ -40,6 +68,12 @@ struct ManagerDragRegion;
 struct GalleryScroll;
 #[derive(Component)]
 struct GalleryScrollbarThumb;
+#[derive(Component)]
+struct GalleryScrollbarTrack;
+#[derive(Resource, Default)]
+struct ScrollbarDrag(Option<f32>);
+#[derive(Component)]
+struct TextCaret;
 #[derive(Component, Clone)]
 struct PreviewSlot {
     key: String,
@@ -142,18 +176,26 @@ impl Plugin for AnimationManagerPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ManagerState::new())
             .init_resource::<AnimationManagerInputGate>()
+            .init_resource::<CaretBlink>()
+            .init_resource::<ScrollbarDrag>()
             .init_resource::<preview::PreviewRuntime>()
             .add_message::<OpenAnimationManager>()
+            .add_systems(PreUpdate, sync_manager_pointer_gate)
             .add_systems(
                 Update,
                 (
                     open_window,
                     handle_keyboard,
+                    handle_scroll_keys,
                     handle_actions,
                     ui::rebuild_ui,
+                    ui::blink_text_caret,
                     drag_window,
                     scroll_gallery,
+                    drag_gallery_scrollbar,
                     sync_gallery_scrollbar,
+                    ui::sync_gallery_rows,
+                    ui::sync_gallery_count,
                     preview::sync_visible_previews,
                     preview::prepare_preview_rigs,
                     preview::start_ready_previews,
@@ -169,7 +211,7 @@ fn open_window(
     mut open: MessageReader<OpenAnimationManager>,
     mut state: ResMut<ManagerState>,
     mut gate: ResMut<AnimationManagerInputGate>,
-    existing: Query<Entity, With<ManagerWindow>>,
+    existing: Query<&Window, With<ManagerWindow>>,
     mut commands: Commands,
 ) {
     if open.read().next().is_none() {
@@ -177,6 +219,9 @@ fn open_window(
     }
     if !existing.is_empty() {
         gate.window_open = true;
+        gate.pointer_over_window = existing
+            .iter()
+            .any(|window| window.cursor_position().is_some());
         return;
     }
     state.registry.refresh();
@@ -191,6 +236,9 @@ fn open_window(
     state.return_to_menu = false;
     state.error = None;
     gate.window_open = true;
+    // Conservatively block for the creation frame; PreUpdate switches to the
+    // actual pointer-in-window state as soon as Bevy has cursor information.
+    gate.pointer_over_window = true;
     let window = commands
         .spawn((
             Name::new("Nera Animation Manager Window"),
@@ -230,6 +278,7 @@ fn handle_keyboard(
     mut keys: MessageReader<KeyboardInput>,
     windows: Query<Entity, With<ManagerWindow>>,
     mut state: ResMut<ManagerState>,
+    mut caret: ResMut<CaretBlink>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -249,6 +298,7 @@ fn handle_keyboard(
         if focus == TextFocus::None {
             continue;
         }
+        caret.reset_visible();
         if event.logical_key == Key::Enter {
             if focus == TextFocus::Rename {
                 state.apply_rename();
@@ -277,6 +327,69 @@ fn handle_keyboard(
     }
 }
 
+fn scroll_metrics(computed: &ComputedNode) -> (f32, f32) {
+    let scale = computed.inverse_scale_factor();
+    let viewport = (computed.size().y * scale).max(1.0);
+    let content = (computed.content_size().y * scale).max(viewport);
+    ((content - viewport).max(0.0), viewport)
+}
+
+/// With a library containing hundreds or thousands of VRMAs, a traditional
+/// 3-line wheel step makes reaching the bottom impractical. Keep pixel/trackpad
+/// scrolling precise, but scale discrete wheel notches with the library size.
+fn line_scroll_step(max_scroll: f32) -> f32 {
+    if max_scroll <= ui::ROW_HEIGHT * 24.0 {
+        return ui::ROW_HEIGHT * 1.6;
+    }
+
+    (max_scroll * 0.08).max(ui::ROW_HEIGHT * 3.0)
+}
+
+fn handle_scroll_keys(
+    mut keys: MessageReader<KeyboardInput>,
+    windows: Query<Entity, With<ManagerWindow>>,
+    mut scroll: Query<(&mut ScrollPosition, &ComputedNode), With<GalleryScroll>>,
+    mut state: ResMut<ManagerState>,
+) {
+    if state.focus != TextFocus::None {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok((mut position, computed)) = scroll.single_mut() else {
+        return;
+    };
+    let (max_scroll, viewport) = scroll_metrics(computed);
+
+    for event in keys.read() {
+        if event.window != window || event.state != ButtonState::Pressed {
+            continue;
+        }
+        let next = match event.logical_key {
+            Key::Home => Some(0.0),
+            Key::End => Some(max_scroll),
+            Key::PageDown => Some(position.0.y + viewport * 0.90),
+            Key::PageUp => Some(position.0.y - viewport * 0.90),
+            _ => None,
+        };
+        if let Some(next) = next {
+            position.0.y = next.clamp(0.0, max_scroll);
+            state.scroll_y = position.0.y;
+        }
+    }
+}
+
+fn sync_manager_pointer_gate(
+    windows: Query<&Window, With<ManagerWindow>>,
+    mut gate: ResMut<AnimationManagerInputGate>,
+) {
+    // Keep the lifecycle flag until cleanup runs, including native/Alt+F4 close.
+    gate.pointer_over_window = windows
+        .iter()
+        .any(|window| window.cursor_position().is_some());
+}
+
 impl ManagerState {
     fn apply_rename(&mut self) {
         let Some(Dialog::Rename(key)) = self.dialog.clone() else {
@@ -297,6 +410,7 @@ impl ManagerState {
 
 fn handle_actions(
     mut state: ResMut<ManagerState>,
+    mut caret: ResMut<CaretBlink>,
     mut actions: Query<(&Interaction, &ManagerAction, &mut BackgroundColor), Changed<Interaction>>,
     mut previews: ResMut<preview::PreviewRuntime>,
     mut commands: Commands,
@@ -333,6 +447,7 @@ fn handle_actions(
             }
             ManagerAction::Search => {
                 state.focus = TextFocus::Search;
+                caret.reset_visible();
                 state.dirty = true;
             }
             ManagerAction::Import => {
@@ -363,11 +478,13 @@ fn handle_actions(
                     .into_owned();
                 state.dialog = Some(Dialog::Rename(key.clone()));
                 state.focus = TextFocus::Rename;
+                caret.reset_visible();
                 state.menu_key = None;
                 state.dirty = true;
             }
             ManagerAction::FocusRename => {
                 state.focus = TextFocus::Rename;
+                caret.reset_visible();
                 state.dirty = true;
             }
             ManagerAction::Delete(key) => {
@@ -423,14 +540,13 @@ fn scroll_gallery(
     let Ok((mut position, computed)) = scroll.single_mut() else {
         return;
     };
-    let max = ((computed.content_size().y - computed.size().y) * computed.inverse_scale_factor())
-        .max(0.0);
+    let (max, _) = scroll_metrics(computed);
     for event in wheel.read() {
         if event.window != window {
             continue;
         }
         let delta = match event.unit {
-            MouseScrollUnit::Line => event.y * 54.0,
+            MouseScrollUnit::Line => event.y * line_scroll_step(max),
             MouseScrollUnit::Pixel => event.y,
         };
         position.0.y = (position.0.y - delta).clamp(0.0, max);
@@ -465,6 +581,49 @@ fn sync_gallery_scrollbar(
 
     thumb.height = px(thumb_height);
     thumb.top = px(progress * (track_height - thumb_height));
+}
+
+fn drag_gallery_scrollbar(
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut drag: ResMut<ScrollbarDrag>,
+    tracks: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<GalleryScrollbarTrack>>,
+    mut scroll: Query<(&mut ScrollPosition, &ComputedNode), With<GalleryScroll>>,
+    mut state: ResMut<ManagerState>,
+) {
+    if !mouse.pressed(MouseButton::Left) || state.dialog.is_some() {
+        drag.0 = None;
+        return;
+    }
+    let (Ok((interaction, cursor)), Ok((mut position, computed))) =
+        (tracks.single(), scroll.single_mut())
+    else {
+        return;
+    };
+    let Some(cursor) = cursor.normalized else {
+        return;
+    };
+    let (max_scroll, viewport) = scroll_metrics(computed);
+    let track = (viewport - 4.0).max(1.0);
+    let thumb = (track * viewport / (viewport + max_scroll)).clamp(28.0_f32.min(track), track);
+    let travel = track - thumb;
+    if max_scroll == 0.0 || travel <= 0.0 {
+        return;
+    }
+    // Bevy 0.19 normalizes UI coordinates around the node's center.
+    let pointer = (cursor.y + 0.5) * track;
+    if mouse.just_pressed(MouseButton::Left) && *interaction == Interaction::Pressed {
+        let top = position.0.y / max_scroll * travel;
+        drag.0 = Some(if (top..=top + thumb).contains(&pointer) {
+            pointer - top
+        } else {
+            thumb / 2.0
+        });
+        state.focus = TextFocus::None;
+    }
+    if let Some(offset) = drag.0 {
+        position.0.y = ((pointer - offset) / travel).clamp(0.0, 1.0) * max_scroll;
+        state.scroll_y = position.0.y;
+    }
 }
 
 fn drag_window(
@@ -514,6 +673,7 @@ fn close_after_release(
     state.menu_key = None;
     state.focus = TextFocus::None;
     gate.window_open = false;
+    gate.pointer_over_window = false;
 }
 
 fn cleanup_closed_window(
@@ -524,7 +684,7 @@ fn cleanup_closed_window(
     owned: Query<Entity, With<ManagerOwned>>,
     mut commands: Commands,
 ) {
-    if !gate.window_open || !windows.is_empty() {
+    if !windows.is_empty() || (!gate.window_open && owned.is_empty() && previews.is_empty()) {
         return;
     }
     for entity in &owned {
@@ -532,6 +692,7 @@ fn cleanup_closed_window(
     }
     previews.clear(&mut commands, &mut images);
     gate.window_open = false;
+    gate.pointer_over_window = false;
 }
 
 #[cfg(target_os = "windows")]
@@ -562,4 +723,99 @@ fn pick_vrma_file() -> Option<PathBuf> {
     }
     let len = buffer.iter().position(|unit| *unit == 0)?;
     Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_click_and_drag_reach_both_ends_of_large_library() {
+        let mut app = App::new();
+        app.insert_resource(ManagerState::new())
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<ScrollbarDrag>()
+            .add_systems(Update, drag_gallery_scrollbar);
+        let track = app
+            .world_mut()
+            .spawn((
+                GalleryScrollbarTrack,
+                Interaction::Pressed,
+                bevy::ui::RelativeCursorPosition {
+                    cursor_over: true,
+                    normalized: Some(Vec2::new(0.0, 0.5)),
+                },
+            ))
+            .id();
+        let scroll = app
+            .world_mut()
+            .spawn((
+                GalleryScroll,
+                ScrollPosition::default(),
+                ComputedNode {
+                    size: Vec2::new(1000.0, 720.0),
+                    content_size: Vec2::new(1000.0, 1_200_000.0),
+                    inverse_scale_factor: 1.0,
+                    ..default()
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(scroll).unwrap().0.y,
+            1_199_280.0
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        app.world_mut()
+            .get_mut::<bevy::ui::RelativeCursorPosition>(track)
+            .unwrap()
+            .normalized = Some(Vec2::new(0.0, -0.5));
+        app.update();
+        assert_eq!(app.world().get::<ScrollPosition>(scroll).unwrap().0.y, 0.0);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.update();
+        assert!(app.world().resource::<ScrollbarDrag>().0.is_none());
+    }
+
+    #[test]
+    fn open_manager_only_blocks_pet_input_while_pointer_is_over_it() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<crate::settings::SettingsInputGate>();
+        world.init_resource::<crate::alarm_settings::AlarmSettingsInputGate>();
+        world.insert_resource(AnimationManagerInputGate {
+            window_open: true,
+            pointer_over_window: false,
+        });
+        assert!(
+            world
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        assert!(
+            !world
+                .run_system_once(crate::interaction::nera_utility_input_blocked)
+                .unwrap()
+        );
+        world
+            .resource_mut::<AnimationManagerInputGate>()
+            .pointer_over_window = true;
+        assert!(
+            !world
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        assert!(
+            world
+                .run_system_once(crate::interaction::nera_utility_input_blocked)
+                .unwrap()
+        );
+    }
 }

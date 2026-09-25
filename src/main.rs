@@ -64,7 +64,7 @@ use settings::{NeraSettings, NeraSettingsPlugin};
 #[cfg(target_os = "windows")]
 use action_menu::ActionMenuPlugin;
 #[cfg(target_os = "windows")]
-use animation_manager::AnimationManagerPlugin;
+use animation_manager::process::AnimationManagerHostPlugin;
 
 #[cfg(target_os = "windows")]
 use alarm_dismiss::AlarmDismissPlugin;
@@ -91,6 +91,11 @@ fn nera_asset_path() -> String {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    if std::env::args().any(|arg| arg == "--animation-manager-worker") {
+        animation_manager::process::run_worker();
+        return;
+    }
     let mut app = App::new();
 
     // Load persistent Nera settings before the native window is created.
@@ -163,7 +168,7 @@ fn main() {
     app.add_plugins((
         TrayPlugin,
         ActionMenuPlugin,
-        AnimationManagerPlugin,
+        AnimationManagerHostPlugin,
         AlarmDismissPlugin,
         AlarmSettingsPlugin,
     ));

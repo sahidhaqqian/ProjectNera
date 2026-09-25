@@ -18,7 +18,7 @@ use bevy_vrm1::prelude::*;
 use super::{GalleryScroll, ManagerState, PreviewSlot};
 
 const PREVIEW_COLUMNS: usize = 3;
-const MAX_ACTIVE_PREVIEWS: usize = 15;
+const MAX_ACTIVE_PREVIEWS: usize = 12;
 const MAX_ACTIVE_ROWS: usize = MAX_ACTIVE_PREVIEWS / PREVIEW_COLUMNS;
 
 // Allow the dependency's deferred animation-graph bake to complete.
@@ -48,13 +48,20 @@ struct PreviewScene {
 #[derive(Resource, Default)]
 pub(super) struct PreviewRuntime {
     active: HashMap<String, PreviewScene>,
+    light: Option<Entity>,
+    requested: HashSet<String>,
+    changed_at: Option<std::time::Instant>,
 }
 
 impl PreviewRuntime {
+    pub fn is_empty(&self) -> bool {
+        self.active.is_empty()
+    }
+
     pub fn remove(&mut self, key: &str, commands: &mut Commands, images: &mut Assets<Image>) {
         if let Some(scene) = self.active.remove(key) {
-            commands.entity(scene.root).despawn();
-            commands.entity(scene.camera).despawn();
+            commands.entity(scene.root).try_despawn();
+            commands.entity(scene.camera).try_despawn();
             images.remove(&scene.image);
         }
     }
@@ -64,6 +71,12 @@ impl PreviewRuntime {
         for key in keys {
             self.remove(&key, commands, images);
         }
+        self.active.shrink_to_fit();
+        if let Some(light) = self.light.take() {
+            commands.entity(light).try_despawn();
+        }
+        self.requested = HashSet::new();
+        self.changed_at = None;
     }
 
     pub fn restart(
@@ -207,15 +220,16 @@ pub(super) fn sync_visible_previews(
     };
     let viewport_height = computed.size().y * computed.inverse_scale_factor();
     let first_visible_row = (state.scroll_y / super::ui::ROW_HEIGHT).floor().max(0.0) as usize;
-    let visible_rows = (viewport_height / super::ui::ROW_HEIGHT).ceil().max(1.0) as usize;
-    let total_rows = state.filtered().len().div_ceil(PREVIEW_COLUMNS);
-    let active_rows = visible_rows
-        .saturating_add(2)
-        .min(MAX_ACTIVE_ROWS)
-        .min(total_rows);
-    let mut first_active_row = first_visible_row.saturating_sub(1);
-    first_active_row = first_active_row.min(total_rows.saturating_sub(active_rows));
-    let last_active_row = first_active_row.saturating_add(active_rows);
+    let total_rows = (computed.content_size().y * computed.inverse_scale_factor()
+        / super::ui::ROW_HEIGHT)
+        .ceil() as usize;
+    // Overscan cards are inexpensive UI; don't load whole VRM worlds for them.
+    let first_active_row = first_visible_row.min(total_rows);
+    let last_active_row =
+        ((state.scroll_y + viewport_height) / super::ui::ROW_HEIGHT).ceil() as usize;
+    let last_active_row = last_active_row
+        .min(total_rows)
+        .min(first_active_row + MAX_ACTIVE_ROWS);
 
     let mut needed = HashSet::new();
     for (slot, _) in &slots {
@@ -235,6 +249,14 @@ pub(super) fn sync_visible_previews(
         runtime.remove(&key, &mut commands, &mut images);
     }
 
+    if runtime.requested != needed {
+        runtime.requested = needed.clone();
+        runtime.changed_at = Some(std::time::Instant::now());
+    }
+    let settled = runtime
+        .changed_at
+        .is_none_or(|at| at.elapsed() >= Duration::from_millis(120));
+
     let mut occupied: HashSet<_> = runtime.active.values().map(|scene| scene.slot).collect();
     for (slot, mut image_node) in slots {
         if !needed.contains(&slot.key) {
@@ -244,16 +266,37 @@ pub(super) fn sync_visible_previews(
             image_node.image = scene.image.clone();
             continue;
         }
+        if !settled {
+            continue;
+        }
         let Some(index) = (0..MAX_ACTIVE_PREVIEWS).find(|index| !occupied.contains(index)) else {
             break;
         };
         occupied.insert(index);
 
+        if runtime.light.is_none() {
+            runtime.light = Some(
+                commands
+                    .spawn((
+                        Name::new("Nera Gallery Shared Light"),
+                        DirectionalLight {
+                            illuminance: 10_000.0,
+                            shadow_maps_enabled: false,
+                            contact_shadows_enabled: false,
+                            ..default()
+                        },
+                        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, -0.5, 0.0)),
+                        RenderLayers::from_layers(&(1..=MAX_ACTIVE_PREVIEWS).collect::<Vec<_>>()),
+                    ))
+                    .id(),
+            );
+        }
+
         // Render layers isolate unit-scale rigs without offsetting their rest pose.
         let layer = RenderLayers::layer(index + 1);
         let image = images.add(Image::new_target_texture(
             512,
-            228,
+            420,
             TextureFormat::Rgba8Unorm,
             Some(TextureFormat::Rgba8UnormSrgb),
         ));
@@ -272,22 +315,10 @@ pub(super) fn sync_visible_previews(
                     far: 45.0,
                     ..default()
                 }),
-                Transform::from_xyz(0.0, 0.85, 3.4).looking_at(Vec3::new(0.0, 0.85, 0.0), Vec3::Y),
+                Transform::from_xyz(0.0, 0.85, 2.9).looking_at(Vec3::new(0.0, 0.85, 0.0), Vec3::Y),
                 layer.clone(),
                 Msaa::Off,
             ))
-            .with_children(|parent| {
-                parent.spawn((
-                    DirectionalLight {
-                        illuminance: 10_000.0,
-                        shadow_maps_enabled: false,
-                        contact_shadows_enabled: false,
-                        ..default()
-                    },
-                    Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, -0.5, 0.0)),
-                    layer.clone(),
-                ));
-            })
             .id();
         let mut clip = Entity::PLACEHOLDER;
         let root = commands
@@ -326,6 +357,235 @@ pub(super) fn sync_visible_previews(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "renders the full gallery and measures process memory"]
+    fn full_gallery_scroll_and_memory_regression() {
+        use super::super::*;
+        use bevy::{app::PluginsState, winit::WinitPlugin, world_serialization::WorldAsset};
+        #[repr(C)]
+        #[derive(Default)]
+        struct Memory {
+            cb: u32,
+            faults: u32,
+            peak_ws: usize,
+            ws: usize,
+            peak_paged: usize,
+            paged: usize,
+            peak_nonpaged: usize,
+            nonpaged: usize,
+            pagefile: usize,
+            peak_pagefile: usize,
+            private: usize,
+        }
+        #[link(name = "psapi")]
+        unsafe extern "system" {
+            fn GetProcessMemoryInfo(process: isize, info: *mut Memory, size: u32) -> i32;
+        }
+        fn sample(app: &mut App, label: &str) {
+            let mut memory = Memory::default();
+            memory.cb = std::mem::size_of::<Memory>() as u32;
+            assert_ne!(
+                unsafe {
+                    GetProcessMemoryInfo(-1, &mut memory, std::mem::size_of::<Memory>() as u32)
+                },
+                0
+            );
+            let world = app.world();
+            eprintln!(
+                "MEM {label}: working={} MiB private={} MiB entities={} images={} meshes={} worlds={} clips={} graphs={} previews={}",
+                memory.ws / 1048576,
+                memory.private / 1048576,
+                world.entities().len(),
+                world.resource::<Assets<Image>>().len(),
+                world.resource::<Assets<Mesh>>().len(),
+                world.resource::<Assets<WorldAsset>>().len(),
+                world.resource::<Assets<AnimationClip>>().len(),
+                world.resource::<Assets<AnimationGraph>>().len(),
+                world.resource::<PreviewRuntime>().active.len()
+            );
+        }
+        fn frames(app: &mut App, count: usize) {
+            for _ in 0..count {
+                app.update();
+                std::thread::sleep(Duration::from_millis(16));
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(AssetPlugin {
+                    file_path: crate::nera_asset_path(),
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                })
+                .disable::<WinitPlugin>(),
+        );
+        app.add_plugins((VrmPlugin, VrmaPlugin, AnimationManagerPlugin));
+        app.add_message::<crate::settings::ReturnToActionMenu>();
+        app.add_message::<crate::animation::PlayLibraryAnimation>();
+        while app.plugins_state() != PluginsState::Ready {
+            bevy::tasks::tick_global_task_pools_on_main_thread();
+        }
+        app.finish();
+        app.cleanup();
+        let model = app
+            .world()
+            .resource::<AssetServer>()
+            .load("vrm/nera_256.vrm");
+        app.world_mut()
+            .spawn((VrmHandle(model), Transform::default()));
+        let target =
+            app.world_mut()
+                .resource_mut::<Assets<Image>>()
+                .add(Image::new_target_texture(
+                    600,
+                    950,
+                    TextureFormat::Rgba8Unorm,
+                    Some(TextureFormat::Rgba8UnormSrgb),
+                ));
+        app.world_mut().spawn((
+            Camera3d::default(),
+            RenderTarget::Image(target.into()),
+            Transform::from_xyz(0.0, 0.85, 3.4).looking_at(Vec3::new(0.0, 0.85, 0.0), Vec3::Y),
+        ));
+        frames(&mut app, 120);
+        sample(&mut app, "baseline");
+        for cycle in 0..2 {
+            app.world_mut().write_message(OpenAnimationManager);
+            app.update();
+            let (window, camera) = {
+                let world = app.world_mut();
+                (
+                    world
+                        .query_filtered::<Entity, With<ManagerWindow>>()
+                        .single(world)
+                        .unwrap(),
+                    world
+                        .query_filtered::<Entity, With<ManagerCamera>>()
+                        .single(world)
+                        .unwrap(),
+                )
+            };
+            let target =
+                app.world_mut()
+                    .resource_mut::<Assets<Image>>()
+                    .add(Image::new_target_texture(
+                        1120,
+                        980,
+                        TextureFormat::Rgba8Unorm,
+                        Some(TextureFormat::Rgba8UnormSrgb),
+                    ));
+            app.world_mut()
+                .entity_mut(camera)
+                .insert(RenderTarget::Image(target.into()));
+            frames(&mut app, 120);
+            sample(&mut app, &format!("open {cycle}"));
+            let count = app.world().resource::<ManagerState>().filtered().len();
+            for step in 0..15 {
+                app.world_mut().write_message(MouseWheel {
+                    unit: MouseScrollUnit::Line,
+                    x: 0.0,
+                    y: -1.0,
+                    window,
+                    phase: bevy::input::touch::TouchPhase::Moved,
+                });
+                frames(&mut app, 12);
+                let world = app.world_mut();
+                let (position, node) = world
+                    .query_filtered::<(&ScrollPosition, &ComputedNode), With<GalleryScroll>>()
+                    .single(world)
+                    .unwrap();
+                eprintln!(
+                    "SCROLL cycle={cycle} step={step} count={count} requested={} actual={} max={} viewport={}",
+                    position.0.y,
+                    node.scroll_position.y,
+                    scroll_metrics(node).0,
+                    scroll_metrics(node).1
+                );
+            }
+            {
+                let world = app.world_mut();
+                let mut slots = world.query::<&PreviewSlot>();
+                assert!(
+                    slots.iter(world).any(|slot| slot.index == count - 1),
+                    "wheel must reach the last registered animation"
+                );
+            }
+            sample(&mut app, &format!("scrolled {cycle}"));
+            app.world_mut()
+                .resource_mut::<ManagerState>()
+                .close_requested = true;
+            frames(&mut app, 180);
+            sample(&mut app, &format!("closed {cycle}"));
+        }
+    }
+
+    #[test]
+    fn native_close_releases_preview_entities_and_render_targets() {
+        use super::super::{
+            AnimationManagerInputGate, ManagerOwned, ManagerWindow, cleanup_closed_window,
+            sync_manager_pointer_gate,
+        };
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<PreviewRuntime>()
+            .init_resource::<AnimationManagerInputGate>()
+            .add_systems(PreUpdate, sync_manager_pointer_gate)
+            .add_systems(Update, cleanup_closed_window);
+        for _ in 0..3 {
+            let window = app
+                .world_mut()
+                .spawn((ManagerWindow, Window::default()))
+                .id();
+            let owned = app.world_mut().spawn(ManagerOwned).id();
+            let root = app.world_mut().spawn_empty().id();
+            let clip = app.world_mut().spawn(ChildOf(root)).id();
+            let camera = app.world_mut().spawn_empty().id();
+            let image = app
+                .world_mut()
+                .resource_mut::<Assets<Image>>()
+                .add(Image::default());
+            let image_id = image.id();
+            app.world_mut()
+                .resource_mut::<PreviewRuntime>()
+                .active
+                .insert(
+                    "test".into(),
+                    PreviewScene {
+                        root,
+                        camera,
+                        clip,
+                        image,
+                        slot: 0,
+                        prepared: false,
+                        started: false,
+                        warmup_frames: 0,
+                    },
+                );
+            app.world_mut()
+                .resource_mut::<AnimationManagerInputGate>()
+                .window_open = true;
+            app.update();
+            assert!(app.world().get_entity(root).is_ok());
+            app.world_mut().despawn(window);
+            app.update();
+            for entity in [owned, root, clip, camera] {
+                assert!(app.world().get_entity(entity).is_err());
+            }
+            assert!(!app.world().resource::<Assets<Image>>().contains(image_id));
+            assert!(app.world().resource::<PreviewRuntime>().is_empty());
+            assert!(
+                !app.world()
+                    .resource::<AnimationManagerInputGate>()
+                    .window_open
+            );
+        }
+    }
     #[test]
     fn identical_rigs_have_disjoint_bake_targets() {
         let mut world = World::new();
@@ -363,6 +623,7 @@ mod tests {
             16,
         )))
         .init_resource::<PreviewRuntime>()
+        .init_resource::<super::super::CaretBlink>()
         .insert_resource(ManagerState::new())
         .add_systems(
             Update,
@@ -625,5 +886,133 @@ mod tests {
             );
         }
         eprintln!("Verified rapid selection: the last clicked clip owns desktop playback");
+
+        // Closing the manager must release cloned worlds/graphs/clips as well as
+        // entities, while the desktop rig and its selected animation stay alive.
+        use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
+        let roots = [preview, other];
+        let mut scenes = Vec::new();
+        let mut graphs = Vec::new();
+        let mut clips = Vec::new();
+        for root in roots {
+            let mut stack = vec![root];
+            while let Some(entity) = stack.pop() {
+                if let Some(children) = app.world().get::<Children>(entity) {
+                    stack.extend(children.iter());
+                }
+                if let Some(scene) = app.world().get::<WorldAssetRoot>(entity) {
+                    scenes.push(scene.0.id());
+                }
+                if let Some(graph) = app.world().get::<AnimationGraphHandle>(entity) {
+                    graphs.push(graph.0.id());
+                    if let Some(graph) = app
+                        .world()
+                        .resource::<Assets<AnimationGraph>>()
+                        .get(&graph.0)
+                    {
+                        for node in graph.graph.node_weights() {
+                            if let bevy::animation::graph::AnimationNodeType::Clip(handle) =
+                                &node.node_type
+                            {
+                                clips.push(handle.id());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!scenes.is_empty() && !graphs.is_empty() && !clips.is_empty());
+        app.init_resource::<super::super::AnimationManagerInputGate>()
+            .add_systems(PreUpdate, super::super::sync_manager_pointer_gate)
+            .add_systems(Update, super::super::cleanup_closed_window);
+        app.world_mut()
+            .resource_mut::<super::super::AnimationManagerInputGate>()
+            .window_open = true;
+        wait(&mut app, |world| {
+            world.resource::<PreviewRuntime>().is_empty()
+                && scenes
+                    .iter()
+                    .all(|id| !world.resource::<Assets<WorldAsset>>().contains(*id))
+                && graphs
+                    .iter()
+                    .all(|id| !world.resource::<Assets<AnimationGraph>>().contains(*id))
+                && clips
+                    .iter()
+                    .all(|id| !world.resource::<Assets<AnimationClip>>().contains(*id))
+        });
+        assert!(app.world().get_entity(desktop).is_ok());
+        eprintln!(
+            "Verified manager cleanup: preview worlds, graphs and clips released; desktop preserved"
+        );
+
+        // Exercise actual Bevy layout with a large library, including the final
+        // partial row. The scroll extent must stay constant as rows are recycled.
+        use super::super::{ManagerCamera, ManagerWindow, ui};
+        let target =
+            app.world_mut()
+                .resource_mut::<Assets<Image>>()
+                .add(Image::new_target_texture(
+                    1120,
+                    980,
+                    TextureFormat::Rgba8Unorm,
+                    Some(TextureFormat::Rgba8UnormSrgb),
+                ));
+        app.world_mut().spawn((ManagerWindow, Window::default()));
+        app.world_mut()
+            .spawn((ManagerCamera, Camera2d, RenderTarget::Image(target.into())));
+        {
+            let mut state = app.world_mut().resource_mut::<ManagerState>();
+            state.registry.entries = (0..10_000)
+                .map(|i| super::super::registry::AnimationEntry {
+                    key: format!("{i}.vrma"),
+                    display_name: format!("Animation {i}"),
+                    source: "Test".into(),
+                    emotion: "Neutral",
+                })
+                .collect();
+            state.dirty = true;
+        }
+        app.add_systems(Update, (ui::rebuild_ui, ui::sync_gallery_rows).chain());
+        for _ in 0..5 {
+            app.update();
+        }
+        let (scroll_entity, metrics) = {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<(Entity, &ComputedNode), With<GalleryScroll>>();
+            let (entity, node) = query.single(world).unwrap();
+            (entity, super::super::scroll_metrics(node))
+        };
+        assert!(
+            metrics.1 > 400.0 && metrics.1 < 980.0,
+            "gallery viewport must stay inside window: {metrics:?}"
+        );
+        assert!(
+            metrics.0 > 1_000_000.0,
+            "scroll extent must represent the full library"
+        );
+        app.world_mut()
+            .get_mut::<ScrollPosition>(scroll_entity)
+            .unwrap()
+            .0
+            .y = metrics.0;
+        app.world_mut().resource_mut::<ManagerState>().scroll_y = metrics.0;
+        for _ in 0..3 {
+            app.update();
+        }
+        let world = app.world_mut();
+        let mut query =
+            world.query::<(&PreviewSlot, &ComputedNode, &bevy::ui::UiGlobalTransform)>();
+        let cards: Vec<_> = query.iter(world).collect();
+        assert!(cards.len() <= 15);
+        let (_, node, transform) = cards
+            .iter()
+            .find(|(slot, _, _)| slot.index == 9999)
+            .unwrap();
+        assert_eq!(node.size().y, 280.0);
+        let center = **transform * Vec2::ZERO;
+        assert!(
+            center.y > 0.0 && center.y < 980.0,
+            "last card must actually be visible: {center:?}"
+        );
     }
 }

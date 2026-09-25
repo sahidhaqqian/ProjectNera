@@ -298,7 +298,7 @@ pub(crate) fn nera_utility_input_available(
 ) -> bool {
     settings::nera_input_available(settings_gate)
         && alarm_settings::nera_input_available(alarm_gate)
-        && !manager_gate.window_open
+        && !manager_gate.pointer_over_window
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -316,7 +316,7 @@ pub(crate) fn nera_utility_input_blocked(
 ) -> bool {
     settings::nera_input_blocked(settings_gate)
         || alarm_settings::nera_input_blocked(alarm_gate)
-        || manager_gate.window_open
+        || manager_gate.pointer_over_window
 }
 
 #[cfg(not(target_os = "windows"))]

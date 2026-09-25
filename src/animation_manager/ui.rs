@@ -1,12 +1,103 @@
 use bevy::{prelude::*, ui::UiTargetCamera};
 
 use super::{
-    Dialog, GalleryScroll, GalleryScrollbarThumb, GalleryTab, ManagerAction, ManagerCamera,
-    ManagerDragRegion, ManagerOwned, ManagerRoot, ManagerState, ManagerWindow, PreviewSlot,
-    TextFocus,
+    CaretBlink, Dialog, GalleryScroll, GalleryScrollbarThumb, GalleryScrollbarTrack, GalleryTab,
+    ManagerAction, ManagerCamera, ManagerDragRegion, ManagerOwned, ManagerRoot, ManagerState,
+    ManagerWindow, PreviewSlot, TextCaret, TextFocus,
 };
 
-pub(super) const ROW_HEIGHT: f32 = 232.0;
+pub(super) const ROW_HEIGHT: f32 = 360.0;
+pub(super) const COLUMNS: usize = 3;
+
+#[derive(Component)]
+pub(super) struct GalleryContent(usize);
+#[derive(Component)]
+pub(super) struct GalleryRow;
+#[derive(Component)]
+pub(super) struct GalleryCount(usize);
+
+pub(super) fn sync_gallery_count(
+    state: Res<ManagerState>,
+    scroll: Query<&ComputedNode, With<GalleryScroll>>,
+    mut labels: Query<(&GalleryCount, &mut Text)>,
+) {
+    let Ok(node) = scroll.single() else {
+        return;
+    };
+    let height = node.size().y * node.inverse_scale_factor();
+    for (count, mut text) in &mut labels {
+        let first = if count.0 == 0 {
+            0
+        } else {
+            ((state.scroll_y / ROW_HEIGHT).floor() as usize * COLUMNS + 1).min(count.0)
+        };
+        let last =
+            (((state.scroll_y + height) / ROW_HEIGHT).ceil() as usize * COLUMNS).min(count.0);
+        text.set_if_neq(Text::new(format!(
+            "{first} - {last} of {} animations",
+            count.0
+        )));
+    }
+}
+
+pub(super) fn visible_rows(scroll: f32, viewport: f32, count: usize) -> std::ops::Range<usize> {
+    let total = count.div_ceil(COLUMNS);
+    let first = (scroll.max(0.0) / ROW_HEIGHT).floor() as usize;
+    let start = first.saturating_sub(1).min(total);
+    start..(first + (viewport / ROW_HEIGHT).ceil() as usize + 2).min(total)
+}
+
+pub(super) fn sync_gallery_rows(
+    mut commands: Commands,
+    state: Res<ManagerState>,
+    scroll: Query<(Entity, &ComputedNode), With<GalleryScroll>>,
+    content: Query<(Entity, &GalleryContent)>,
+    rows: Query<Entity, With<GalleryRow>>,
+    mut previous: Local<Option<(Entity, std::ops::Range<usize>)>>,
+) {
+    let (Ok((scroll_entity, computed)), Ok((content, count))) = (scroll.single(), content.single())
+    else {
+        *previous = None;
+        return;
+    };
+    let range = visible_rows(
+        state.scroll_y,
+        computed.size().y * computed.inverse_scale_factor(),
+        count.0,
+    );
+    if previous.as_ref() == Some(&(scroll_entity, range.clone())) {
+        return;
+    }
+    let entries = state.filtered();
+    for row in &rows {
+        commands.entity(row).despawn();
+    }
+    commands.entity(content).with_children(|gallery| {
+        for row_number in range.clone() {
+            gallery
+                .spawn((
+                    GalleryRow,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: px(row_number as f32 * ROW_HEIGHT),
+                        width: percent(100),
+                        height: px(ROW_HEIGHT - 14.0),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(12),
+                        ..default()
+                    },
+                ))
+                .with_children(|row| {
+                    for index in
+                        row_number * COLUMNS..((row_number + 1) * COLUMNS).min(entries.len())
+                    {
+                        spawn_card(row, entries[index], index, &state);
+                    }
+                });
+        }
+    });
+    *previous = Some((scroll_entity, range));
+}
 const SHELL: Color = Color::srgba(0.032, 0.042, 0.078, 0.985);
 const CARD: Color = Color::srgba(0.055, 0.071, 0.122, 0.98);
 const OUTLINE: Color = Color::srgba(0.20, 0.27, 0.43, 0.85);
@@ -36,6 +127,41 @@ fn label(parent: &mut ChildSpawnerCommands, value: impl Into<String>, size: f32,
         },
         TextColor(color),
     ));
+}
+
+fn caret(parent: &mut ChildSpawnerCommands, visible: bool) {
+    parent.spawn((
+        TextCaret,
+        Text::new("|"),
+        TextFont {
+            font_size: FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(PRIMARY),
+        if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        },
+    ));
+}
+
+pub(super) fn blink_text_caret(
+    time: Res<Time>,
+    mut blink: ResMut<CaretBlink>,
+    mut carets: Query<&mut Visibility, With<TextCaret>>,
+) {
+    blink.timer.tick(time.delta());
+    if blink.timer.just_finished() {
+        blink.visible = !blink.visible;
+    }
+    for mut visibility in &mut carets {
+        *visibility = if blink.visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
 }
 
 fn button(
@@ -81,7 +207,7 @@ pub(super) fn rebuild_ui(
     for root in &roots {
         commands.entity(root).despawn();
     }
-    let entries: Vec<_> = state.filtered().into_iter().cloned().collect();
+    let entries = state.filtered();
     commands
         .spawn((
             Name::new("Nera Animation Manager UI"),
@@ -146,7 +272,7 @@ pub(super) fn rebuild_ui(
                                     label(title, "ANIMATIONS", 27.0, PRIMARY);
                                     label(
                                         title,
-                                        "Manage and preview your Nera animations",
+                                        "Drag the scrollbar or press Home / End to jump",
                                         13.0,
                                         MUTED,
                                     );
@@ -192,32 +318,26 @@ pub(super) fn rebuild_ui(
                                 ..default()
                             },
                             BackgroundColor(CARD),
-                            Outline::new(px(1), Val::ZERO, OUTLINE),
+                            Outline::new(
+                                px(1),
+                                Val::ZERO,
+                                if state.focus == TextFocus::Search {
+                                    BLUE
+                                } else {
+                                    OUTLINE
+                                },
+                            ),
                         ))
                         .with_children(|search| {
-                            let text = if state.search.is_empty() {
-                                "Search animations...".to_owned()
+                            let focused = state.focus == TextFocus::Search;
+                            if state.search.is_empty() && !focused {
+                                label(search, "Search animations...", 14.0, MUTED);
                             } else {
-                                format!(
-                                    "{}{}",
-                                    state.search,
-                                    if state.focus == TextFocus::Search {
-                                        "|"
-                                    } else {
-                                        ""
-                                    }
-                                )
-                            };
-                            label(
-                                search,
-                                text,
-                                14.0,
-                                if state.search.is_empty() {
-                                    MUTED
-                                } else {
-                                    PRIMARY
-                                },
-                            );
+                                label(search, state.search.clone(), 14.0, PRIMARY);
+                                if focused {
+                                    caret(search, true);
+                                }
+                            }
                         });
 
                     panel
@@ -237,7 +357,7 @@ pub(super) fn rebuild_ui(
                                         width: percent(100),
                                         height: percent(100),
                                         min_height: px(0),
-                                        padding: UiRect::right(px(12)),
+                                        padding: UiRect::right(px(20)),
                                         flex_direction: FlexDirection::Column,
                                         row_gap: px(14),
                                         overflow: Overflow::scroll_y(),
@@ -271,37 +391,32 @@ pub(super) fn rebuild_ui(
                                                 )
                                             });
                                     }
-                                    for (row_number, chunk) in entries.chunks(3).enumerate() {
-                                        gallery
-                                            .spawn(Node {
+                                    if !entries.is_empty() {
+                                        gallery.spawn((
+                                            GalleryContent(entries.len()),
+                                            Node {
                                                 width: percent(100),
-                                                height: px(218),
+                                                height: px(entries.len().div_ceil(COLUMNS) as f32
+                                                    * ROW_HEIGHT
+                                                    - 14.0),
                                                 flex_shrink: 0.0,
-                                                flex_direction: FlexDirection::Row,
-                                                column_gap: px(12),
                                                 ..default()
-                                            })
-                                            .with_children(|row| {
-                                                for (column, entry) in chunk.iter().enumerate() {
-                                                    spawn_card(
-                                                        row,
-                                                        entry,
-                                                        row_number * 3 + column,
-                                                        &state,
-                                                    );
-                                                }
-                                            });
+                                            },
+                                        ));
                                     }
                                 });
 
                             viewport
                                 .spawn((
+                                    Button,
+                                    GalleryScrollbarTrack,
+                                    bevy::ui::RelativeCursorPosition::default(),
                                     Node {
                                         position_type: PositionType::Absolute,
                                         right: px(1),
                                         top: px(2),
                                         bottom: px(2),
-                                        width: px(6),
+                                        width: px(14),
                                         border_radius: BorderRadius::all(px(4)),
                                         ..default()
                                     },
@@ -310,6 +425,7 @@ pub(super) fn rebuild_ui(
                                 .with_children(|track| {
                                     track.spawn((
                                         GalleryScrollbarThumb,
+                                        bevy::picking::Pickable::IGNORE,
                                         Node {
                                             position_type: PositionType::Absolute,
                                             top: px(0),
@@ -326,13 +442,33 @@ pub(super) fn rebuild_ui(
                     if let Some(error) = &state.error {
                         label(panel, error.clone(), 13.0, Color::srgb(1.0, 0.48, 0.53));
                     }
-                    button(
-                        panel,
-                        "Reset Previews",
-                        ManagerAction::Reset,
-                        percent(100),
-                        &state,
-                    );
+                    panel
+                        .spawn(Node {
+                            width: percent(100),
+                            height: px(44),
+                            flex_shrink: 0.0,
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        })
+                        .with_children(|footer| {
+                            footer.spawn((
+                                GalleryCount(entries.len()),
+                                Text::new(format!("{} animations", entries.len())),
+                                TextFont {
+                                    font_size: FontSize::Px(14.0),
+                                    ..default()
+                                },
+                                TextColor(MUTED),
+                            ));
+                            button(
+                                footer,
+                                "Reset Previews",
+                                ManagerAction::Reset,
+                                px(180),
+                                &state,
+                            );
+                        });
                     if let Some(dialog) = &state.dialog {
                         spawn_dialog(panel, dialog, &state);
                     }
@@ -371,7 +507,7 @@ fn spawn_card(
                 ImageNode::default(),
                 Node {
                     width: percent(100),
-                    height: px(151),
+                    height: px(280),
                     flex_shrink: 0.0,
                     border_radius: BorderRadius::all(px(14)),
                     ..default()
@@ -511,7 +647,15 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                                         ..default()
                                     },
                                     BackgroundColor(CARD),
-                                    Outline::new(px(1), Val::ZERO, OUTLINE),
+                                    Outline::new(
+                                        px(1),
+                                        Val::ZERO,
+                                        if state.focus == TextFocus::Rename {
+                                            BLUE
+                                        } else {
+                                            OUTLINE
+                                        },
+                                    ),
                                 ))
                                 .with_children(|field| {
                                     let suffix = if state
@@ -523,21 +667,11 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                                     } else {
                                         ".vrma"
                                     };
-                                    label(
-                                        field,
-                                        format!(
-                                            "{}{}{}",
-                                            state.rename_value,
-                                            suffix,
-                                            if state.focus == TextFocus::Rename {
-                                                "|"
-                                            } else {
-                                                ""
-                                            }
-                                        ),
-                                        14.0,
-                                        PRIMARY,
-                                    )
+                                    label(field, state.rename_value.clone(), 14.0, PRIMARY);
+                                    if state.focus == TextFocus::Rename {
+                                        caret(field, true);
+                                    }
+                                    label(field, suffix, 14.0, MUTED);
                                 });
                             modal
                                 .spawn(Node {
@@ -594,4 +728,53 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                     }
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ten_thousand_entries_only_build_nearby_cards_even_after_jumping_to_end() {
+        let mut app = App::new();
+        let mut state = ManagerState::new();
+        state.registry.entries = (0..10_000)
+            .map(|i| super::super::registry::AnimationEntry {
+                key: format!("{i}.vrma"),
+                display_name: format!("Animation {i}"),
+                source: "Test".into(),
+                emotion: "Neutral",
+            })
+            .collect();
+        app.insert_resource(state)
+            .add_systems(Update, sync_gallery_rows);
+        app.world_mut().spawn((
+            GalleryScroll,
+            ComputedNode {
+                size: Vec2::new(1000.0, 720.0),
+                inverse_scale_factor: 1.0,
+                ..default()
+            },
+        ));
+        app.world_mut()
+            .spawn((GalleryContent(10_000), Node::default()));
+        for row in [0, 1200, 3332, 0] {
+            app.world_mut().resource_mut::<ManagerState>().scroll_y = row as f32 * ROW_HEIGHT;
+            app.update();
+            let world = app.world_mut();
+            let slots: Vec<_> = world
+                .query::<&PreviewSlot>()
+                .iter(world)
+                .map(|slot| slot.index)
+                .collect();
+            assert!(
+                slots.len() <= 15,
+                "only viewport plus overscan should exist"
+            );
+            assert!(slots.contains(&(row * COLUMNS)));
+            if row == 3332 {
+                assert!(slots.contains(&9999));
+            }
+        }
+    }
 }
