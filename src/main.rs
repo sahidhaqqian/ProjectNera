@@ -220,6 +220,7 @@ fn main() {
             PostUpdate,
             avatar::apply_walking_pose
                 .after(bevy::app::AnimationSystems)
+                .after(animation::smooth_walking_cycle)
                 .before(VrmSystemSets::Constraints),
         )
         .add_systems(

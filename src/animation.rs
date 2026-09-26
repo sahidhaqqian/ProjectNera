@@ -21,11 +21,13 @@ mod playback;
 mod library;
 mod state;
 mod systems;
+mod walking_loop;
 
 pub(crate) use playback::*;
 pub(crate) use library::PlayLibraryAnimation;
 pub(crate) use state::*;
 pub(crate) use systems::*;
+pub(crate) use walking_loop::smooth_walking_cycle;
 
 pub(crate) struct NeraAnimationPlugin;
 
@@ -48,6 +50,20 @@ impl Plugin for NeraAnimationPlugin {
             .init_resource::<AlarmAnimationRuntime>()
             .init_resource::<IdleVariationRuntime>()
             .init_resource::<library::LibraryPlayback>()
+            .init_resource::<walking_loop::WalkingCycle>()
+            .add_systems(
+                PostUpdate,
+                walking_loop::seek_walking_cycle
+                    .after(bevy::animation::advance_animations)
+                    .before(bevy::animation::animate_targets)
+                    .in_set(bevy::app::AnimationSystems),
+            )
+            .add_systems(
+                PostUpdate,
+                smooth_walking_cycle
+                    .after(bevy::app::AnimationSystems)
+                    .before(bevy_vrm1::prelude::VrmSystemSets::Constraints),
+            )
             .add_message::<PlayLibraryAnimation>()
             .add_systems(
                 Update,

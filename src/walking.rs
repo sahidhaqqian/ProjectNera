@@ -165,7 +165,7 @@ pub(crate) fn update_walking(
         if runtime.cooldown > 0.0 {
             return;
         }
-        let distance = runtime.rng.range_f32(140.0, 240.0) * scale;
+        let distance = runtime.rng.range_f32(400.0, 700.0) * scale;
         let right = runtime.rng.next_f32() >= 0.5;
         let target = choose_target(rect.left, bounds, distance.round() as i32, right);
         if target == rect.left || !animation.set_walking(true) {
@@ -209,10 +209,12 @@ fn choose_target(left: i32, bounds: (i32, i32), distance: i32, prefer_right: boo
     } else {
         let right_room = max - left;
         let left_room = left - min;
+        // Prefer enough room for the whole walk; near an edge, head back
+        // across the desktop instead of taking another tiny step to the edge.
         if prefer_right {
-            right_room >= distance.min(64) || right_room >= left_room
+            right_room >= distance || right_room >= left_room
         } else {
-            left_room < distance.min(64) && right_room > left_room
+            left_room < distance && right_room > left_room
         }
     };
     if to_right {

@@ -130,6 +130,12 @@ cargo build --release
 
 Keep the `assets/` directory available with packaged builds. During repository development, the application resolves assets from the manifest directory; packaged execution falls back to an `assets` directory beside the executable.
 
+GitHub Actions artifacts include `nera.exe`, `assets/`, and `START-HERE.txt`.
+Download the debug or release artifact ZIP and **extract the entire ZIP** into
+one folder, then run the extracted `nera.exe`. Keep `assets/` beside it; moving
+only the executable causes `Path not found` errors for the model and animations.
+The workflow checks that required runtime assets were committed and packaged.
+
 ### Run
 
 ```powershell
