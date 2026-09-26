@@ -220,6 +220,10 @@ pub(crate) struct NeraSettings {
     /// feet slightly above the desktop support line; negative values sink them lower.
     pub(crate) ground_offset: i16,
 
+    /// Allows Nera to walk around the desktop while otherwise idle.
+    /// Disabled by default, including profiles created before walking existed.
+    pub(crate) walking_enabled: bool,
+
     /// Master switch for gaze behavior driven by the global mouse cursor.
     pub(crate) follow_mouse: bool,
     /// Enables VRM LookAt eye tracking while Follow Mouse is active.
@@ -309,6 +313,7 @@ impl Default for NeraSettings {
             window_y: 200,
             character_size: 100,
             ground_offset: 0,
+            walking_enabled: false,
             follow_mouse: true,
             follow_eyes: true,
             follow_head: false,
@@ -704,8 +709,30 @@ impl NeraSettings {
     }
 }
 
-/// Sent by the radial action menu. The Settings module owns what "opening
-/// settings" means, so action_menu.rs does not need to know about UI details.
+#[cfg(test)]
+mod walking_settings_tests {
+    use super::*;
+
+    #[test]
+    fn older_profiles_keep_walking_off_and_saved_choice_is_reflectable() {
+        // SettingsPlugin starts from Default and applies only persisted fields.
+        let mut legacy = bevy::reflect::structs::DynamicStruct::default();
+        legacy.insert("character_size", 125_u16);
+        legacy.insert("follow_mouse", false);
+        let mut settings = NeraSettings::default();
+        settings.apply(&legacy);
+        assert_eq!(settings.character_size, 125);
+        assert!(!settings.follow_mouse);
+        assert!(!settings.walking_enabled);
+
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("walking_enabled", true);
+        settings.apply(&saved);
+        assert!(settings.walking_enabled);
+        assert_eq!(settings.character_size, 125);
+    }
+}
+
 #[cfg(test)]
 mod alarm_book_tests {
     use super::*;

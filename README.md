@@ -59,6 +59,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Persistent Settings window with controls for:
   - always on top, Start with Windows, Start Hidden, and remembered position;
   - character size and ground offset;
+  - **Aktifkan jalan** checkbox (Yes/No, off by default): short automatic walks
+    along the current monitor's desktop floor, using `animasi_basic/Walking.vrma`;
   - mouse, eye, and upper-body gaze behavior;
   - shadow type, opacity, softness, and scene brightness;
   - master volume, mute, and FPS limit;
@@ -67,6 +69,13 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Saved settings, position recovery, deferred persistence during editing, and synchronous save on controlled exit paths.
 
 The radial menu currently shows **Chat**, **Productivity**, and **Games** as disabled placeholders. They are not implemented features.
+
+Walking starts after about six idle seconds once Settings and the radial menu
+are closed. Nera pauses between walks and yields to hovering, clicking, dragging,
+sitting, falls, selected animations, and alarms. Uncheck **Aktifkan jalan** to
+stop; the choice is saved. This first version does not walk along window tops.
+The protected `assets/animations/animasi_basic/` folder is included in Git; the
+rest of the local animation collection remains ignored.
 
 ## Tech Stack
 
@@ -165,11 +174,11 @@ ProjectNera/
 ├── assets/
 │   ├── animations/
 │   │   ├── Falling.vrma
-│   │   ├── Falling_To_Landing.vrma
-│   │   ├── animasi_basic/
+│   │   ├── animasi_basic/                 # 17 active, protected Nera animations
 │   │   ├── Clawatar_animations/
 │   │   ├── FreeMotionPack1_converted_21_vrma/
 │   │   ├── UAL1_converted_43_vrma/
+│   │   ├── Unused/                        # Former basic clips, editable stock
 │   │   └── VRMA/
 │   ├── shaders/
 │   │   └── nera_shadow_only.wgsl

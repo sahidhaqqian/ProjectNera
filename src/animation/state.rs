@@ -84,6 +84,7 @@ impl IdleMicroAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
+    Walking,
     Floating,
     Falling,
     Landing,
@@ -111,6 +112,8 @@ pub(super) enum SupportTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(super) enum AnimationPriority {
+    /// Autonomous movement yields to every existing animation request.
+    Walking = 30,
     /// Phase 5.8 idle fidgets. Below every real interaction layer, so a
     /// micro-action can never delay a reaction, a drag, physics, or the alarm.
     IdleVariation = 40,
@@ -126,6 +129,7 @@ pub(super) enum AnimationPriority {
 impl TemporaryAction {
     fn priority(self) -> AnimationPriority {
         match self {
+            Self::Walking => AnimationPriority::Walking,
             Self::HitHead | Self::HitChest | Self::HeadStroke => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
@@ -173,6 +177,7 @@ pub(super) struct TimedSupportTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VisualState {
     Idle,
+    Walking,
     SittingLoop,
     SittingEnter,
     SittingExit,
@@ -236,6 +241,9 @@ impl NeraAnimationState {
     }
 
     pub(super) fn set_base_pose(&mut self, pose: BasePose) {
+        if pose == BasePose::Sitting {
+            self.finish_action(TemporaryAction::Walking);
+        }
         if self.base_pose != pose {
             info!("Nera base pose: {:?} -> {:?}", self.base_pose, pose);
             self.base_pose = pose;
@@ -255,6 +263,7 @@ impl NeraAnimationState {
         // this Nera returns from Attention stuck in the Floating pose at
         // priority 80 — above every reaction.
         self.finish_action(TemporaryAction::Floating);
+        self.finish_action(TemporaryAction::Walking);
 
         self.bump_revision();
 
@@ -292,11 +301,12 @@ impl NeraAnimationState {
             return;
         }
 
-        // Same reasoning as `request_one_shot`: every persistent action
-        // outranks a fidget, so drop it instead of letting its tail resume
-        // when the persistent state ends.
-        self.active_actions
-            .retain(|active| !active.action.is_idle_variation());
+        // Autonomous actions never resume underneath a user interaction.
+        self.active_actions.retain(|active| {
+            !active.action.is_idle_variation()
+                && (action == TemporaryAction::Walking
+                    || active.action != TemporaryAction::Walking)
+        });
 
         self.active_actions.push(ActiveAction {
             action,
@@ -311,6 +321,8 @@ impl NeraAnimationState {
             warn!("Nera ignored {:?}: VRMA duration unavailable/zero", action);
             return;
         }
+
+        self.finish_action(TemporaryAction::Walking);
 
         // A fidget never survives anything else being requested. It is the
         // lowest layer, so resuming its tail once a reaction ends would look
@@ -407,6 +419,25 @@ impl NeraAnimationState {
 
         if before != self.active_actions.len() {
             info!("Nera action -{:?}", action);
+        }
+    }
+
+    /// Start a walk only when the standing idle layer is free. Returning true
+    /// means the walk is visible; callers must not move the desktop window
+    /// when a higher-priority animation rejected the request.
+    pub(crate) fn set_walking(&mut self, walking: bool) -> bool {
+        if !walking {
+            self.finish_action(TemporaryAction::Walking);
+            return false;
+        }
+
+        match self.visual_state() {
+            VisualState::Walking => true,
+            VisualState::Idle => {
+                self.start_persistent_action(TemporaryAction::Walking);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -566,10 +597,9 @@ impl NeraAnimationState {
 
     /// Actions that must not play while Nera is attached to a seat.
     ///
-    /// Both are standing clips. Playing one would visually pull her off the
-    /// surface her Seat anchor was calibrated against, so they stay logically
-    /// alive but never win the pose. A micro-action can only *start* while
-    /// `visual_state()` is Idle, but she can be sat down mid-fidget.
+    /// These are standing clips. Playing one would visually pull her off the
+    /// surface her Seat anchor was calibrated against. Walking is cancelled
+    /// when sitting starts; the others may remain alive without winning.
     fn suppressed_by_sitting(&self, action: TemporaryAction) -> bool {
         if self.base_pose != BasePose::Sitting {
             return false;
@@ -577,7 +607,7 @@ impl NeraAnimationState {
 
         matches!(
             action,
-            TemporaryAction::Floating | TemporaryAction::IdleMicro(_)
+            TemporaryAction::Walking | TemporaryAction::Floating | TemporaryAction::IdleMicro(_)
         )
     }
 
@@ -595,6 +625,7 @@ impl NeraAnimationState {
 
         if let Some(action) = self.highest_action() {
             return match action {
+                TemporaryAction::Walking => VisualState::Walking,
                 TemporaryAction::Floating => VisualState::Floating,
                 TemporaryAction::Falling => VisualState::Falling,
                 TemporaryAction::Landing => VisualState::Landing,
@@ -692,7 +723,8 @@ impl NeraAnimationState {
     /// overwrite ShakeHead/HitHead every frame.
     pub(crate) fn suppresses_look_at(&self) -> bool {
         match self.visual_state() {
-            VisualState::Falling
+            VisualState::Walking
+            | VisualState::Falling
             | VisualState::Landing
             | VisualState::HitHead
             | VisualState::HitChest

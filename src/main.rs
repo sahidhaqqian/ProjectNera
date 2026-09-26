@@ -19,6 +19,7 @@ mod platform;
 mod presentation;
 mod rng;
 mod settings;
+mod walking;
 
 #[cfg(target_os = "windows")]
 mod tray;
@@ -178,6 +179,7 @@ fn main() {
         .init_resource::<HoveredBodyPart>()
         .init_resource::<HeadPatGesture>()
         .init_resource::<desktop_physics::DesktopPhysicsState>()
+        .init_resource::<walking::WalkingRuntime>()
         .init_resource::<DeathVisualGrounding>()
         .add_systems(Startup, (setup_camera, setup_lighting, spawn_nera))
         .add_systems(
@@ -199,6 +201,9 @@ fn main() {
                 desktop_physics::update_desktop_physics.run_if(presentation::desktop_pet_active),
                 sync_environment_animation_state,
                 sync_interaction_animation_actions,
+                // Walking consumes current support and interaction decisions.
+                // Run even while blocked so pending motion is cancelled.
+                walking::update_walking,
                 // Phase 5.8 idle variation. Runs before the tick so a fidget
                 // requested this frame ages like every other one-shot, and
                 // before `apply_animation_state` so it plays without a frame of
@@ -210,6 +215,12 @@ fn main() {
                 apply_animation_state,
             )
                 .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            avatar::apply_walking_pose
+                .after(bevy::app::AnimationSystems)
+                .before(VrmSystemSets::Constraints),
         )
         .add_systems(
             PostUpdate,

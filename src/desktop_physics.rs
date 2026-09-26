@@ -94,6 +94,42 @@ impl Default for DesktopPhysicsState {
 }
 
 impl DesktopPhysicsState {
+    /// Autonomous movement is restricted to the current monitor's floor.
+    /// Window tops and sitting attachments keep their existing placement owner.
+    pub(crate) fn walking_floor(&self) -> Option<NativeMonitorHandle> {
+        if self.falling {
+            return None;
+        }
+        match self.support? {
+            PhysicsSupport::Desktop { monitor }
+            | PhysicsSupport::Taskbar { monitor, edge: TaskbarEdge::Bottom } => Some(monitor),
+            _ => None,
+        }
+    }
+
+    /// Keep native translation in the physics owner. The behavior controller
+    /// supplies a bounded horizontal step without changing the support anchor.
+    pub(crate) fn walk_horizontal(
+        &self,
+        left: i32,
+        environment: &mut DesktopEnvironment,
+    ) -> bool {
+        if self.walking_floor().is_none() || environment.placement != PlacementState::Free {
+            return false;
+        }
+        let (Some(hwnd), Some(rect)) = (environment.nera_hwnd, environment.nera_rect) else {
+            return false;
+        };
+        if left == rect.left {
+            return true;
+        }
+        if platform::move_window(hwnd, PhysicalPoint::new(left, rect.top)).is_err() {
+            return false;
+        }
+        environment.nera_rect = platform::window_rect(hwnd);
+        environment.nera_rect.is_some_and(|updated| updated.left == left)
+    }
+
     /// Refresh the rigid-body standing anchor after a deliberate geometry
     /// change such as Character Size / Ground Offset. Normal animation must
     /// not rewrite this anchor while physics owns it.

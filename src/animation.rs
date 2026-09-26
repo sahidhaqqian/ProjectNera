@@ -49,12 +49,23 @@ impl Plugin for NeraAnimationPlugin {
             .init_resource::<IdleVariationRuntime>()
             .init_resource::<library::LibraryPlayback>()
             .add_message::<PlayLibraryAnimation>()
-            .add_systems(Update, library::sync_library_animation.before(tick_animation_actions))
+            .add_systems(
+                Update,
+                library::sync_library_animation
+                    .before(crate::walking::update_walking)
+                    .before(tick_animation_actions),
+            )
             .add_message::<AlarmAnimationCommand>()
-            .add_systems(Update, sync_alarm_animation);
+            .add_systems(
+                Update,
+                sync_alarm_animation.before(crate::walking::update_walking),
+            );
 
         #[cfg(target_os = "windows")]
-        app.add_systems(Update, sync_action_menu_animation);
+        app.add_systems(
+            Update,
+            sync_action_menu_animation.before(crate::walking::update_walking),
+        );
     }
 }
 
@@ -65,6 +76,99 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     use crate::action_menu::AnimationMenuChoice;
+
+    #[test]
+    fn walking_loops_without_restarting_and_pauses_idle_variations() {
+        let mut state = NeraAnimationState::default();
+        assert!(state.set_walking(true));
+        let revision = state.revision;
+        assert!(state.set_walking(true));
+        assert_eq!(state.revision, revision);
+        assert!(state.suppresses_look_at());
+        assert!(!state.request_idle_variation(IdleMicroAction::Relax, Duration::from_secs(3)));
+
+        let mut runtime = runtime_with(7, Duration::from_secs(10));
+        runtime.tick(
+            Duration::from_secs(20),
+            &mut state,
+            &clips_with_all_micro_actions(),
+        );
+        assert_eq!(runtime.cooldown, Duration::from_secs(10));
+        state.advance(Duration::from_secs(60));
+        assert_eq!(state.visual_state(), VisualState::Walking);
+
+        state.set_walking(false);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+        assert!(!state.suppresses_look_at());
+    }
+
+    #[test]
+    fn interactions_interrupt_walking_without_resuming_it_afterwards() {
+        for action in [
+            TemporaryAction::Floating,
+            TemporaryAction::Falling,
+            TemporaryAction::Praying,
+            TemporaryAction::AlarmWave,
+        ] {
+            let mut state = NeraAnimationState::default();
+            assert!(state.set_walking(true));
+            state.start_persistent_action(action);
+            assert!(!state.set_walking(true), "{action:?} must own the pose");
+            state.finish_action(action);
+            assert_eq!(state.visual_state(), VisualState::Idle);
+        }
+
+        for action in [
+            TemporaryAction::HeadStroke,
+            TemporaryAction::HitHead,
+            TemporaryAction::HitChest,
+            TemporaryAction::Death,
+            TemporaryAction::Landing,
+            TemporaryAction::AlarmJump,
+            TemporaryAction::LibraryAnimation(Entity::PLACEHOLDER),
+        ] {
+            let mut state = NeraAnimationState::default();
+            assert!(state.set_walking(true));
+            state.request_one_shot(action, Duration::from_secs(1));
+            assert!(!state.set_walking(true), "{action:?} must own the pose");
+            state.advance(Duration::from_secs(2));
+            assert_eq!(state.visual_state(), VisualState::Idle);
+        }
+    }
+
+    #[test]
+    fn walking_waits_for_idle_and_is_cancelled_by_sitting_or_attention() {
+        let mut state = NeraAnimationState::default();
+        assert!(state.request_idle_variation(IdleMicroAction::Relax, Duration::from_secs(3)));
+        assert!(!state.set_walking(true));
+        state.advance(Duration::from_secs(3));
+        assert!(state.set_walking(true));
+
+        state.observe_sitting_surface(true, Duration::from_secs(1), Duration::ZERO);
+        assert!(!state.set_walking(true));
+        state.advance(Duration::from_secs(1));
+        assert!(!state.set_walking(true));
+        state.observe_sitting_surface(false, Duration::from_secs(1), Duration::ZERO);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+
+        assert!(state.set_walking(true));
+        state.suspend_support_for_attention();
+        state.restore_support_after_attention(false);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn walking_requires_a_loaded_nonzero_clip_and_uses_looped_playback() {
+        let mut clips = NeraAnimationClips::default();
+        assert!(!clips.walking_ready());
+        clips.walking = Some(clip(0));
+        assert!(!clips.walking_ready());
+        clips.walking = Some(clip(3));
+        assert!(clips.walking_ready());
+        let (slot, repeat, _) = clip_for_visual(VisualState::Walking, &clips);
+        assert_eq!(slot.unwrap().duration, Duration::from_secs(3));
+        assert_eq!(repeat, bevy::animation::RepeatAnimation::Forever);
+    }
 
     #[test]
     fn floating_overrides_reaction_then_reaction_returns() {

@@ -855,7 +855,7 @@ mod tests {
         // the final selection remains bound to its own graph node.
         app.world_mut()
             .write_message(crate::animation::PlayLibraryAnimation {
-                path: "animations/VRMA/Relax.vrma".into(),
+                path: "animations/animasi_basic/Relax.vrma".into(),
             });
         app.update();
         app.world_mut()

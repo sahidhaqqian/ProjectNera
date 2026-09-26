@@ -24,8 +24,8 @@ pub(super) struct ClipSlot {
 pub(crate) struct NeraAnimationClips {
     pub(super) library: Option<ClipSlot>,
     pub(super) idle: Option<ClipSlot>,
+    pub(super) walking: Option<ClipSlot>,
     pub(super) floating: Option<ClipSlot>,
-    pub(super) falling: Option<ClipSlot>,
     pub(super) falling_to_landing: Option<ClipSlot>,
     pub(super) death: Option<ClipSlot>,
     pub(super) alarm_wave: Option<ClipSlot>,
@@ -36,6 +36,7 @@ pub(crate) struct NeraAnimationClips {
     pub(super) praying: Option<ClipSlot>,
     pub(super) sitting_enter: Option<ClipSlot>,
     pub(super) sitting_loop: Option<ClipSlot>,
+    // Legacy resolver slot only: detach is immediate, so no exit clip is preloaded.
     pub(super) sitting_exit: Option<ClipSlot>,
 
     // Phase 5.8 idle micro-actions. Loaded asynchronously like everything
@@ -46,6 +47,8 @@ pub(crate) struct NeraAnimationClips {
     pub(super) idle_sleepy: Option<ClipSlot>,
     pub(super) idle_blush: Option<ClipSlot>,
 
+    // Legacy menu resolver slots remain empty. The current radial menu has no
+    // animation buttons, so these stock clips are not preloaded.
     #[cfg(target_os = "windows")]
     pub(super) wave: Option<ClipSlot>,
     #[cfg(target_os = "windows")]
@@ -59,6 +62,10 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    pub(crate) fn walking_ready(&self) -> bool {
+        self.walking.is_some_and(|clip| !clip.duration.is_zero())
+    }
+
     pub(crate) fn falling_to_landing_duration(&self) -> Duration {
         self.falling_to_landing
             .map(|clip| clip.duration)
@@ -98,8 +105,8 @@ macro_rules! register_clip {
 }
 
 register_clip!(register_idle_animation, idle, "Idle");
+register_clip!(register_walking_animation, walking, "Walking");
 register_clip!(register_floating_animation, floating, "Floating");
-register_clip!(register_falling_animation, falling, "Falling");
 register_clip!(
     register_falling_to_landing_animation,
     falling_to_landing,
@@ -118,7 +125,6 @@ register_clip!(
     "SittingEnter"
 );
 register_clip!(register_sitting_loop_animation, sitting_loop, "SittingLoop");
-register_clip!(register_sitting_exit_animation, sitting_exit, "SittingExit");
 
 // Phase 5.8 idle micro-actions.
 register_clip!(
@@ -130,48 +136,27 @@ register_clip!(register_idle_relax_animation, idle_relax, "Idle/Relax");
 register_clip!(register_idle_sleepy_animation, idle_sleepy, "Idle/Sleepy");
 register_clip!(register_idle_blush_animation, idle_blush, "Idle/Blush");
 
-#[cfg(target_os = "windows")]
-register_clip!(register_wave_animation, wave, "Menu/Wave");
-#[cfg(target_os = "windows")]
-register_clip!(register_thinking_animation, thinking, "Menu/Thinking");
-#[cfg(target_os = "windows")]
-register_clip!(register_angry_animation, angry, "Menu/Angry");
-#[cfg(target_os = "windows")]
-register_clip!(register_sad_animation, sad, "Menu/Sad");
-#[cfg(target_os = "windows")]
-register_clip!(register_surprised_animation, surprised, "Menu/Surprised");
-
 // Phase 5 runtime animation set. Large animation libraries stay as stock;
 // only stable animations used by current behavior live in animasi_basic.
 const IDLE_VRMA_PATH: &str = "animations/animasi_basic/idle.vrma";
+const WALKING_VRMA_PATH: &str = "animations/animasi_basic/Walking.vrma";
 const FLOATING_VRMA_PATH: &str = "animations/animasi_basic/Floating.vrma";
 const DEATH_VRMA_PATH: &str = "animations/animasi_basic/Death01.vrma";
-const FALLING_VRMA_PATH: &str = "animations/Falling.vrma";
-const FALLING_TO_LANDING_VRMA_PATH: &str = "animations/Falling_To_Landing.vrma";
+const FALLING_TO_LANDING_VRMA_PATH: &str = "animations/animasi_basic/Falling_To_Landing.vrma";
 const HIT_HEAD_VRMA_PATH: &str = "animations/animasi_basic/Hit_Head.vrma";
 const HIT_CHEST_VRMA_PATH: &str = "animations/animasi_basic/Hit_Chest.vrma";
 const HEAD_STROKE_VRMA_PATH: &str = "animations/animasi_basic/ShakeHeadNo1.vrma";
 const PRAYING_VRMA_PATH: &str = "animations/animasi_basic/Praying.vrma";
 const SITTING_ENTER_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Enter.vrma";
 const SITTING_LOOP_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Idle_Loop.vrma";
-const SITTING_EXIT_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Exit.vrma";
 
 // Phase 5.8 idle micro-actions. Fidgets only: Clapping/Goodbye/Jump are also
 // converted and unused, but a pet that randomly applauds while you work reads
 // as noise rather than life.
-const IDLE_LOOK_AROUND_VRMA_PATH: &str = "animations/VRMA/LookAround.vrma";
-const IDLE_RELAX_VRMA_PATH: &str = "animations/VRMA/Relax.vrma";
-const IDLE_SLEEPY_VRMA_PATH: &str = "animations/VRMA/Sleepy.vrma";
-const IDLE_BLUSH_VRMA_PATH: &str = "animations/VRMA/Blush.vrma";
-
-// Phase 5.5 menu-triggered animation library.
-// Only these five are preloaded; the hundreds of other downloaded VRMAs stay
-// as stock and consume no runtime animation slots yet.
-const MENU_WAVE_VRMA_PATH: &str = "animations/Clawatar_animations/161_Waving.vrma";
-const MENU_THINKING_VRMA_PATH: &str = "animations/VRMA/Thinking.vrma";
-const MENU_ANGRY_VRMA_PATH: &str = "animations/VRMA/Angry.vrma";
-const MENU_SAD_VRMA_PATH: &str = "animations/VRMA/Sad.vrma";
-const MENU_SURPRISED_VRMA_PATH: &str = "animations/VRMA/Surprised.vrma";
+const IDLE_LOOK_AROUND_VRMA_PATH: &str = "animations/animasi_basic/LookAround.vrma";
+const IDLE_RELAX_VRMA_PATH: &str = "animations/animasi_basic/Relax.vrma";
+const IDLE_SLEEPY_VRMA_PATH: &str = "animations/animasi_basic/Sleepy.vrma";
+const IDLE_BLUSH_VRMA_PATH: &str = "animations/animasi_basic/Blush.vrma";
 pub(crate) fn spawn_animation_library(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands<'_>,
     asset_server: &AssetServer,
@@ -182,6 +167,13 @@ pub(crate) fn spawn_animation_library(
                     VrmaHandle(asset_server.load(IDLE_VRMA_PATH)),
                 ))
                 .observe(register_idle_animation);
+
+            parent
+                .spawn((
+                    Name::new("Nera Walking"),
+                    VrmaHandle(asset_server.load(WALKING_VRMA_PATH)),
+                ))
+                .observe(register_walking_animation);
 
             parent
                 .spawn((
@@ -196,13 +188,6 @@ pub(crate) fn spawn_animation_library(
                     VrmaHandle(asset_server.load(DEATH_VRMA_PATH)),
                 ))
                 .observe(register_death_animation);
-
-            parent
-                .spawn((
-                    Name::new("Nera Falling"),
-                    VrmaHandle(asset_server.load(FALLING_VRMA_PATH)),
-                ))
-                .observe(register_falling_animation);
 
             parent
                 .spawn((
@@ -253,13 +238,6 @@ pub(crate) fn spawn_animation_library(
                 ))
                 .observe(register_sitting_loop_animation);
 
-            parent
-                .spawn((
-                    Name::new("Nera Sitting Exit"),
-                    VrmaHandle(asset_server.load(SITTING_EXIT_VRMA_PATH)),
-                ))
-                .observe(register_sitting_exit_animation);
-
             // Phase 5.8 idle micro-actions. Same child-of-"Nera" pattern as
             // everything else here: bevy_vrm1 needs the VRM ancestry to
             // retarget the clip.
@@ -291,40 +269,6 @@ pub(crate) fn spawn_animation_library(
                 ))
                 .observe(register_idle_blush_animation);
 
-            parent
-                .spawn((
-                    Name::new("Nera Menu Wave"),
-                    VrmaHandle(asset_server.load(MENU_WAVE_VRMA_PATH)),
-                ))
-                .observe(register_wave_animation);
-
-            parent
-                .spawn((
-                    Name::new("Nera Menu Thinking"),
-                    VrmaHandle(asset_server.load(MENU_THINKING_VRMA_PATH)),
-                ))
-                .observe(register_thinking_animation);
-
-            parent
-                .spawn((
-                    Name::new("Nera Menu Angry"),
-                    VrmaHandle(asset_server.load(MENU_ANGRY_VRMA_PATH)),
-                ))
-                .observe(register_angry_animation);
-
-            parent
-                .spawn((
-                    Name::new("Nera Menu Sad"),
-                    VrmaHandle(asset_server.load(MENU_SAD_VRMA_PATH)),
-                ))
-                .observe(register_sad_animation);
-
-            parent
-                .spawn((
-                    Name::new("Nera Menu Surprised"),
-                    VrmaHandle(asset_server.load(MENU_SURPRISED_VRMA_PATH)),
-                ))
-                .observe(register_surprised_animation);
 }
 
 #[derive(Resource, Default)]
@@ -345,6 +289,7 @@ pub(super) fn clip_for_visual(
             "Library",
         ),
         VisualState::Idle => (clips.idle, RepeatAnimation::Forever, "Idle"),
+        VisualState::Walking => (clips.walking, RepeatAnimation::Forever, "Walking"),
         VisualState::SittingLoop => (clips.sitting_loop, RepeatAnimation::Forever, "SittingLoop"),
         VisualState::SittingEnter => (
             clips.sitting_enter,
@@ -414,6 +359,7 @@ pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
         VisualState::SittingEnter | VisualState::SittingExit => SUPPORT_BLEND,
         VisualState::IdleMicro(_) => IDLE_VARIATION_BLEND,
         VisualState::Idle
+        | VisualState::Walking
         | VisualState::SittingLoop
         | VisualState::Floating
         | VisualState::Praying => BASE_BLEND,
@@ -435,6 +381,8 @@ pub(crate) fn apply_animation_state(
 
     let visual = state.visual_state();
     let visual_changed = playback.visual != Some(visual);
+    let leaving_walk = playback.visual == Some(VisualState::Walking)
+        && visual != VisualState::Walking;
 
     if visual_changed {
         info!(
@@ -473,7 +421,14 @@ pub(crate) fn apply_animation_state(
         return;
     }
 
-    let transition_duration = transition_for_visual(visual);
+    // Walking's horizontal hips motion is constrained after animation. Once
+    // another pose takes over, do not blend its unconstrained source motion
+    // into that pose: even a short fade could move Nera out of her window.
+    let transition_duration = if leaving_walk {
+        Duration::ZERO
+    } else {
+        transition_for_visual(visual)
+    };
 
     commands.trigger(PlayVrma {
         repeat,

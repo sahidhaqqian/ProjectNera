@@ -1,7 +1,7 @@
 //! Project the live avatar skeleton into desktop support anchors and ground Death poses.
 use super::NeraAvatar;
 use crate::{
-    animation::NeraAnimationState,
+    animation::{NeraAnimationState, VisualState},
     desktop_physics,
     environment::{DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, InteractionState},
@@ -60,6 +60,10 @@ fn death_fallback_floor_y_logical(environment: &DesktopEnvironment) -> Option<f3
     Some(rect.height().max(1) as f32 / scale * DEATH_FALLBACK_FLOOR_RATIO)
 }
 
+fn support_anchor_geometry(settings: &NeraSettings) -> (f32, f32) {
+    (settings.character_scale(), settings.ground_offset_logical())
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn update_avatar_anchors(
     interaction: Res<DesktopPetInteraction>,
@@ -68,6 +72,7 @@ pub(crate) fn update_avatar_anchors(
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
     mut grounding: ResMut<DeathVisualGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
+    mut applied_support_geometry: Local<Option<(f32, f32)>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
     mut avatar_query: Query<
         (&mut Transform, &GlobalTransform, Option<&HipsBoneEntity>),
@@ -151,12 +156,13 @@ pub(crate) fn update_avatar_anchors(
         }
     }
 
-    // Feet means *standing support*. Never rewrite the cached support anchor
-    // from a Death/Sitting/Floating pose.
+    // Feet means *standing support*. A sideways walking gait must not replace
+    // this cache either: a drag begun mid-walk resets physics and later reuses
+    // this standing sample when acquiring support after release.
     if environment.placement == PlacementState::Free
         && interaction.state != InteractionState::Dragging
         && interaction.drag_offset.is_none()
-        && !animation.death_active()
+        && !matches!(animation.visual_state(), VisualState::Death | VisualState::Walking)
         && !feet.is_empty()
     {
         let x = feet.iter().map(|point| point.x).sum::<f32>() / feet.len() as f32;
@@ -169,8 +175,15 @@ pub(crate) fn update_avatar_anchors(
 
         environment.set_feet_anchor(Vec2::new(x, y));
 
-        if settings.is_changed() && !physics.falling {
+        // Remembered HWND positions change settings on every walking step.
+        // Only geometry changes may replace the rigid standing support with
+        // the current pose; otherwise the gait would move its own floor.
+        // Retain a pending geometry change while airborne, then apply it on
+        // the next supported frame.
+        let geometry = support_anchor_geometry(&settings);
+        if *applied_support_geometry != Some(geometry) && !physics.falling {
             physics.refresh_support_anchor(environment.feet_anchor_logical);
+            *applied_support_geometry = Some(geometry);
         }
     }
 
@@ -273,6 +286,23 @@ pub(crate) fn update_avatar_anchors(
 mod tests {
     use super::*;
     use crate::platform::PhysicalRect;
+
+    #[test]
+    fn moving_the_window_or_toggling_walking_does_not_change_support_geometry() {
+        let mut settings = NeraSettings::default();
+        let standing_geometry = support_anchor_geometry(&settings);
+        settings.window_x += 200;
+        settings.window_y -= 100;
+        settings.walking_enabled = !settings.walking_enabled;
+        settings.follow_mouse = !settings.follow_mouse;
+        assert_eq!(support_anchor_geometry(&settings), standing_geometry);
+
+        settings.character_size = 125;
+        assert_ne!(support_anchor_geometry(&settings), standing_geometry);
+        let resized_geometry = support_anchor_geometry(&settings);
+        settings.ground_offset = 10;
+        assert_ne!(support_anchor_geometry(&settings), resized_geometry);
+    }
 
     #[test]
     fn death_fallback_uses_logical_height_independent_of_desktop_origin() {

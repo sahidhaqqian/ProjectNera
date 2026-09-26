@@ -166,9 +166,66 @@ pub(crate) fn sync_look_at_for_animation(
     }
 }
 
+/// Walking.vrma advances almost two metres along its local +Z axis. Desktop
+/// movement owns that travel, so preserve the vertical gait while constraining
+/// the live hips to their rest X/Z. This must run after AnimationSystems and
+/// before VrmSystemSets::Constraints, which precedes VRM transform propagation.
+pub(crate) fn apply_walking_pose(
+    animation: Res<NeraAnimationState>,
+    walking: Res<crate::walking::WalkingRuntime>,
+    mut original_rotation: Local<Option<(Entity, Quat)>>,
+    mut avatar_query: Query<(Entity, &mut Transform, &HipsBoneEntity), With<NeraAvatar>>,
+    mut bones: Query<(&mut Transform, &RestTransform), Without<NeraAvatar>>,
+) {
+    let Ok((entity, mut avatar, hips)) = avatar_query.single_mut() else {
+        return;
+    };
+    let direction = if animation.visual_state() == crate::animation::VisualState::Walking {
+        walking.direction()
+    } else {
+        0.0
+    };
+
+    if direction == 0.0 {
+        if let Some((owner, rotation)) = original_rotation.take() {
+            if owner == entity {
+                avatar.rotation = rotation;
+            }
+        }
+        return;
+    }
+
+    let (_, rotation) = *original_rotation.get_or_insert((entity, avatar.rotation));
+    // VRM's forward is +Z. Positive yaw turns it toward camera-right (+X).
+    avatar.rotation = rotation * Quat::from_rotation_y(direction * std::f32::consts::FRAC_PI_2);
+    if let Ok((mut transform, rest)) = bones.get_mut(hips.0) {
+        constrain_walking_hips(&mut transform, &rest.0);
+    }
+}
+
+fn constrain_walking_hips(transform: &mut Transform, rest: &Transform) {
+    transform.translation.x = rest.translation.x;
+    transform.translation.z = rest.translation.z;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walking_root_motion_is_removed_without_erasing_gait_or_bone_rotation() {
+        let rest = Transform::from_xyz(0.02, 0.9, -0.03);
+        let original = Transform {
+            translation: Vec3::new(-0.04, 0.94, 1.88),
+            rotation: Quat::from_rotation_y(0.15),
+            scale: Vec3::splat(0.95),
+        };
+        let mut hips = original;
+        constrain_walking_hips(&mut hips, &rest);
+        assert_eq!(hips.translation, Vec3::new(0.02, 0.94, -0.03));
+        assert_eq!(hips.rotation, original.rotation);
+        assert_eq!(hips.scale, original.scale);
+    }
 
     #[test]
     fn animation_temporarily_owns_gaze_then_restores_user_tracking() {

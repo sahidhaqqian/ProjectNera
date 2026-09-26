@@ -1,11 +1,18 @@
 //! Animation gallery utility window. Preview instances never carry `NeraAvatar`
 //! and never enter the production animation state resolver.
+mod base;
+mod combine;
+#[cfg(test)]
+mod combine_loader_tests;
 mod preview;
 pub(crate) mod process;
 mod registry;
 mod ui;
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use bevy::{
     camera::RenderTarget,
@@ -15,7 +22,9 @@ use bevy::{
         mouse::{MouseScrollUnit, MouseWheel},
     },
     prelude::*,
-    window::{WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints},
+    window::{
+        WindowCloseRequested, WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints,
+    },
 };
 use registry::AnimationRegistry;
 
@@ -67,6 +76,8 @@ struct ManagerDragRegion;
 #[derive(Component)]
 struct GalleryScroll;
 #[derive(Component)]
+struct CombineListScroll;
+#[derive(Component)]
 struct GalleryScrollbarThumb;
 #[derive(Component)]
 struct GalleryScrollbarTrack;
@@ -82,6 +93,7 @@ struct PreviewSlot {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GalleryTab {
+    Base,
     All,
     Bookmarks,
 }
@@ -90,17 +102,28 @@ enum TextFocus {
     None,
     Search,
     Rename,
+    CombineName,
 }
 #[derive(Clone)]
 enum Dialog {
     Rename(String),
     Delete(String),
+    Combine,
 }
+
+struct CombinePart {
+    key: String,
+    duration: f32,
+    start: f32,
+    end: f32,
+}
+type CombineResult = Arc<Mutex<Option<Result<PathBuf, String>>>>;
 
 #[derive(Component, Clone)]
 enum ManagerAction {
     Close,
     Back,
+    Base,
     All,
     Bookmarks,
     Search,
@@ -115,6 +138,13 @@ enum ManagerAction {
     ConfirmDelete,
     CancelDialog,
     Restart(String),
+    AddCombine(String),
+    OpenCombine,
+    RemoveCombine(usize),
+    MoveCombine(usize, bool),
+    TrimCombine(usize, bool, bool),
+    FocusCombineName,
+    ConfirmCombine,
 }
 
 #[derive(Resource)]
@@ -126,6 +156,10 @@ struct ManagerState {
     menu_key: Option<String>,
     dialog: Option<Dialog>,
     rename_value: String,
+    combine_parts: Vec<CombinePart>,
+    combine_name: String,
+    combine_scroll_y: f32,
+    combine_job: Option<CombineResult>,
     error: Option<String>,
     dirty: bool,
     scroll_y: f32,
@@ -140,14 +174,22 @@ impl ManagerState {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
             .join("ProjectNera/animation_bookmarks.txt");
+        Self::with_registry(AnimationRegistry::new(root, metadata))
+    }
+
+    fn with_registry(registry: AnimationRegistry) -> Self {
         Self {
-            registry: AnimationRegistry::new(root, metadata),
+            registry,
             tab: GalleryTab::All,
             search: String::new(),
             focus: TextFocus::None,
             menu_key: None,
             dialog: None,
             rename_value: String::new(),
+            combine_parts: Vec::new(),
+            combine_name: String::new(),
+            combine_scroll_y: 0.0,
+            combine_job: None,
             error: None,
             dirty: true,
             scroll_y: 0.0,
@@ -156,16 +198,30 @@ impl ManagerState {
         }
     }
 
+    #[cfg(test)]
+    fn for_test() -> Self {
+        let root = std::env::temp_dir().join(format!("nera-manager-empty-{}", std::process::id()));
+        Self::with_registry(AnimationRegistry::new(
+            root.join("assets"),
+            root.join("bookmarks.txt"),
+        ))
+    }
+
     fn filtered(&self) -> Vec<&registry::AnimationEntry> {
         let needle = self.search.to_lowercase();
         self.registry
             .entries
             .iter()
             .filter(|entry| {
-                (self.tab == GalleryTab::All || self.registry.bookmarks.contains(&entry.key))
-                    && (needle.is_empty()
-                        || entry.display_name.to_lowercase().contains(&needle)
-                        || entry.key.to_lowercase().contains(&needle))
+                (match self.tab {
+                    GalleryTab::Base => base::is_base_animation(&entry.key),
+                    GalleryTab::All => !self.registry.bookmarks.contains(&entry.key),
+                    GalleryTab::Bookmarks => self.registry.bookmarks.contains(&entry.key),
+                }) && (needle.is_empty()
+                    || entry.display_name.to_lowercase().contains(&needle)
+                    || entry.key.to_lowercase().contains(&needle)
+                    || base::base_label(&entry.key)
+                        .is_some_and(|label| label.to_lowercase().contains(&needle)))
             })
             .collect()
     }
@@ -185,13 +241,16 @@ impl Plugin for AnimationManagerPlugin {
                 Update,
                 (
                     open_window,
+                    handle_native_close,
                     handle_keyboard,
                     handle_scroll_keys,
                     handle_actions,
+                    poll_combine_result,
                     ui::rebuild_ui,
                     ui::blink_text_caret,
                     drag_window,
                     scroll_gallery,
+                    scroll_combine_list,
                     drag_gallery_scrollbar,
                     sync_gallery_scrollbar,
                     ui::sync_gallery_rows,
@@ -283,6 +342,10 @@ fn handle_keyboard(
     let Ok(window) = windows.single() else {
         return;
     };
+    if state.combine_job.is_some() {
+        keys.clear();
+        return;
+    }
     for event in keys.read() {
         if event.window != window || event.state != ButtonState::Pressed {
             continue;
@@ -308,10 +371,10 @@ fn handle_keyboard(
             }
             continue;
         }
-        let target = if focus == TextFocus::Search {
-            &mut state.search
-        } else {
-            &mut state.rename_value
+        let target = match focus {
+            TextFocus::Search => &mut state.search,
+            TextFocus::CombineName => &mut state.combine_name,
+            _ => &mut state.rename_value,
         };
         if event.logical_key == Key::Backspace {
             target.pop();
@@ -334,15 +397,10 @@ fn scroll_metrics(computed: &ComputedNode) -> (f32, f32) {
     ((content - viewport).max(0.0), viewport)
 }
 
-/// With a library containing hundreds or thousands of VRMAs, a traditional
-/// 3-line wheel step makes reaching the bottom impractical. Keep pixel/trackpad
-/// scrolling precise, but scale discrete wheel notches with the library size.
-fn line_scroll_step(max_scroll: f32) -> f32 {
-    if max_scroll <= ui::ROW_HEIGHT * 24.0 {
-        return ui::ROW_HEIGHT * 1.6;
-    }
-
-    (max_scroll * 0.08).max(ui::ROW_HEIGHT * 3.0)
+/// Keep wheel motion predictable regardless of the number of animations.
+/// A typical three-line wheel notch moves roughly one card row.
+fn line_scroll_step() -> f32 {
+    ui::ROW_HEIGHT * 0.30
 }
 
 fn handle_scroll_keys(
@@ -351,7 +409,7 @@ fn handle_scroll_keys(
     mut scroll: Query<(&mut ScrollPosition, &ComputedNode), With<GalleryScroll>>,
     mut state: ResMut<ManagerState>,
 ) {
-    if state.focus != TextFocus::None {
+    if state.focus != TextFocus::None || state.dialog.is_some() {
         return;
     }
     let Ok(window) = windows.single() else {
@@ -391,12 +449,74 @@ fn sync_manager_pointer_gate(
 }
 
 impl ManagerState {
+    fn apply_combine(&mut self) {
+        if self.combine_job.is_some() {
+            return;
+        }
+        let segments: Vec<_> = self
+            .combine_parts
+            .iter()
+            .map(|part| combine::Segment {
+                key: part.key.clone(),
+                start: part.start,
+                end: Some(part.end),
+            })
+            .collect();
+        let root = self.registry.root().to_owned();
+        let name = self.combine_name.clone();
+        let result: CombineResult = Arc::new(Mutex::new(None));
+        let worker_result = result.clone();
+        match std::thread::Builder::new()
+            .name("nera-combine".into())
+            .spawn(move || {
+                let outcome =
+                    std::panic::catch_unwind(|| combine::combine(&root, &segments, &name))
+                        .map_err(|_| "Combining failed unexpectedly".to_owned())
+                        .and_then(|outcome| outcome.map_err(|error| error.to_string()));
+                *worker_result
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(outcome);
+            }) {
+            Ok(_) => self.combine_job = Some(result),
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        self.dirty = true;
+    }
+
+    fn finish_combine(&mut self, result: Result<PathBuf, String>) {
+        match result {
+            Ok(path) => {
+                self.registry.refresh();
+                self.search = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                self.tab = GalleryTab::All;
+                self.scroll_y = 0.0;
+                self.dialog = None;
+                self.focus = TextFocus::None;
+                self.combine_parts.clear();
+                self.combine_name.clear();
+                self.combine_scroll_y = 0.0;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+        self.dirty = true;
+    }
+
     fn apply_rename(&mut self) {
         let Some(Dialog::Rename(key)) = self.dialog.clone() else {
             return;
         };
         match self.registry.rename(&key, &self.rename_value) {
-            Ok(_) => {
+            Ok(new_key) => {
+                for part in &mut self.combine_parts {
+                    if part.key == key {
+                        part.key = new_key.clone();
+                    }
+                }
                 self.dialog = None;
                 self.focus = TextFocus::None;
                 self.menu_key = None;
@@ -405,6 +525,17 @@ impl ManagerState {
             Err(error) => self.error = Some(error.to_string()),
         }
         self.dirty = true;
+    }
+}
+
+fn poll_combine_result(mut state: ResMut<ManagerState>) {
+    let result = state
+        .combine_job
+        .as_ref()
+        .and_then(|job| job.lock().ok()?.take());
+    if let Some(result) = result {
+        state.combine_job = None;
+        state.finish_combine(result);
     }
 }
 
@@ -428,6 +559,9 @@ fn handle_actions(
         if *interaction != Interaction::Pressed {
             continue;
         }
+        if state.combine_job.is_some() {
+            continue;
+        }
         state.error = None;
         match action {
             ManagerAction::Close => state.close_requested = true,
@@ -437,6 +571,12 @@ fn handle_actions(
             }
             ManagerAction::All => {
                 state.tab = GalleryTab::All;
+                state.scroll_y = 0.0;
+                state.dirty = true;
+            }
+            ManagerAction::Base => {
+                state.tab = GalleryTab::Base;
+                state.search.clear();
                 state.scroll_y = 0.0;
                 state.dirty = true;
             }
@@ -493,8 +633,17 @@ fn handle_actions(
                 state.dirty = true;
             }
             ManagerAction::Bookmark(key) => {
-                if let Err(error) = state.registry.toggle_bookmark(key) {
-                    state.error = Some(error.to_string());
+                match state.registry.toggle_bookmark(key) {
+                    Ok(new_key) => {
+                        for part in &mut state.combine_parts {
+                            if part.key == *key {
+                                part.key = new_key.clone();
+                            }
+                        }
+                        previews.remove(key, &mut commands, &mut images);
+                        state.scroll_y = 0.0;
+                    }
+                    Err(error) => state.error = Some(error.to_string()),
                 }
                 state.menu_key = None;
                 state.dirty = true;
@@ -505,6 +654,7 @@ fn handle_actions(
                     previews.remove(&key, &mut commands, &mut images);
                     match state.registry.delete(&key) {
                         Ok(()) => {
+                            state.combine_parts.retain(|part| part.key != key);
                             state.dialog = None;
                             state.error = None;
                         }
@@ -524,6 +674,63 @@ fn handle_actions(
                     path: format!("animations/{key}"),
                 });
             }
+            ManagerAction::AddCombine(key) => {
+                if let Some(path) = state.registry.path(key) {
+                    match combine::duration(&path) {
+                        Ok(duration) if duration > 0.01 => state.combine_parts.push(CombinePart {
+                            key: key.clone(),
+                            duration,
+                            start: 0.0,
+                            end: duration,
+                        }),
+                        Ok(_) => state.error = Some("Animation has no usable duration".into()),
+                        Err(error) => state.error = Some(error.to_string()),
+                    }
+                }
+                state.menu_key = None;
+                state.dirty = true;
+            }
+            ManagerAction::OpenCombine => {
+                state.dialog = Some(Dialog::Combine);
+                state.focus = TextFocus::None;
+                state.menu_key = None;
+                state.dirty = true;
+            }
+            ManagerAction::FocusCombineName => {
+                state.focus = TextFocus::CombineName;
+                caret.reset_visible();
+                state.dirty = true;
+            }
+            ManagerAction::RemoveCombine(index) => {
+                if *index < state.combine_parts.len() {
+                    state.combine_parts.remove(*index);
+                }
+                state.dirty = true;
+            }
+            ManagerAction::MoveCombine(index, up) => {
+                let next = if *up {
+                    index.saturating_sub(1)
+                } else {
+                    index + 1
+                };
+                if *index < state.combine_parts.len() && next < state.combine_parts.len() {
+                    state.combine_parts.swap(*index, next);
+                }
+                state.dirty = true;
+            }
+            ManagerAction::TrimCombine(index, start, increase) => {
+                if let Some(part) = state.combine_parts.get_mut(*index) {
+                    let delta = if *increase { 0.25 } else { -0.25 };
+                    if *start {
+                        part.start = (part.start + delta).clamp(0.0, (part.end - 0.01).max(0.0));
+                    } else {
+                        part.end = (part.end + delta)
+                            .clamp((part.start + 0.01).min(part.duration), part.duration);
+                    }
+                }
+                state.dirty = true;
+            }
+            ManagerAction::ConfirmCombine => state.apply_combine(),
         }
     }
 }
@@ -534,6 +741,10 @@ fn scroll_gallery(
     mut scroll: Query<(&mut ScrollPosition, &ComputedNode), With<GalleryScroll>>,
     mut state: ResMut<ManagerState>,
 ) {
+    if state.dialog.is_some() {
+        wheel.clear();
+        return;
+    }
     let Ok(window) = windows.single() else {
         return;
     };
@@ -546,13 +757,38 @@ fn scroll_gallery(
             continue;
         }
         let delta = match event.unit {
-            MouseScrollUnit::Line => event.y * line_scroll_step(max),
+            MouseScrollUnit::Line => event.y * line_scroll_step(),
             MouseScrollUnit::Pixel => event.y,
         };
         position.0.y = (position.0.y - delta).clamp(0.0, max);
         state.scroll_y = position.0.y;
     }
     state.scroll_y = position.0.y;
+}
+
+fn scroll_combine_list(
+    mut wheel: MessageReader<MouseWheel>,
+    mut state: ResMut<ManagerState>,
+    windows: Query<Entity, With<ManagerWindow>>,
+    mut scroll: Query<(&mut ScrollPosition, &ComputedNode), With<CombineListScroll>>,
+) {
+    if !matches!(state.dialog, Some(Dialog::Combine)) {
+        wheel.clear();
+        return;
+    }
+    let (Ok(window), Ok((mut position, node))) = (windows.single(), scroll.single_mut()) else {
+        return;
+    };
+    let (max, _) = scroll_metrics(node);
+    position.0.y = position.0.y.clamp(0.0, max);
+    for event in wheel.read().filter(|event| event.window == window) {
+        let delta = match event.unit {
+            MouseScrollUnit::Line => event.y * 30.0,
+            MouseScrollUnit::Pixel => event.y,
+        };
+        position.0.y = (position.0.y - delta).clamp(0.0, max);
+    }
+    state.combine_scroll_y = position.0.y;
 }
 
 fn sync_gallery_scrollbar(
@@ -654,7 +890,7 @@ fn close_after_release(
     mut commands: Commands,
     mut return_to_menu: MessageWriter<crate::settings::ReturnToActionMenu>,
 ) {
-    if !state.close_requested || mouse.pressed(MouseButton::Left) {
+    if !state.close_requested || mouse.pressed(MouseButton::Left) || state.combine_job.is_some() {
         return;
     }
     for entity in &windows {
@@ -674,6 +910,18 @@ fn close_after_release(
     state.focus = TextFocus::None;
     gate.window_open = false;
     gate.pointer_over_window = false;
+}
+
+fn handle_native_close(
+    mut requests: MessageReader<WindowCloseRequested>,
+    windows: Query<Entity, With<ManagerWindow>>,
+    mut state: ResMut<ManagerState>,
+) {
+    for request in requests.read() {
+        if windows.contains(request.window) {
+            state.close_requested = true;
+        }
+    }
 }
 
 fn cleanup_closed_window(
@@ -730,9 +978,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_close_waits_until_combine_export_finishes() {
+        let mut app = App::new();
+        let mut state = ManagerState::for_test();
+        state.combine_job = Some(Arc::new(Mutex::new(None)));
+        app.insert_resource(state)
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<AnimationManagerInputGate>()
+            .init_resource::<preview::PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .add_message::<WindowCloseRequested>()
+            .add_message::<crate::settings::ReturnToActionMenu>()
+            .add_systems(Update, (handle_native_close, close_after_release).chain());
+        let window = app.world_mut().spawn(ManagerWindow).id();
+        app.world_mut()
+            .write_message(WindowCloseRequested { window });
+        app.update();
+        assert!(app.world().get_entity(window).is_ok());
+        assert!(app.world().resource::<ManagerState>().close_requested);
+        app.world_mut().resource_mut::<ManagerState>().combine_job = None;
+        app.update();
+        assert!(app.world().get_entity(window).is_err());
+    }
+
+    #[test]
     fn scrollbar_click_and_drag_reach_both_ends_of_large_library() {
         let mut app = App::new();
-        app.insert_resource(ManagerState::new())
+        app.insert_resource(ManagerState::for_test())
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<ScrollbarDrag>()
             .add_systems(Update, drag_gallery_scrollbar);

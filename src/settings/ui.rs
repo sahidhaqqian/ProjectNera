@@ -75,6 +75,12 @@ pub(super) struct CharacterSizeValue;
 pub(super) struct GroundOffsetValue;
 
 #[derive(Component)]
+pub(super) struct WalkingEnabledValue;
+
+#[derive(Component)]
+pub(super) struct WalkingCheckmark;
+
+#[derive(Component)]
 pub(super) struct FollowMouseValue;
 
 #[derive(Component)]
@@ -127,6 +133,7 @@ pub(super) enum SettingsButtonAction {
     ToggleRememberPosition,
     CycleCharacterSize,
     CycleGroundOffset,
+    ToggleWalking,
     ToggleFollowMouse,
     ToggleFollowEyes,
     ToggleFollowHead,
@@ -355,6 +362,7 @@ fn spawn_settings_ui(
                         });
 
                         settings_card(scroll, "BEHAVIOR", |card| {
+                            walking_checkbox(card, settings.walking_enabled);
                             settings_row(
                                 card,
                                 "Follow mouse",
@@ -736,6 +744,103 @@ fn settings_row<M: Component>(
         });
 }
 
+fn walking_checkbox(parent: &mut ChildSpawnerCommands, enabled: bool) {
+    let action = SettingsButtonAction::ToggleWalking;
+    parent
+        .spawn(Node {
+            width: percent(100),
+            height: px(42),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            column_gap: px(14),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new("Aktifkan jalan"),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.82, 0.85, 0.94)),
+            ));
+            row.spawn((
+                Button,
+                action,
+                Name::new("Enable walking checkbox"),
+                Node {
+                    min_width: px(178),
+                    height: px(40),
+                    padding: UiRect::horizontal(px(16)),
+                    column_gap: px(10),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border_radius: BorderRadius::all(px(12)),
+                    ..default()
+                },
+                BackgroundColor(button_color(action, Interaction::None)),
+                Outline::new(px(1), Val::ZERO, Color::srgba(0.18, 0.23, 0.38, 0.9)),
+            ))
+            .with_children(|button| {
+                button
+                    .spawn((
+                        Node {
+                            width: px(22),
+                            height: px(22),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border_radius: BorderRadius::all(px(4)),
+                            ..default()
+                        },
+                        Outline::new(px(1), Val::ZERO, Color::srgb(0.64, 0.73, 0.95)),
+                    ))
+                    .with_children(|checkbox| {
+                        checkbox
+                            .spawn((
+                                WalkingCheckmark,
+                                Node {
+                                    width: px(18),
+                                    height: px(18),
+                                    display: if enabled { Display::Flex } else { Display::None },
+                                    ..default()
+                                },
+                            ))
+                            .with_children(|tick| {
+                                // Draw the tick directly: the bundled font is a
+                                // subset and need not contain a checkmark glyph.
+                                for (left, top, width, angle) in [
+                                    (2.0, 9.5, 6.0, 45.0),
+                                    (5.5, 7.5, 11.0, -45.0),
+                                ] {
+                                    tick.spawn((
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: px(left),
+                                            top: px(top),
+                                            width: px(width),
+                                            height: px(3),
+                                            border_radius: BorderRadius::all(px(1)),
+                                            ..default()
+                                        },
+                                        UiTransform::from_rotation(Rot2::degrees(angle)),
+                                        BackgroundColor(Color::srgb(0.61, 0.88, 0.74)),
+                                    ));
+                                }
+                            });
+                    });
+                button.spawn((
+                    WalkingEnabledValue,
+                    Text::new(if enabled { "Yes" } else { "No" }),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.88, 0.9, 0.98)),
+                ));
+            });
+        });
+}
+
 fn info_row(parent: &mut ChildSpawnerCommands, label: &'static str, value: String) {
     parent
         .spawn(Node {
@@ -829,6 +934,7 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::ToggleRememberPosition
         | SettingsButtonAction::CycleCharacterSize
         | SettingsButtonAction::CycleGroundOffset
+        | SettingsButtonAction::ToggleWalking
         | SettingsButtonAction::ToggleFollowMouse
         | SettingsButtonAction::ToggleFollowEyes
         | SettingsButtonAction::ToggleFollowHead
@@ -932,6 +1038,14 @@ pub(super) fn handle_settings_buttons(
                 info!(
                     "Settings: Ground offset -> {}",
                     settings.ground_offset_label()
+                );
+            }
+            SettingsButtonAction::ToggleWalking => {
+                settings.walking_enabled = !settings.walking_enabled;
+                save_settings_deferred(&mut commands);
+                info!(
+                    "Settings: Walking {}",
+                    if settings.walking_enabled { "ON" } else { "OFF" }
                 );
             }
             SettingsButtonAction::ToggleFollowMouse => {
@@ -1141,7 +1255,7 @@ pub(super) fn update_settings_labels(
         Option<&StartWithWindowsValue>,
         Option<&StartHiddenValue>,
         Option<&RememberPositionValue>,
-        Option<&FollowMouseValue>,
+        (Option<&WalkingEnabledValue>, Option<&FollowMouseValue>),
         Option<&FollowEyesValue>,
         Option<&FollowHeadValue>,
         Option<&FollowIntensityValue>,
@@ -1152,6 +1266,7 @@ pub(super) fn update_settings_labels(
         Option<&BrightnessValue>,
         Option<&FpsValue>,
     )>,
+    mut walking_checkmarks: Query<&mut Node, With<WalkingCheckmark>>,
 ) {
     if !settings.is_changed() && !startup_state.is_changed() {
         return;
@@ -1163,7 +1278,7 @@ pub(super) fn update_settings_labels(
         start_with_windows,
         start_hidden,
         remember_position,
-        follow_mouse,
+        (walking_enabled, follow_mouse),
         follow_eyes,
         follow_head,
         follow_intensity,
@@ -1188,6 +1303,8 @@ pub(super) fn update_settings_labels(
                 "OFF"
             }
             .into();
+        } else if walking_enabled.is_some() {
+            text.0 = if settings.walking_enabled { "Yes" } else { "No" }.into();
         } else if follow_mouse.is_some() {
             text.0 = if settings.follow_mouse { "ON" } else { "OFF" }.into();
         } else if follow_eyes.is_some() {
@@ -1209,6 +1326,14 @@ pub(super) fn update_settings_labels(
         } else if fps.is_some() {
             text.0 = settings.fps_label();
         }
+    }
+
+    for mut node in &mut walking_checkmarks {
+        node.display = if settings.walking_enabled {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -1317,4 +1442,38 @@ pub(super) fn observe_settings_window_removed(
     gate.window_open = false;
     gate.close_requested = false;
     gate.return_to_menu_requested = false;
+}
+
+#[cfg(test)]
+mod walking_checkbox_tests {
+    use super::*;
+
+    #[test]
+    fn labels_and_checkbox_refresh_when_walking_is_enabled_and_reset() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<StartupRuntime>()
+            .add_systems(Update, update_settings_labels);
+        let value = app.world_mut().spawn((Text::new(""), WalkingEnabledValue)).id();
+        let checkmark = app
+            .world_mut()
+            .spawn((Node::default(), WalkingCheckmark))
+            .id();
+        let follow = app.world_mut().spawn((Text::new(""), FollowMouseValue)).id();
+
+        app.update();
+        assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
+        assert_eq!(app.world().get::<Node>(checkmark).unwrap().display, Display::None);
+        assert_eq!(app.world().get::<Text>(follow).unwrap().0, "ON");
+
+        app.world_mut().resource_mut::<NeraSettings>().walking_enabled = true;
+        app.update();
+        assert_eq!(app.world().get::<Text>(value).unwrap().0, "Yes");
+        assert_eq!(app.world().get::<Node>(checkmark).unwrap().display, Display::Flex);
+
+        *app.world_mut().resource_mut::<NeraSettings>() = NeraSettings::default();
+        app.update();
+        assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
+        assert_eq!(app.world().get::<Node>(checkmark).unwrap().display, Display::None);
+    }
 }

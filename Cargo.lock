@@ -3229,6 +3229,7 @@ dependencies = [
  "bevy",
  "bevy_vrm1",
  "raw-window-handle",
+ "serde_json",
  "windows 0.62.2",
 ]
 

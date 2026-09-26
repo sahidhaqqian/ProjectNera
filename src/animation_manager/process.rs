@@ -175,6 +175,7 @@ pub(crate) fn run_worker() {
             })
             .set(WindowPlugin {
                 primary_window: None,
+                close_when_requested: false,
                 ..default()
             })
             .set(RenderPlugin {

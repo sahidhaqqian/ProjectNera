@@ -1,9 +1,9 @@
 use bevy::{prelude::*, ui::UiTargetCamera};
 
 use super::{
-    CaretBlink, Dialog, GalleryScroll, GalleryScrollbarThumb, GalleryScrollbarTrack, GalleryTab,
-    ManagerAction, ManagerCamera, ManagerDragRegion, ManagerOwned, ManagerRoot, ManagerState,
-    ManagerWindow, PreviewSlot, TextCaret, TextFocus,
+    CaretBlink, CombineListScroll, Dialog, GalleryScroll, GalleryScrollbarThumb,
+    GalleryScrollbarTrack, GalleryTab, ManagerAction, ManagerCamera, ManagerDragRegion,
+    ManagerOwned, ManagerRoot, ManagerState, ManagerWindow, PreviewSlot, TextCaret, TextFocus,
 };
 
 pub(super) const ROW_HEIGHT: f32 = 360.0;
@@ -110,7 +110,11 @@ pub(super) const BUTTON: Color = Color::srgb(0.095, 0.12, 0.21);
 
 pub(super) fn button_color(action: &ManagerAction, state: &ManagerState) -> Color {
     match action {
-        ManagerAction::Import | ManagerAction::Reset | ManagerAction::ConfirmRename => BLUE,
+        ManagerAction::Import
+        | ManagerAction::Reset
+        | ManagerAction::ConfirmRename
+        | ManagerAction::ConfirmCombine => BLUE,
+        ManagerAction::Base if state.tab == GalleryTab::Base => BLUE,
         ManagerAction::All if state.tab == GalleryTab::All => BLUE,
         ManagerAction::Bookmarks if state.tab == GalleryTab::Bookmarks => BLUE,
         ManagerAction::ConfirmDelete => Color::srgb(0.58, 0.13, 0.18),
@@ -290,20 +294,25 @@ pub(super) fn rebuild_ui(
                             ..default()
                         })
                         .with_children(|bar| {
-                            button(bar, "All Animations", ManagerAction::All, px(185), &state);
+                            button(bar, "Animasi Dasar", ManagerAction::Base, px(155), &state);
+                            button(bar, "All Animations", ManagerAction::All, px(155), &state);
                             button(
                                 bar,
                                 "*  Bookmarks",
                                 ManagerAction::Bookmarks,
-                                px(176),
+                                px(150),
                                 &state,
                             );
                             bar.spawn(Node {
                                 flex_grow: 1.0,
                                 ..default()
                             });
-                            button(bar, "Import VRMA", ManagerAction::Import, px(178), &state);
+                            button(bar, "Import VRMA", ManagerAction::Import, px(140), &state);
                         });
+
+                    if state.tab == GalleryTab::Base {
+                        label(panel, "Nera's core animations — preview or copy into Combine. Editing is locked.", 13.0, MUTED);
+                    }
 
                     panel
                         .spawn((
@@ -463,6 +472,13 @@ pub(super) fn rebuild_ui(
                             ));
                             button(
                                 footer,
+                                &format!("Combine ({})", state.combine_parts.len()),
+                                ManagerAction::OpenCombine,
+                                px(180),
+                                &state,
+                            );
+                            button(
+                                footer,
                                 "Reset Previews",
                                 ManagerAction::Reset,
                                 px(180),
@@ -534,7 +550,11 @@ fn spawn_card(
                         label(info, entry.display_name.clone(), 15.0, PRIMARY);
                         label(
                             info,
-                            format!("{} - {}", entry.emotion, entry.source),
+                            if let Some(label) = super::base::base_label(&entry.key) {
+                                format!("Dasar (locked) - {label}")
+                            } else {
+                                format!("{} - {}", entry.emotion, entry.source)
+                            },
                             12.0,
                             MUTED,
                         );
@@ -567,6 +587,25 @@ fn spawn_card(
                 .with_children(|menu| {
                     button(
                         menu,
+                        "Add to Combine",
+                        ManagerAction::AddCombine(key.clone()),
+                        percent(100),
+                        state,
+                    );
+                    if super::base::is_base_animation(&key) {
+                        label(menu, "Nera core - locked", 12.0, MUTED);
+                        if let Some(index) = super::base::base_order(&key) {
+                            label(
+                                menu,
+                                super::base::BASE_ANIMATIONS[index].purpose,
+                                12.0,
+                                MUTED,
+                            );
+                        }
+                        return;
+                    }
+                    button(
+                        menu,
                         "Rename",
                         ManagerAction::Rename(key.clone()),
                         percent(100),
@@ -596,6 +635,195 @@ fn spawn_card(
         });
 }
 
+fn spawn_combine_editor(modal: &mut ChildSpawnerCommands, state: &ManagerState) {
+    label(modal, "Combine animations", 24.0, PRIMARY);
+    label(
+        modal,
+        "Play clips in order. Trim in 0.25-second steps. Original files stay intact.",
+        13.0,
+        MUTED,
+    );
+    modal
+        .spawn((
+            CombineListScroll,
+            ScrollPosition(Vec2::new(0.0, state.combine_scroll_y)),
+            Node {
+                width: percent(100),
+                flex_grow: 1.0,
+                min_height: px(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(10),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+        ))
+        .with_children(|list| {
+            if state.combine_parts.is_empty() {
+                label(
+                    list,
+                    "Choose clips with each card's ... menu > Add to Combine, then return here.",
+                    16.0,
+                    MUTED,
+                );
+            }
+            for (index, part) in state.combine_parts.iter().enumerate() {
+                list.spawn((
+                    Node {
+                        width: percent(100),
+                        padding: UiRect::all(px(12)),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(8),
+                        border_radius: BorderRadius::all(px(10)),
+                        ..default()
+                    },
+                    BackgroundColor(CARD),
+                ))
+                .with_children(|clip| {
+                    label(clip, format!("{}. {}", index + 1, part.key), 14.0, PRIMARY);
+                    clip.spawn(Node {
+                        width: percent(100),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(8),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        label(row, format!("Start: {:.2}s", part.start), 14.0, MUTED);
+                        button(
+                            row,
+                            "-",
+                            ManagerAction::TrimCombine(index, true, false),
+                            px(40),
+                            state,
+                        );
+                        button(
+                            row,
+                            "+",
+                            ManagerAction::TrimCombine(index, true, true),
+                            px(40),
+                            state,
+                        );
+                        label(row, format!("End: {:.2}s", part.end), 14.0, MUTED);
+                        button(
+                            row,
+                            "-",
+                            ManagerAction::TrimCombine(index, false, false),
+                            px(40),
+                            state,
+                        );
+                        button(
+                            row,
+                            "+",
+                            ManagerAction::TrimCombine(index, false, true),
+                            px(40),
+                            state,
+                        );
+                        button(
+                            row,
+                            "Up",
+                            ManagerAction::MoveCombine(index, true),
+                            px(52),
+                            state,
+                        );
+                        button(
+                            row,
+                            "Down",
+                            ManagerAction::MoveCombine(index, false),
+                            px(72),
+                            state,
+                        );
+                        button(row, "X", ManagerAction::RemoveCombine(index), px(40), state);
+                    });
+                });
+            }
+        });
+    let total: f32 = state
+        .combine_parts
+        .iter()
+        .map(|part| part.end - part.start)
+        .sum();
+    label(
+        modal,
+        format!(
+            "{} clips · {:.2}s total · Save to animations/Combined",
+            state.combine_parts.len(),
+            total
+        ),
+        13.0,
+        MUTED,
+    );
+    if state.combine_job.is_some() {
+        label(
+            modal,
+            "Combining... Please wait while the new VRMA is saved.",
+            15.0,
+            PRIMARY,
+        );
+    }
+    modal
+        .spawn((
+            Button,
+            ManagerAction::FocusCombineName,
+            Node {
+                width: percent(100),
+                height: px(46),
+                flex_shrink: 0.0,
+                padding: UiRect::horizontal(px(12)),
+                align_items: AlignItems::Center,
+                border_radius: BorderRadius::all(px(10)),
+                ..default()
+            },
+            BackgroundColor(CARD),
+            Outline::new(
+                px(1),
+                Val::ZERO,
+                if state.focus == TextFocus::CombineName {
+                    BLUE
+                } else {
+                    OUTLINE
+                },
+            ),
+        ))
+        .with_children(|field| {
+            if state.combine_name.is_empty() && state.focus != TextFocus::CombineName {
+                label(field, "New animation name", 15.0, MUTED);
+            } else {
+                label(field, &state.combine_name, 15.0, PRIMARY);
+            }
+            if state.focus == TextFocus::CombineName {
+                caret(field, true);
+            }
+            if !state.combine_name.to_ascii_lowercase().ends_with(".vrma") {
+                label(field, ".vrma", 15.0, MUTED);
+            }
+        });
+    modal
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(12),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|row| {
+            button(
+                row,
+                "Add more / Back",
+                ManagerAction::CancelDialog,
+                px(215),
+                state,
+            );
+            button(
+                row,
+                "Create VRMA",
+                ManagerAction::ConfirmCombine,
+                px(200),
+                state,
+            );
+        });
+}
+
 fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &ManagerState) {
     parent
         .spawn((
@@ -616,7 +844,17 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
             overlay
                 .spawn((
                     Node {
-                        width: px(420),
+                        width: if matches!(dialog, Dialog::Combine) {
+                            px(750)
+                        } else {
+                            px(420)
+                        },
+                        height: if matches!(dialog, Dialog::Combine) {
+                            percent(88)
+                        } else {
+                            Val::Auto
+                        },
+                        max_height: px(820),
                         padding: UiRect::all(px(22)),
                         row_gap: px(14),
                         flex_direction: FlexDirection::Column,
@@ -631,6 +869,7 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                         label(modal, error.clone(), 13.0, Color::srgb(1.0, 0.48, 0.53));
                     }
                     match dialog {
+                        Dialog::Combine => spawn_combine_editor(modal, state),
                         Dialog::Rename(key) => {
                             label(modal, "Rename animation", 22.0, PRIMARY);
                             label(modal, key.rsplit('/').next().unwrap_or(key), 13.0, MUTED);
@@ -737,7 +976,7 @@ mod tests {
     #[test]
     fn ten_thousand_entries_only_build_nearby_cards_even_after_jumping_to_end() {
         let mut app = App::new();
-        let mut state = ManagerState::new();
+        let mut state = ManagerState::for_test();
         state.registry.entries = (0..10_000)
             .map(|i| super::super::registry::AnimationEntry {
                 key: format!("{i}.vrma"),
