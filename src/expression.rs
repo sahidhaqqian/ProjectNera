@@ -145,7 +145,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
     match visual {
         // Petting is affection; poking is not. `HitHead` feeds the three-hit
         // damage combo that ends in Death, so it reads as surprise, not joy.
-        Body::HeadStroke => Face::Happy,
+        Body::HeadStroke | Body::StartupGreeting => Face::Happy,
         Body::HitHead => Face::Surprised,
         Body::HitChest => Face::Angry,
         Body::Death => Face::Sad,
@@ -616,6 +616,18 @@ mod tests {
         assert_eq!(
             expression_for_visual(VisualState::AlarmJump),
             NeraExpression::Surprised,
+        );
+    }
+
+    #[test]
+    fn startup_wave_greets_happily_without_using_the_alarm_face() {
+        assert_eq!(
+            expression_for_visual(VisualState::StartupGreeting),
+            NeraExpression::Happy,
+        );
+        assert_ne!(
+            expression_for_visual(VisualState::StartupGreeting),
+            expression_for_visual(VisualState::AlarmWave),
         );
     }
 

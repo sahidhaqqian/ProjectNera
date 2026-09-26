@@ -70,6 +70,8 @@ pub(crate) fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>)
         .spawn((
             Name::new("Nera"),
             NeraAvatar,
+            // Reveal only once the startup entrance has a loaded rig and pose.
+            Visibility::Hidden,
             VrmHandle(asset_server.load(VRM_PATH)),
             LookAt::Target(target),
             Transform::from_xyz(0.0, -0.85, 0.0),

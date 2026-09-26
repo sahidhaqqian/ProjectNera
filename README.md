@@ -41,6 +41,9 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Prioritized animation state for idle, sitting, dragging/floating, physics, reactions, death, menu, and alarm behavior.
 - Sitting entry and seated loop animation tied to pose-first Seat-anchor calibration.
 - Falling and landing animation integrated with desktop support physics.
+- Once per visible startup: drop from above the monitor, finish landing, pause
+  briefly to notice the user, then greet with a happy, one-shot `161_Waving.vrma`.
+  User interactions can interrupt the entrance; Start Hidden skips it.
 - Head/chest hit reactions, head-stroke reaction, and a three-hit death combo.
 - Random idle micro-actions: Look Around, Relax, Sleepy, and Blush.
 - Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.

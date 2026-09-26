@@ -85,6 +85,7 @@ impl IdleMicroAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
     Walking,
+    StartupGreeting,
     Floating,
     Falling,
     Landing,
@@ -117,6 +118,8 @@ pub(super) enum AnimationPriority {
     /// Phase 5.8 idle fidgets. Below every real interaction layer, so a
     /// micro-action can never delay a reaction, a drag, physics, or the alarm.
     IdleVariation = 40,
+    /// The first greeting is automatic and yields immediately to the user.
+    StartupGreeting = 50,
     Reaction = 60,
     Menu = 70,
     Floating = 80,
@@ -130,6 +133,7 @@ impl TemporaryAction {
     fn priority(self) -> AnimationPriority {
         match self {
             Self::Walking => AnimationPriority::Walking,
+            Self::StartupGreeting => AnimationPriority::StartupGreeting,
             Self::HitHead | Self::HitChest | Self::HeadStroke => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
@@ -178,6 +182,7 @@ pub(super) struct TimedSupportTransition {
 pub(crate) enum VisualState {
     Idle,
     Walking,
+    StartupGreeting,
     SittingLoop,
     SittingEnter,
     SittingExit,
@@ -243,6 +248,7 @@ impl NeraAnimationState {
     pub(super) fn set_base_pose(&mut self, pose: BasePose) {
         if pose == BasePose::Sitting {
             self.finish_action(TemporaryAction::Walking);
+            self.cancel_startup_greeting();
         }
         if self.base_pose != pose {
             info!("Nera base pose: {:?} -> {:?}", self.base_pose, pose);
@@ -264,6 +270,7 @@ impl NeraAnimationState {
         // priority 80 — above every reaction.
         self.finish_action(TemporaryAction::Floating);
         self.finish_action(TemporaryAction::Walking);
+        self.cancel_startup_greeting();
 
         self.bump_revision();
 
@@ -293,6 +300,9 @@ impl NeraAnimationState {
     }
 
     pub(super) fn start_persistent_action(&mut self, action: TemporaryAction) {
+        if action.priority() > AnimationPriority::StartupGreeting {
+            self.cancel_startup_greeting();
+        }
         if self
             .active_actions
             .iter()
@@ -317,6 +327,11 @@ impl NeraAnimationState {
     }
 
     pub(super) fn request_one_shot(&mut self, action: TemporaryAction, duration: Duration) {
+        // A real interaction ends the greeting even when its own clip failed
+        // to load. It must never uncover the old wave when it finishes.
+        if action.priority() > AnimationPriority::StartupGreeting {
+            self.cancel_startup_greeting();
+        }
         if duration.is_zero() {
             warn!("Nera ignored {:?}: VRMA duration unavailable/zero", action);
             return;
@@ -439,6 +454,25 @@ impl NeraAnimationState {
             }
             _ => false,
         }
+    }
+
+    /// Play the startup wave once, only after the landing sequence has handed
+    /// control back to standing idle. The startup runtime owns once-per-launch
+    /// scheduling; this action never queues behind an interaction.
+    pub(crate) fn request_startup_greeting(&mut self, duration: Duration) -> bool {
+        if duration.is_zero()
+            || self.base_pose != BasePose::Idle
+            || self.visual_state() != VisualState::Idle
+        {
+            return false;
+        }
+
+        self.request_one_shot(TemporaryAction::StartupGreeting, duration);
+        true
+    }
+
+    pub(crate) fn cancel_startup_greeting(&mut self) {
+        self.finish_action(TemporaryAction::StartupGreeting);
     }
 
     /// Phase 5.8 idle variation entry point.
@@ -607,7 +641,10 @@ impl NeraAnimationState {
 
         matches!(
             action,
-            TemporaryAction::Walking | TemporaryAction::Floating | TemporaryAction::IdleMicro(_)
+            TemporaryAction::Walking
+                | TemporaryAction::StartupGreeting
+                | TemporaryAction::Floating
+                | TemporaryAction::IdleMicro(_)
         )
     }
 
@@ -626,6 +663,7 @@ impl NeraAnimationState {
         if let Some(action) = self.highest_action() {
             return match action {
                 TemporaryAction::Walking => VisualState::Walking,
+                TemporaryAction::StartupGreeting => VisualState::StartupGreeting,
                 TemporaryAction::Floating => VisualState::Floating,
                 TemporaryAction::Falling => VisualState::Falling,
                 TemporaryAction::Landing => VisualState::Landing,
@@ -724,6 +762,7 @@ impl NeraAnimationState {
     pub(crate) fn suppresses_look_at(&self) -> bool {
         match self.visual_state() {
             VisualState::Walking
+            | VisualState::StartupGreeting
             | VisualState::Falling
             | VisualState::Landing
             | VisualState::HitHead

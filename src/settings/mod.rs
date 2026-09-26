@@ -41,7 +41,8 @@ impl Plugin for NeraSettingsPlugin {
             .add_systems(
                 Update,
                 (
-                    apply_remembered_position,
+                    apply_remembered_position
+                        .before(crate::startup_entrance::prepare_startup_entrance),
                     record_primary_window_position,
                     flush_position_save,
                     open_settings_window,
@@ -53,7 +54,7 @@ impl Plugin for NeraSettingsPlugin {
                     update_character_settings_labels,
                     update_audio_settings_labels,
                     apply_always_on_top,
-                    apply_character_size,
+                    apply_character_size.before(crate::startup_entrance::prepare_startup_entrance),
                     apply_audio_settings,
                     apply_fps_limit,
                     cleanup_settings_window,

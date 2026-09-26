@@ -22,6 +22,7 @@ use crate::{
     desktop_physics::DesktopPhysicsState,
     environment::{DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, InteractionState, NeraLiveBone},
+    startup_entrance::StartupEntrance,
 };
 
 use super::NeraSettings;
@@ -176,8 +177,12 @@ fn shadow_is_grounded(
     environment: &DesktopEnvironment,
     physics: &DesktopPhysicsState,
     interaction: &DesktopPetInteraction,
+    entrance: Option<&StartupEntrance>,
 ) -> bool {
     settings.shadow_enabled
+        // Shadow entities are separate roots: hiding the loading avatar does
+        // not hide them. Keep both shadow modes off until Nera is revealed.
+        && !entrance.is_some_and(StartupEntrance::is_waiting)
         && environment.placement == PlacementState::Free
         && interaction.state != InteractionState::Dragging
         && !physics.falling
@@ -189,6 +194,7 @@ fn apply_simple_shadow(
     environment: Res<DesktopEnvironment>,
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
+    entrance: Option<Res<StartupEntrance>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -199,6 +205,7 @@ fn apply_simple_shadow(
         &environment,
         &physics,
         &interaction,
+        entrance.as_deref(),
     ) && settings.uses_simple_shadow();
 
     let opacity = settings.shadow_opacity.clamp(0, 100) as f32 / 100.0;
@@ -338,6 +345,7 @@ fn apply_character_shadow_receiver(
     environment: Res<DesktopEnvironment>,
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
+    entrance: Option<Res<StartupEntrance>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<ShadowOnlyMaterial>>,
@@ -352,6 +360,7 @@ fn apply_character_shadow_receiver(
         &environment,
         &physics,
         &interaction,
+        entrance.as_deref(),
     ) && settings.uses_character_shadow();
 
     let ground = if should_show {
@@ -387,6 +396,7 @@ fn apply_light_settings(
     environment: Res<DesktopEnvironment>,
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
+    entrance: Option<Res<StartupEntrance>>,
     mut lights: Query<&mut DirectionalLight>,
 ) {
     let multiplier = settings.brightness.clamp(50, 200) as f32 / 100.0;
@@ -395,6 +405,7 @@ fn apply_light_settings(
         &environment,
         &physics,
         &interaction,
+        entrance.as_deref(),
     ) && settings.uses_character_shadow();
 
     for mut light in &mut lights {
@@ -403,5 +414,33 @@ fn apply_light_settings(
         // Contact shadows are screen-space and are not the desktop projection
         // effect we want here. Keep them disabled even in Character mode.
         light.contact_shadows_enabled = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_avatar_has_no_shadow_but_scenes_without_entrance_keep_shadows() {
+        let mut app = App::new();
+        app.insert_resource(NeraSettings { shadow_type: 1, ..default() })
+            .insert_resource(DesktopEnvironment {
+                feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
+                ..default()
+            })
+            .init_resource::<DesktopPhysicsState>()
+            .init_resource::<DesktopPetInteraction>()
+            .init_resource::<StartupEntrance>()
+            .add_systems(Update, apply_light_settings);
+        let light = app.world_mut().spawn(DirectionalLight::default()).id();
+
+        app.update();
+        assert!(!app.world().get::<DirectionalLight>(light).unwrap().shadow_maps_enabled);
+
+        // Preview/gallery scenes do not install the startup entrance resource.
+        app.world_mut().remove_resource::<StartupEntrance>();
+        app.update();
+        assert!(app.world().get::<DirectionalLight>(light).unwrap().shadow_maps_enabled);
     }
 }

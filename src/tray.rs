@@ -42,7 +42,10 @@ pub struct TrayPlugin;
 impl Plugin for TrayPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, start_system_tray)
-            .add_systems(Update, process_tray_commands);
+            .add_systems(
+                Update,
+                process_tray_commands.before(crate::startup_entrance::prepare_startup_entrance),
+            );
     }
 }
 
@@ -239,6 +242,8 @@ fn process_tray_commands(
     mut physics: ResMut<DesktopPhysicsState>,
 
     mut animation: ResMut<NeraAnimationState>,
+
+    mut entrance: ResMut<crate::startup_entrance::StartupEntrance>,
 ) {
     let Some(runtime) = runtime else {
         return;
@@ -306,6 +311,7 @@ fn process_tray_commands(
 
                 // Recovery is authoritative: any sitting/window attachment or
                 // in-progress fall must stop owning the HWND before we move it.
+                entrance.request_cancel();
                 environment.detach_nera();
                 physics.reset_for_position_recovery();
                 animation.cancel_physics_motion();

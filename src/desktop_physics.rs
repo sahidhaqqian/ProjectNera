@@ -78,6 +78,9 @@ pub(crate) struct DesktopPhysicsState {
     /// unsupported fall begins. This prevents edge/corner support jitter from
     /// replaying Falling_To_Landing.
     landing_latched: bool,
+    /// During the startup entrance, land on the chosen monitor's floor instead
+    /// of an unrelated application window crossed on the way down.
+    startup_monitor: Option<NativeMonitorHandle>,
 }
 
 impl Default for DesktopPhysicsState {
@@ -89,11 +92,43 @@ impl Default for DesktopPhysicsState {
             support_anchor_logical: None,
             subpixel_y: 0.0,
             landing_latched: false,
+            startup_monitor: None,
         }
     }
 }
 
 impl DesktopPhysicsState {
+    pub(crate) fn begin_startup_drop(
+        &mut self,
+        environment: &mut DesktopEnvironment,
+        animation: &mut NeraAnimationState,
+    ) -> bool {
+        let (Some(hwnd), Some(rect), Some(monitor), Some(anchor)) = (
+            environment.nera_hwnd, environment.nera_rect, environment.monitor,
+            environment.feet_anchor_logical,
+        ) else { return false };
+        let Some(origin) = startup_drop_origin(rect, monitor.work_area, anchor, environment.nera_scale_factor) else {
+            return false;
+        };
+        if platform::move_window(hwnd, origin).is_err() {
+            return false;
+        }
+        environment.nera_rect = platform::window_rect(hwnd);
+        if environment.nera_rect.is_none() {
+            return false;
+        }
+        self.reset_for_position_recovery();
+        self.support_anchor_logical = Some(anchor);
+        self.startup_monitor = Some(monitor.handle);
+        self.falling = true;
+        animation.set_physics_falling(true);
+        true
+    }
+
+    pub(crate) fn cancel_startup_drop(&mut self) {
+        self.startup_monitor = None;
+    }
+
     /// Autonomous movement is restricted to the current monitor's floor.
     /// Window tops and sitting attachments keep their existing placement owner.
     pub(crate) fn walking_floor(&self) -> Option<NativeMonitorHandle> {
@@ -152,6 +187,7 @@ impl DesktopPhysicsState {
         self.support_anchor_logical = None;
         self.subpixel_y = 0.0;
         self.landing_latched = false;
+        self.startup_monitor = None;
     }
 }
 
@@ -192,6 +228,17 @@ pub(crate) fn update_desktop_physics(
     let Some(rect) = environment.nera_rect else {
         return;
     };
+
+    // Moving the transparent canvas above the screen can make Windows report
+    // a different nearest monitor. Keep the intended landing monitor until
+    // touchdown, while refreshing its geometry if the work area changes.
+    if let Some(target) = physics.startup_monitor {
+        if let Some(monitor) = platform::enumerate_monitors().into_iter().find(|m| m.handle == target) {
+            environment.monitor = Some(monitor);
+        } else {
+            physics.startup_monitor = None;
+        }
+    }
 
     // Capture the *standing* feet anchor once, before Falling/Landing can
     // animate those bones away from the support point. The environment keeps
@@ -258,6 +305,7 @@ pub(crate) fn update_desktop_physics(
             physics.subpixel_y = 0.0;
             physics.falling = false;
             physics.support = Some(floor.support);
+            physics.startup_monitor = None;
 
             if was_falling && !physics.landing_latched {
                 animation.land_from_fall(clips.falling_to_landing_duration());
@@ -318,7 +366,13 @@ pub(crate) fn update_desktop_physics(
 
     let next_feet_y = feet.y.saturating_add(delta_y);
 
-    if let Some(hit) = first_surface_crossed(feet, next_feet_y, &environment) {
+    let hit = if physics.startup_monitor.is_some() {
+        floor_surface_for_feet(feet, &environment)
+            .filter(|floor| feet.y <= floor.y && next_feet_y >= floor.y)
+    } else {
+        first_surface_crossed(feet, next_feet_y, &environment)
+    };
+    if let Some(hit) = hit {
         let desired_top = rect.top + (hit.y - feet.y);
         move_nera(hwnd, rect.left, desired_top, &mut environment);
 
@@ -326,6 +380,7 @@ pub(crate) fn update_desktop_physics(
         physics.subpixel_y = 0.0;
         physics.falling = false;
         physics.support = Some(hit.support);
+        physics.startup_monitor = None;
 
         if !physics.landing_latched {
             animation.land_from_fall(clips.falling_to_landing_duration());
@@ -353,6 +408,7 @@ fn reset_freefall(physics: &mut DesktopPhysicsState, animation: &mut NeraAnimati
     physics.support = None;
     physics.support_anchor_logical = None;
     physics.landing_latched = false;
+    physics.startup_monitor = None;
     animation.cancel_physics_motion();
 }
 
@@ -380,5 +436,40 @@ fn keep_feet_on_surface(
 fn move_nera(hwnd: NativeWindowHandle, x: i32, y: i32, environment: &mut DesktopEnvironment) {
     if platform::move_window(hwnd, PhysicalPoint::new(x, y)).is_ok() {
         environment.nera_rect = platform::window_rect(hwnd);
+    }
+}
+
+fn startup_drop_origin(
+    rect: PhysicalRect,
+    work: PhysicalRect,
+    feet: Vec2,
+    scale: f64,
+) -> Option<PhysicalPoint> {
+    if !feet.is_finite() || !scale.is_finite() || scale <= 0.0 || work.width() <= 0 || work.height() <= 0 {
+        return None;
+    }
+    let max_left = work.right.saturating_sub(rect.width()).max(work.left);
+    let left = rect.left.clamp(work.left, max_left);
+    let top = work.top
+        .saturating_sub((feet.y * scale as f32).round() as i32)
+        .saturating_sub((24.0 * scale).round() as i32);
+    Some(PhysicalPoint::new(left, top))
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn entrance_starts_above_target_monitor_at_its_dpi_and_preserves_safe_x() {
+        let work = PhysicalRect { left: -1920, top: 1080, right: 0, bottom: 2120 };
+        let rect = PhysicalRect { left: -1700, top: 1200, right: -950, bottom: 2387 };
+        let feet = Vec2::new(300.0, 800.0);
+        let origin = startup_drop_origin(rect, work, feet, 1.25).unwrap();
+        assert_eq!(origin.x, -1700);
+        assert_eq!(origin.y + (feet.y * 1.25) as i32, work.top - 30);
+        let offscreen = PhysicalRect { left: -4000, ..rect };
+        assert_eq!(startup_drop_origin(offscreen, work, feet, 1.25).unwrap().x, work.left);
+        assert!(startup_drop_origin(rect, work, Vec2::NAN, 1.25).is_none());
     }
 }

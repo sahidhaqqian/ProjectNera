@@ -68,19 +68,24 @@ impl Plugin for NeraAnimationPlugin {
             .add_systems(
                 Update,
                 library::sync_library_animation
+                    .before(crate::startup_entrance::prepare_startup_entrance)
                     .before(crate::walking::update_walking)
                     .before(tick_animation_actions),
             )
             .add_message::<AlarmAnimationCommand>()
             .add_systems(
                 Update,
-                sync_alarm_animation.before(crate::walking::update_walking),
+                sync_alarm_animation
+                    .before(crate::startup_entrance::prepare_startup_entrance)
+                    .before(crate::walking::update_walking),
             );
 
         #[cfg(target_os = "windows")]
         app.add_systems(
             Update,
-            sync_action_menu_animation.before(crate::walking::update_walking),
+            sync_action_menu_animation
+                .before(crate::startup_entrance::prepare_startup_entrance)
+                .before(crate::walking::update_walking),
         );
     }
 }
@@ -92,6 +97,135 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     use crate::action_menu::AnimationMenuChoice;
+
+    #[test]
+    fn startup_greeting_runs_once_then_releases_idle_and_gaze() {
+        let mut state = NeraAnimationState::default();
+        assert!(!state.request_startup_greeting(Duration::ZERO));
+        assert!(state.request_startup_greeting(Duration::from_secs(3)));
+        let revision = state.revision;
+        assert!(!state.request_startup_greeting(Duration::from_secs(3)));
+        assert_eq!(state.revision, revision, "the same wave must not restart");
+        assert_eq!(state.visual_state(), VisualState::StartupGreeting);
+        assert!(state.suppresses_look_at());
+        assert!(!state.set_walking(true));
+        assert!(!state.request_idle_variation(IdleMicroAction::Relax, Duration::from_secs(2)));
+
+        state.advance(Duration::from_secs(2));
+        assert_eq!(state.visual_state(), VisualState::StartupGreeting);
+        state.advance(Duration::from_secs(1));
+        assert_eq!(state.visual_state(), VisualState::Idle);
+        assert!(!state.suppresses_look_at());
+        state.advance(Duration::from_secs(60));
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn startup_greeting_is_rejected_until_standing_idle() {
+        let mut state = NeraAnimationState::default();
+        state.set_physics_falling(true);
+        assert!(!state.request_startup_greeting(Duration::from_secs(3)));
+        state.land_from_fall(Duration::from_secs(2));
+        assert!(!state.request_startup_greeting(Duration::from_secs(3)));
+        state.advance(Duration::from_secs(2));
+        assert!(state.set_walking(true));
+        assert!(!state.request_startup_greeting(Duration::from_secs(3)));
+        state.set_walking(false);
+        state.set_base_pose(BasePose::Sitting);
+        assert!(!state.request_startup_greeting(Duration::from_secs(3)));
+        state.set_base_pose(BasePose::Idle);
+        assert!(state.request_startup_greeting(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn interactions_cancel_startup_greeting_without_resuming_its_tail() {
+        for action in [
+            TemporaryAction::Floating,
+            TemporaryAction::Falling,
+            TemporaryAction::Praying,
+            TemporaryAction::AlarmWave,
+        ] {
+            let mut state = NeraAnimationState::default();
+            assert!(state.request_startup_greeting(Duration::from_secs(20)));
+            state.start_persistent_action(action);
+            assert!(!state.request_startup_greeting(Duration::from_secs(20)));
+            state.finish_action(action);
+            assert_eq!(state.visual_state(), VisualState::Idle, "{action:?}");
+        }
+
+        for action in [
+            TemporaryAction::HeadStroke,
+            TemporaryAction::HitHead,
+            TemporaryAction::HitChest,
+            TemporaryAction::Death,
+            TemporaryAction::Landing,
+            TemporaryAction::AlarmJump,
+            TemporaryAction::LibraryAnimation(Entity::PLACEHOLDER),
+        ] {
+            let mut state = NeraAnimationState::default();
+            assert!(state.request_startup_greeting(Duration::from_secs(20)));
+            state.request_one_shot(action, Duration::from_secs(1));
+            assert!(!state.request_startup_greeting(Duration::from_secs(20)));
+            state.advance(Duration::from_secs(1));
+            assert_eq!(state.visual_state(), VisualState::Idle, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn startup_greeting_cancels_for_attention_sitting_and_unavailable_reactions() {
+        let mut state = NeraAnimationState::default();
+        assert!(state.request_startup_greeting(Duration::from_secs(20)));
+        state.suspend_support_for_attention();
+        state.restore_support_after_attention(false);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+
+        assert!(state.request_startup_greeting(Duration::from_secs(20)));
+        state.observe_sitting_surface(true, Duration::from_secs(1), Duration::ZERO);
+        state.advance(Duration::from_secs(1));
+        state.observe_sitting_surface(false, Duration::from_secs(1), Duration::ZERO);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+
+        assert!(state.request_startup_greeting(Duration::from_secs(20)));
+        state.request_one_shot(TemporaryAction::HitHead, Duration::ZERO);
+        assert_eq!(state.visual_state(), VisualState::Idle);
+
+        assert!(state.request_startup_greeting(Duration::from_secs(20)));
+        state.cancel_startup_greeting();
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+
+    #[test]
+    fn startup_and_alarm_share_the_wave_with_different_repeat_modes() {
+        let clips = NeraAnimationClips {
+            alarm_wave: Some(clip(3)),
+            ..Default::default()
+        };
+        let (greeting, greeting_repeat, _) = clip_for_visual(VisualState::StartupGreeting, &clips);
+        let (alarm, alarm_repeat, _) = clip_for_visual(VisualState::AlarmWave, &clips);
+        assert_eq!(greeting.unwrap().entity, alarm.unwrap().entity);
+        assert_eq!(greeting_repeat, bevy::animation::RepeatAnimation::Count(1));
+        assert_eq!(alarm_repeat, bevy::animation::RepeatAnimation::Forever);
+        assert_eq!(clips.startup_greeting_duration(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn startup_readiness_requires_the_whole_loaded_sequence() {
+        let mut clips = NeraAnimationClips::default();
+        assert_eq!(clips.startup_greeting_duration(), Duration::ZERO);
+        assert!(!clips.startup_intro_ready());
+        clips.idle = Some(clip(3));
+        assert!(!clips.startup_intro_ready());
+        clips.floating = Some(clip(3));
+        assert!(!clips.startup_intro_ready());
+        clips.falling_to_landing = Some(clip(2));
+        assert!(!clips.startup_intro_ready());
+        clips.alarm_wave = Some(clip(0));
+        assert!(!clips.startup_intro_ready());
+        clips.alarm_wave = Some(clip(3));
+        assert!(clips.startup_intro_ready());
+        clips.floating = Some(clip(0));
+        assert!(!clips.startup_intro_ready());
+    }
 
     #[test]
     fn walking_loops_without_restarting_and_pauses_idle_variations() {

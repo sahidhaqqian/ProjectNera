@@ -20,6 +20,7 @@ mod presentation;
 mod rng;
 mod settings;
 mod walking;
+mod startup_entrance;
 
 #[cfg(target_os = "windows")]
 mod tray;
@@ -180,6 +181,7 @@ fn main() {
         .init_resource::<HeadPatGesture>()
         .init_resource::<desktop_physics::DesktopPhysicsState>()
         .init_resource::<walking::WalkingRuntime>()
+        .init_resource::<startup_entrance::StartupEntrance>()
         .init_resource::<DeathVisualGrounding>()
         .add_systems(Startup, (setup_camera, setup_lighting, spawn_nera))
         .add_systems(
@@ -197,20 +199,29 @@ fn main() {
                 // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window
                     .run_if(presentation::desktop_pet_active)
+                    .run_if(startup_entrance::pet_is_revealed)
                     .run_if(nera_utility_input_available),
-                desktop_physics::update_desktop_physics.run_if(presentation::desktop_pet_active),
+                startup_entrance::prepare_startup_entrance,
+                desktop_physics::update_desktop_physics
+                    .run_if(presentation::desktop_pet_active)
+                    .run_if(startup_entrance::physics_allowed),
                 sync_environment_animation_state,
                 sync_interaction_animation_actions,
                 // Walking consumes current support and interaction decisions.
                 // Run even while blocked so pending motion is cancelled.
-                walking::update_walking,
+                walking::update_walking.run_if(startup_entrance::autonomous_allowed),
                 // Phase 5.8 idle variation. Runs before the tick so a fidget
                 // requested this frame ages like every other one-shot, and
                 // before `apply_animation_state` so it plays without a frame of
                 // latency. It is the lowest priority layer, so it can never
                 // displace something the systems above just requested.
-                schedule_idle_variation.run_if(presentation::desktop_pet_active),
+                schedule_idle_variation
+                    .run_if(presentation::desktop_pet_active)
+                    .run_if(startup_entrance::autonomous_allowed),
                 tick_animation_actions,
+                // Start the wave after aging existing actions, so its first
+                // frame retains the clip's full playback duration.
+                startup_entrance::advance_startup_entrance,
                 sync_look_at_for_animation,
                 apply_animation_state,
             )
@@ -227,6 +238,7 @@ fn main() {
             PostUpdate,
             update_click_through
                 .after(VrmSystemSets::SpringBone)
+                .run_if(startup_entrance::pet_is_revealed)
                 .run_if(presentation::desktop_pet_active)
                 .run_if(nera_utility_input_available),
         )
@@ -234,6 +246,7 @@ fn main() {
             PostUpdate,
             detect_head_pat
                 .after(update_click_through)
+                .run_if(startup_entrance::pet_is_revealed)
                 .run_if(presentation::desktop_pet_active)
                 .run_if(nera_utility_input_available),
         )

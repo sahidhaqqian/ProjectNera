@@ -72,6 +72,20 @@ impl NeraAnimationClips {
             .unwrap_or(Duration::ZERO)
     }
 
+    /// The greeting shares the alarm's existing wave asset, but has its own
+    /// one-shot lifetime and priority. No extra VRMA or model is loaded.
+    pub(crate) fn startup_greeting_duration(&self) -> Duration {
+        self.alarm_wave
+            .map(|clip| clip.duration)
+            .unwrap_or(Duration::ZERO)
+    }
+
+    pub(crate) fn startup_intro_ready(&self) -> bool {
+        [self.idle, self.floating, self.falling_to_landing, self.alarm_wave]
+            .into_iter()
+            .all(|slot| slot.is_some_and(|clip| !clip.duration.is_zero()))
+    }
+
     pub(super) fn idle_micro(&self, action: IdleMicroAction) -> Option<ClipSlot> {
         match action {
             IdleMicroAction::LookAround => self.idle_look_around,
@@ -290,6 +304,11 @@ pub(super) fn clip_for_visual(
         ),
         VisualState::Idle => (clips.idle, RepeatAnimation::Forever, "Idle"),
         VisualState::Walking => (clips.walking, RepeatAnimation::Forever, "Walking"),
+        VisualState::StartupGreeting => (
+            clips.alarm_wave,
+            RepeatAnimation::Count(1),
+            "Startup/Greeting",
+        ),
         VisualState::SittingLoop => (clips.sitting_loop, RepeatAnimation::Forever, "SittingLoop"),
         VisualState::SittingEnter => (
             clips.sitting_enter,
@@ -358,6 +377,7 @@ pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
         VisualState::MenuAnimation(_) => REACTION_BLEND,
         VisualState::SittingEnter | VisualState::SittingExit => SUPPORT_BLEND,
         VisualState::IdleMicro(_) => IDLE_VARIATION_BLEND,
+        VisualState::StartupGreeting => IDLE_VARIATION_BLEND,
         VisualState::Idle
         | VisualState::Walking
         | VisualState::SittingLoop

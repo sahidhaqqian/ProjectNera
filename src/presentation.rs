@@ -187,7 +187,8 @@ impl Plugin for PresentationPlugin {
                     debug_toggle_attention,
                     handle_presentation_commands,
                 )
-                    .chain(),
+                    .chain()
+                    .before(crate::startup_entrance::prepare_startup_entrance),
             )
             // Last intentionally wins over Phase 4 window-follow systems.
             // This avoids changing working sitting/tracking code in Phase 5.55.

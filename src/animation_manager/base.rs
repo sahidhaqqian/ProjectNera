@@ -93,8 +93,8 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
     },
     BaseAnimation {
         key: "animasi_basic/161_Waving.vrma",
-        label: "Alarm wave",
-        purpose: "Loop after the alarm intro",
+        label: "Greeting / alarm wave",
+        purpose: "One-time startup greeting and loop after the alarm intro",
     },
 ];
 
