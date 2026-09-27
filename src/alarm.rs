@@ -25,13 +25,9 @@ use bevy::{
     prelude::*,
 };
 
-use bevy_vrm1::prelude::VrmaHandle;
-
 use crate::{
     action_menu::{AlarmMenuChoice, NeraActionMenuCommand},
-    animation::{
-        AlarmAnimationCommand, register_alarm_jump_animation, register_alarm_wave_animation,
-    },
+    animation::AlarmAnimationCommand,
     presentation::{AttentionKind, PresentationCommand, PresentationExited, PresentationState},
     settings::{AlarmConfig, NeraSettings, save_settings_deferred},
 };
@@ -40,9 +36,6 @@ use crate::{
 use crate::platform::{LocalDateTime, local_datetime};
 
 const ALARM_SOUND_PATH: &str = "sound/alarm.mp3";
-const ALARM_JUMP_VRMA_PATH: &str = "animations/animasi_basic/jump_happy.vrma";
-const ALARM_WAVE_VRMA_PATH: &str = "animations/animasi_basic/161_Waving.vrma";
-
 /// If the alarm asked for Attention but presentation never leaves DesktopPet,
 /// something failed before the dismiss UI could be created. Never leave a
 /// looping alarm with no reachable dismissal path.
@@ -187,26 +180,6 @@ struct AlarmAssets {
 #[derive(Component)]
 struct AlarmAudioPlayback;
 
-/// Alarm VRMAs must live under the Nera VRM entity, matching the proven
-/// loading/retargeting pattern used by Idle/Sitting/reaction animations.
-#[derive(Resource, Default)]
-struct AlarmVrmaBootstrap {
-    owner: Option<Entity>,
-}
-
-impl AlarmVrmaBootstrap {
-    /// Alarm clips are retargeted under one concrete VRM entity. Replacing the
-    /// character invalidates that ancestry, so a new owner must receive its own
-    /// Jump/Wave sources even when this bootstrap already ran earlier.
-    fn bind(&mut self, owner: Entity) -> bool {
-        if self.owner == Some(owner) {
-            return false;
-        }
-        self.owner = Some(owner);
-        true
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AlarmMinuteKey {
     year: u16,
@@ -254,7 +227,6 @@ pub(crate) struct AlarmPlugin;
 impl Plugin for AlarmPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AlarmState>()
-            .init_resource::<AlarmVrmaBootstrap>()
             .init_resource::<CustomAlarmRuntime>()
             .init_resource::<AlarmDisplayInfo>()
             .add_message::<AlarmControlCommand>()
@@ -262,7 +234,6 @@ impl Plugin for AlarmPlugin {
             .add_systems(
                 Update,
                 (
-                    ensure_alarm_vrmas_under_nera,
                     consume_alarm_menu_commands,
                     consume_alarm_control_commands,
                     tick_custom_alarm_schedule,
@@ -285,49 +256,6 @@ fn load_alarm_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     });
 
     info!("Nera alarm audio requested | {}", ALARM_SOUND_PATH,);
-}
-
-/// Attach alarm VRMAs to the actual Nera VRM root.
-///
-/// Existing Project Nera animations are loaded as children of the entity named
-/// "Nera". Doing the same here gives bevy_vrm1 the VRM ancestry it needs for
-/// retargeting instead of creating unrelated standalone VRMA worlds.
-fn ensure_alarm_vrmas_under_nera(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut bootstrap: ResMut<AlarmVrmaBootstrap>,
-    named_entities: Query<(Entity, &Name)>,
-) {
-    let Some((nera, _)) = named_entities
-        .iter()
-        .find(|(_, name)| name.as_str() == "Nera")
-    else {
-        return;
-    };
-    if !bootstrap.bind(nera) {
-        return;
-    }
-
-    commands.entity(nera).with_children(|parent| {
-        parent
-            .spawn((
-                Name::new("Nera Alarm JumpHappy"),
-                VrmaHandle(asset_server.load(ALARM_JUMP_VRMA_PATH)),
-            ))
-            .observe(register_alarm_jump_animation);
-
-        parent
-            .spawn((
-                Name::new("Nera Alarm Wave"),
-                VrmaHandle(asset_server.load(ALARM_WAVE_VRMA_PATH)),
-            ))
-            .observe(register_alarm_wave_animation);
-    });
-
-    info!(
-        "Nera alarm VRMAs attached to VRM root | jump={} wave={}",
-        ALARM_JUMP_VRMA_PATH, ALARM_WAVE_VRMA_PATH,
-    );
 }
 
 fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {
@@ -730,19 +658,6 @@ fn abort_ringing_if_attention_never_started(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn alarm_vrmas_rebind_after_character_entity_changes() {
-        let mut world = World::new();
-        let first_character = world.spawn_empty().id();
-        let replacement_character = world.spawn_empty().id();
-        let mut bootstrap = AlarmVrmaBootstrap::default();
-
-        assert!(bootstrap.bind(first_character));
-        assert!(!bootstrap.bind(first_character));
-        assert!(bootstrap.bind(replacement_character));
-        assert!(!bootstrap.bind(replacement_character));
-    }
 
     fn pending_alarm(label: &str, deadline: Instant) -> PendingAlarm {
         PendingAlarm {

@@ -275,24 +275,24 @@ mod tests {
     }
 
     #[test]
-    fn startup_motion_readiness_does_not_wait_for_the_optional_greeting() {
+    fn startup_readiness_requires_the_complete_visible_sequence() {
         let mut clips = NeraAnimationClips::default();
         assert_eq!(clips.startup_greeting_duration(), Duration::ZERO);
-        assert!(!clips.startup_motion_ready());
+        assert!(!clips.startup_intro_ready());
         clips.idle = Some(clip(3));
-        assert!(!clips.startup_motion_ready());
+        assert!(!clips.startup_intro_ready());
         clips.floating = Some(clip(3));
-        assert!(!clips.startup_motion_ready());
+        assert!(!clips.startup_intro_ready());
         clips.falling_to_landing = Some(clip(2));
-        assert!(clips.startup_motion_ready());
+        assert!(!clips.startup_intro_ready());
         clips.alarm_wave = Some(clip(0));
-        assert!(clips.startup_motion_ready());
+        assert!(!clips.startup_intro_ready());
         assert_eq!(clips.startup_greeting_duration(), Duration::ZERO);
         clips.alarm_wave = Some(clip(3));
-        assert!(clips.startup_motion_ready());
+        assert!(clips.startup_intro_ready());
         assert_eq!(clips.startup_greeting_duration(), Duration::from_secs(3));
         clips.floating = Some(clip(0));
-        assert!(!clips.startup_motion_ready());
+        assert!(!clips.startup_intro_ready());
     }
 
     #[test]

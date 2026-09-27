@@ -31,7 +31,11 @@ pub(crate) struct NeraSettingsPlugin;
 
 impl Plugin for NeraSettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(shadow::NeraShadowPlugin)
+        // Keep the frame-pacing plugin next to the FPS system that depends on
+        // FramepaceSettings. This guarantees the resource exists before
+        // apply_fps_limit is initialized/run.
+        app.add_plugins(bevy_framepace::FramepacePlugin)
+            .add_plugins(shadow::NeraShadowPlugin)
             .init_resource::<SettingsInputGate>()
             .init_resource::<StartupRuntime>()
             .init_resource::<AppliedRuntimeSettings>()

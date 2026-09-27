@@ -251,7 +251,7 @@ pub(crate) fn prepare_startup_entrance(
         && avatar.iter().any(|(_, hips)| hips.is_some());
     let playable_ready = rig_ready && clips.idle_playback_ready(&playback);
     let full_intro_ready = playable_ready
-        && clips.startup_motion_ready()
+        && clips.startup_intro_ready()
         && environment
             .feet_anchor_logical
             .is_some_and(|anchor| anchor.is_finite())

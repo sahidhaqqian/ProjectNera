@@ -363,7 +363,7 @@ impl Default for NeraSettings {
             brightness: 100,
             master_volume: 100,
             audio_muted: false,
-            fps_limit: 60,
+            fps_limit: 24,
 
             alarm_enabled: false,
             alarm_hour: 7,
@@ -537,18 +537,21 @@ impl NeraSettings {
 
     pub(super) fn cycle_fps_limit(&mut self) {
         self.fps_limit = match self.fps_limit {
+            24 => 30,
             30 => 60,
             60 => 90,
             90 => 120,
             120 => 144,
             144 => 0,
-            _ => 30,
+            _ => 24,
         };
     }
 
     pub(super) fn fps_label(&self) -> String {
         match self.fps_limit {
             0 => "Unlimited (VSync)".to_string(),
+            // Legacy 15 FPS values are retired and now behave as 24 FPS.
+            15 => "24 FPS".to_string(),
             fps => format!("{fps} FPS"),
         }
     }

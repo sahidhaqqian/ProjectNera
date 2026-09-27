@@ -8,6 +8,7 @@ use bevy::{
     window::{PrimaryWindow, WindowLevel, WindowMoved, WindowPosition},
     winit::{UpdateMode, WinitSettings},
 };
+use bevy_framepace::{FramepaceSettings, Limiter};
 
 use super::{NeraSettings, startup};
 
@@ -409,23 +410,32 @@ pub(super) fn apply_audio_settings(
 pub(super) fn apply_fps_limit(
     settings: Res<NeraSettings>,
     mut applied: ResMut<AppliedRuntimeSettings>,
+    mut framepace: ResMut<FramepaceSettings>,
     mut winit: ResMut<WinitSettings>,
 ) {
     if !settings.is_changed() || !applied.take_fps_change(settings.fps_limit) {
         return;
     }
 
-    let mode = if settings.fps_limit == 0 {
-        UpdateMode::Continuous
-    } else {
-        let seconds = 1.0 / f64::from(settings.fps_limit.max(30));
-        UpdateMode::reactive_low_power(Duration::from_secs_f64(seconds))
+    // Winit's reactive modes are not strict frame caps: window/redraw events
+    // are allowed to wake the app before the configured wait has elapsed.
+    // Keep the event loop continuous and let bevy_framepace enforce the real
+    // frametime for both focused and unfocused desktop-pet operation.
+    winit.focused_mode = UpdateMode::Continuous;
+    winit.unfocused_mode = UpdateMode::Continuous;
+
+    let effective_fps = match settings.fps_limit {
+        0 => 0,
+        // Migrate the retired 15 FPS choice without breaking old settings files.
+        15 => 24,
+        fps => fps.max(24),
     };
 
-    // A desktop pet is very often *not* the focused window. Limiting only
-    // focused_mode would therefore make the setting mostly ineffective.
-    winit.focused_mode = mode.clone();
-    winit.unfocused_mode = mode;
+    framepace.limiter = if effective_fps == 0 {
+        Limiter::Off
+    } else {
+        Limiter::from_framerate(f64::from(effective_fps))
+    };
 
     info!("Settings: FPS limit -> {}", settings.fps_label());
 }

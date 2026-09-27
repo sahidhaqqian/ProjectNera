@@ -110,12 +110,17 @@ impl NeraAnimationClips {
             .unwrap_or(Duration::ZERO)
     }
 
-    /// Falling and landing can start independently from the optional greeting.
-    /// The Wave clip is checked when the greeting is actually requested.
-    pub(crate) fn startup_motion_ready(&self) -> bool {
-        [self.idle, self.floating, self.falling_to_landing]
-            .into_iter()
-            .all(|slot| slot.is_some_and(|clip| !clip.duration.is_zero()))
+    /// The entrance is one visible sequence. Do not start the drop until its
+    /// final greeting is also retargeted for the active character.
+    pub(crate) fn startup_intro_ready(&self) -> bool {
+        [
+            self.idle,
+            self.floating,
+            self.falling_to_landing,
+            self.alarm_wave,
+        ]
+        .into_iter()
+        .all(|slot| slot.is_some_and(|clip| !clip.duration.is_zero()))
     }
 
     /// The startup intro is optional, but the pet must not be revealed before
@@ -225,6 +230,8 @@ const WALKING_VRMA_PATH: &str = "animations/animasi_basic/Walking.vrma";
 const FLOATING_VRMA_PATH: &str = "animations/animasi_basic/Floating.vrma";
 const DEATH_VRMA_PATH: &str = "animations/animasi_basic/Death01.vrma";
 const FALLING_TO_LANDING_VRMA_PATH: &str = "animations/animasi_basic/Falling_To_Landing.vrma";
+const ALARM_JUMP_VRMA_PATH: &str = "animations/animasi_basic/jump_happy.vrma";
+const ALARM_WAVE_VRMA_PATH: &str = "animations/animasi_basic/161_Waving.vrma";
 const HIT_HEAD_VRMA_PATH: &str = "animations/animasi_basic/Hit_Head.vrma";
 const HIT_CHEST_VRMA_PATH: &str = "animations/animasi_basic/Hit_Chest.vrma";
 const SITTING_DODGE_VRMA_PATH: &str = "animations/animasi_basic/Dodge_While_Sitting.vrma";
@@ -285,6 +292,23 @@ pub(crate) fn spawn_animation_library(
             VrmaHandle(asset_server.load(FALLING_TO_LANDING_VRMA_PATH)),
         ))
         .observe(register_falling_to_landing_animation);
+
+    // These clips serve both alarm mode and the startup greeting. Keeping
+    // every rig-bound source in this function guarantees that imports and the
+    // saved-character restore attach them to the actual active VRM hierarchy.
+    parent
+        .spawn((
+            Name::new("Nera Alarm JumpHappy"),
+            VrmaHandle(asset_server.load(ALARM_JUMP_VRMA_PATH)),
+        ))
+        .observe(register_alarm_jump_animation);
+
+    parent
+        .spawn((
+            Name::new("Nera Alarm Wave"),
+            VrmaHandle(asset_server.load(ALARM_WAVE_VRMA_PATH)),
+        ))
+        .observe(register_alarm_wave_animation);
 
     parent
         .spawn((

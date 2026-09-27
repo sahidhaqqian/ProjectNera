@@ -2,6 +2,7 @@ mod alarm;
 mod animation;
 mod avatar;
 mod character;
+mod memory;
 
 mod desktop_physics;
 
@@ -54,10 +55,7 @@ use std::num::NonZeroU32;
 use bevy::{
     asset::AssetPlugin,
     prelude::*,
-    render::{
-        RenderPlugin,
-        settings::{MemoryHints, WgpuSettings},
-    },
+    render::RenderPlugin,
     settings::SettingsPlugin,
     window::{CursorOptions, PresentMode, WindowLevel, WindowPlugin, WindowPosition},
 };
@@ -150,18 +148,16 @@ fn main() {
                 ..default()
             })
             .set(RenderPlugin {
-                render_creation: WgpuSettings {
-                    memory_hints: MemoryHints::MemoryUsage,
-                    ..default()
-                }
-                .into(),
+                render_creation: memory::renderer_settings().into(),
                 ..default()
             }),
     );
 
+
     app.add_plugins((
         VrmPlugin,
         VrmaPlugin,
+        memory::AvatarMemoryPlugin,
         DesktopEnvironmentPlugin,
         InteractionPlugin,
         NeraAnimationPlugin,

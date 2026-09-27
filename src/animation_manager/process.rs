@@ -250,10 +250,7 @@ fn decode_control(line: &str) -> Option<Control> {
 struct Controls(Mutex<mpsc::Receiver<Control>>);
 
 pub(crate) fn run_worker() {
-    use bevy::render::{
-        RenderPlugin,
-        settings::{MemoryHints, WgpuSettings},
-    };
+    use bevy::render::RenderPlugin;
     use bevy_vrm1::prelude::*;
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
@@ -280,11 +277,7 @@ pub(crate) fn run_worker() {
                 ..default()
             })
             .set(RenderPlugin {
-                render_creation: WgpuSettings {
-                    memory_hints: MemoryHints::MemoryUsage,
-                    ..default()
-                }
-                .into(),
+                render_creation: crate::memory::renderer_settings().into(),
                 ..default()
             }),
     );
@@ -293,6 +286,7 @@ pub(crate) fn run_worker() {
     app.add_plugins((
         VrmPlugin,
         VrmaPlugin,
+        crate::memory::AvatarMemoryPlugin,
         crate::utility_window::UtilityWindowPlugin,
         AnimationManagerPlugin,
     ))
