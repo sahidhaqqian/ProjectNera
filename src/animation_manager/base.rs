@@ -28,11 +28,11 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
     },
     BaseAnimation {
         key: "animasi_basic/Sitting_2.vrma",
-        label: "Sitting idle: variation 2",
+        label: "Alternative sitting position 2",
     },
     BaseAnimation {
         key: "animasi_basic/Sitting_4.vrma",
-        label: "Sitting idle: variation 4",
+        label: "Alternative sitting position 4",
     },
     BaseAnimation {
         key: "animasi_basic/Sitting_Rubbing_Arm.vrma",

@@ -119,12 +119,21 @@ enum AlarmPhase {
 #[derive(Resource, Debug)]
 pub(crate) struct AlarmState {
     phase: AlarmPhase,
+    pending: Vec<PendingAlarm>,
+}
+
+#[derive(Debug)]
+struct PendingAlarm {
+    deadline: Instant,
+    duration: Duration,
+    display: AlarmDisplayInfo,
 }
 
 impl Default for AlarmState {
     fn default() -> Self {
         Self {
             phase: AlarmPhase::Idle,
+            pending: Vec::new(),
         }
     }
 }
@@ -140,6 +149,57 @@ impl AlarmState {
         };
 
         Some(deadline.saturating_duration_since(Instant::now()))
+    }
+
+    /// Scheduled alarms can interrupt a future quick/snooze timer, but never
+    /// another ringing alarm. Preserve that timer's deadline and label while
+    /// delivering pending alarms in deadline order.
+    fn advance_deadline(
+        &mut self,
+        now: Instant,
+        display: &mut AlarmDisplayInfo,
+    ) -> Option<Duration> {
+        if self.is_ringing() {
+            return None;
+        }
+
+        if let Some(index) = self
+            .pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, alarm)| alarm.deadline)
+            .map(|(index, _)| index)
+        {
+            let promote = match self.phase {
+                AlarmPhase::Idle => true,
+                AlarmPhase::Armed { deadline, .. } => self.pending[index].deadline < deadline,
+                AlarmPhase::Ringing { .. } => false,
+            };
+            if promote {
+                let next = self.pending.remove(index);
+                if let AlarmPhase::Armed { deadline, duration } = self.phase {
+                    self.pending.push(PendingAlarm {
+                        deadline,
+                        duration,
+                        display: display.clone(),
+                    });
+                }
+                *display = next.display;
+                self.phase = AlarmPhase::Armed {
+                    deadline: next.deadline,
+                    duration: next.duration,
+                };
+            }
+        }
+
+        let AlarmPhase::Armed { deadline, duration } = self.phase else {
+            return None;
+        };
+        if now < deadline {
+            return None;
+        }
+        self.phase = AlarmPhase::Ringing { started_at: now };
+        Some(duration)
     }
 }
 
@@ -213,10 +273,7 @@ impl Plugin for AlarmPlugin {
             .init_resource::<CustomAlarmRuntime>()
             .init_resource::<AlarmDisplayInfo>()
             .add_message::<AlarmControlCommand>()
-            .add_systems(
-                Startup,
-                load_alarm_audio,
-            )
+            .add_systems(Startup, load_alarm_audio)
             .add_systems(
                 Update,
                 (
@@ -224,11 +281,15 @@ impl Plugin for AlarmPlugin {
                     consume_alarm_menu_commands,
                     consume_alarm_control_commands,
                     tick_custom_alarm_schedule,
-                    tick_alarm_deadline,
-                    cleanup_after_presentation_exit,
                     abort_ringing_if_attention_never_started,
                 )
                     .chain(),
+            )
+            // All previous presentation/panel cleanup runs in Update. A queued
+            // alarm must not reuse Attention while the old panel is closing.
+            .add_systems(
+                PostUpdate,
+                (cleanup_after_presentation_exit, tick_alarm_deadline).chain(),
             );
     }
 }
@@ -300,27 +361,13 @@ fn ensure_alarm_vrmas_under_nera(
 
 fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {
     match choice {
-        AlarmMenuChoice::FiveMinutes => {
-            Some(Duration::from_secs(5 * 60))
-        }
-        AlarmMenuChoice::TenMinutes => {
-            Some(Duration::from_secs(10 * 60))
-        }
-        AlarmMenuChoice::FifteenMinutes => {
-            Some(Duration::from_secs(15 * 60))
-        }
-        AlarmMenuChoice::ThirtyMinutes => {
-            Some(Duration::from_secs(30 * 60))
-        }
-        AlarmMenuChoice::FortyFiveMinutes => {
-            Some(Duration::from_secs(45 * 60))
-        }
-        AlarmMenuChoice::OneHour => {
-            Some(Duration::from_secs(60 * 60))
-        }
-        AlarmMenuChoice::TwoHours => {
-            Some(Duration::from_secs(2 * 60 * 60))
-        }
+        AlarmMenuChoice::FiveMinutes => Some(Duration::from_secs(5 * 60)),
+        AlarmMenuChoice::TenMinutes => Some(Duration::from_secs(10 * 60)),
+        AlarmMenuChoice::FifteenMinutes => Some(Duration::from_secs(15 * 60)),
+        AlarmMenuChoice::ThirtyMinutes => Some(Duration::from_secs(30 * 60)),
+        AlarmMenuChoice::FortyFiveMinutes => Some(Duration::from_secs(45 * 60)),
+        AlarmMenuChoice::OneHour => Some(Duration::from_secs(60 * 60)),
+        AlarmMenuChoice::TwoHours => Some(Duration::from_secs(2 * 60 * 60)),
 
         // Zero delay fires on the next `tick_alarm_deadline`, so the test
         // action reuses the one real trigger path instead of duplicating it.
@@ -399,10 +446,7 @@ fn consume_alarm_control_commands(
     mut state: ResMut<AlarmState>,
     mut presentation: MessageWriter<PresentationCommand>,
     mut animation: MessageWriter<AlarmAnimationCommand>,
-    alarm_audio: Query<
-        (Entity, Option<&AudioSink>),
-        With<AlarmAudioPlayback>,
-    >,
+    alarm_audio: Query<(Entity, Option<&AudioSink>), With<AlarmAudioPlayback>>,
 ) {
     for control in controls.read() {
         let AlarmControlCommand::Snooze(duration) = *control;
@@ -488,16 +532,29 @@ fn tick_custom_alarm_schedule(
     mut settings: ResMut<NeraSettings>,
     mut state: ResMut<AlarmState>,
     mut runtime: ResMut<CustomAlarmRuntime>,
-    mut display: ResMut<AlarmDisplayInfo>,
 ) {
-    if !matches!(state.phase, AlarmPhase::Idle) {
-        return;
+    if collect_due_alarms(
+        &mut settings,
+        &mut state,
+        &mut runtime,
+        local_datetime(),
+        Instant::now(),
+    ) {
+        save_settings_deferred(&mut commands);
     }
+}
 
+#[cfg(target_os = "windows")]
+fn collect_due_alarms(
+    settings: &mut NeraSettings,
+    state: &mut AlarmState,
+    runtime: &mut CustomAlarmRuntime,
+    now: LocalDateTime,
+    deadline: Instant,
+) -> bool {
     let alarm_data_changed = runtime.cached_book != settings.alarm_book
         || runtime.cached_initialized != settings.alarm_book_initialized;
 
-    let now = local_datetime();
     let key = AlarmMinuteKey {
         year: now.year,
         month: now.month,
@@ -510,7 +567,7 @@ fn tick_custom_alarm_schedule(
     // book every render frame; re-evaluate only when the minute rolls over or
     // the user changes alarm settings.
     if runtime.last_checked == Some(key) && !alarm_data_changed {
-        return;
+        return false;
     }
     runtime.last_checked = Some(key);
     runtime.cached_book.clone_from(&settings.alarm_book);
@@ -519,45 +576,38 @@ fn tick_custom_alarm_schedule(
     let mut alarms = settings.alarm_configs();
     runtime.retain_ids(&alarms);
 
-    if alarms.is_empty() {
-        return;
+    let mut settings_changed = false;
+    for due in &mut alarms {
+        if !custom_alarm_matches(due, now) || runtime.fired_this_minute(due.id, key) {
+            continue;
+        }
+        // Mark on enqueue, not presentation: queued alarms may wait across
+        // minutes while the user dismisses or snoozes an earlier alarm.
+        runtime.mark_fired(due.id, key);
+        state.pending.push(PendingAlarm {
+            deadline,
+            duration: Duration::ZERO,
+            display: AlarmDisplayInfo {
+                label: due.label.clone(),
+                hour: due.hour,
+                minute: due.minute,
+            },
+        });
+        if due.mode == 0 {
+            due.enabled = false;
+            settings_changed = true;
+        }
+        info!(
+            "Nera custom alarm queued -> id={} label={} {:02}:{:02}",
+            due.id, due.label, due.hour, due.minute
+        );
     }
-
-    let Some(index) = alarms
-        .iter()
-        .position(|alarm| {
-            custom_alarm_matches(alarm, now)
-                && !runtime.fired_this_minute(alarm.id, key)
-        })
-    else {
-        return;
-    };
-
-    let due = alarms[index].clone();
-    runtime.mark_fired(due.id, key);
-
-    if due.mode == 0 {
-        alarms[index].enabled = false;
+    if settings_changed {
         settings.store_alarm_configs(&alarms);
-        save_settings_deferred(&mut commands);
+        runtime.cached_book.clone_from(&settings.alarm_book);
+        runtime.cached_initialized = settings.alarm_book_initialized;
     }
-
-    display.label = due.label.clone();
-    display.hour = due.hour;
-    display.minute = due.minute;
-
-    state.phase = AlarmPhase::Armed {
-        deadline: Instant::now(),
-        duration: Duration::ZERO,
-    };
-
-    info!(
-        "Nera custom alarm due -> id={} label={} {:02}:{:02}",
-        due.id,
-        due.label,
-        due.hour,
-        due.minute,
-    );
+    settings_changed
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -570,22 +620,28 @@ fn tick_alarm_deadline(
     mut presentation: MessageWriter<PresentationCommand>,
     mut animation: MessageWriter<AlarmAnimationCommand>,
     mut display: ResMut<AlarmDisplayInfo>,
-    existing_audio: Query<
-        (Entity, Option<&AudioSink>),
-        With<AlarmAudioPlayback>,
+    presentation_state: Res<PresentationState>,
+    #[cfg(target_os = "windows")]
+    dismiss_runtime: Res<crate::alarm_dismiss::AlarmDismissRuntime>,
+    #[cfg(target_os = "windows")] dismiss_panels: Query<
+        (),
+        With<crate::alarm_dismiss::AlarmDismissWindow>,
     >,
+    existing_audio: Query<(Entity, Option<&AudioSink>), With<AlarmAudioPlayback>>,
 ) {
-    let AlarmPhase::Armed {
-        deadline,
-        duration,
-    } = state.phase
-    else {
-        return;
-    };
-
-    if Instant::now() < deadline {
+    if !presentation_state.is_desktop_pet() {
         return;
     }
+    #[cfg(target_os = "windows")]
+    if !dismiss_runtime.is_closed() || !dismiss_panels.is_empty() {
+        // Native close can remove the entity before Update consumes the old
+        // presentation exit and resets the panel's ownership. Starting here
+        // would let stale runtime.window suppress the next panel's spawn.
+        return;
+    }
+    let Some(duration) = state.advance_deadline(Instant::now(), &mut display) else {
+        return;
+    };
 
     #[cfg(target_os = "windows")]
     if display.label == "Quick Alarm" {
@@ -614,15 +670,7 @@ fn tick_alarm_deadline(
         PlaybackSettings::LOOP,
     ));
 
-    state.phase = AlarmPhase::Ringing {
-        started_at: Instant::now(),
-    };
-
-    presentation.write(
-        PresentationCommand::EnterAttention(
-            AttentionKind::Alarm,
-        ),
-    );
+    presentation.write(PresentationCommand::EnterAttention(AttentionKind::Alarm));
 
     animation.write(AlarmAnimationCommand::Start);
 
@@ -637,10 +685,7 @@ fn cleanup_after_presentation_exit(
     mut exited: MessageReader<PresentationExited>,
     mut state: ResMut<AlarmState>,
     mut animation: MessageWriter<AlarmAnimationCommand>,
-    alarm_audio: Query<
-        (Entity, Option<&AudioSink>),
-        With<AlarmAudioPlayback>,
-    >,
+    alarm_audio: Query<(Entity, Option<&AudioSink>), With<AlarmAudioPlayback>>,
 ) {
     for event in exited.read() {
         if event.kind != AttentionKind::Alarm {
@@ -692,19 +737,13 @@ fn abort_ringing_if_attention_never_started(
     presentation_state: Res<PresentationState>,
     mut state: ResMut<AlarmState>,
     mut animation: MessageWriter<AlarmAnimationCommand>,
-    alarm_audio: Query<
-        (Entity, Option<&AudioSink>),
-        With<AlarmAudioPlayback>,
-    >,
+    alarm_audio: Query<(Entity, Option<&AudioSink>), With<AlarmAudioPlayback>>,
 ) {
     let AlarmPhase::Ringing { started_at } = state.phase else {
         return;
     };
 
-    if !should_abort_failed_attention(
-        presentation_state.is_desktop_pet(),
-        started_at.elapsed(),
-    ) {
+    if !should_abort_failed_attention(presentation_state.is_desktop_pet(), started_at.elapsed()) {
         return;
     }
 
@@ -731,6 +770,360 @@ fn abort_ringing_if_attention_never_started(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending_alarm(label: &str, deadline: Instant) -> PendingAlarm {
+        PendingAlarm {
+            deadline,
+            duration: Duration::ZERO,
+            display: AlarmDisplayInfo {
+                label: label.into(),
+                ..default()
+            },
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn scheduled_time() -> LocalDateTime {
+        LocalDateTime {
+            year: 2026,
+            month: 9,
+            day: 23,
+            day_of_week: 3,
+            hour: 7,
+            minute: 30,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn scheduled_alarm(id: u32, mode: u8) -> AlarmConfig {
+        AlarmConfig {
+            id,
+            enabled: true,
+            label: format!("Alarm {id}"),
+            hour: 7,
+            minute: 30,
+            mode,
+            year: 2026,
+            month: 9,
+            day: 23,
+            repeat_days: 1 << 2,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn all_simultaneous_one_shots_are_queued_and_disabled_even_while_busy() {
+        let now = Instant::now();
+        for phase in [
+            AlarmPhase::Idle,
+            AlarmPhase::Armed {
+                deadline: now + Duration::from_secs(300),
+                duration: Duration::from_secs(300),
+            },
+            AlarmPhase::Ringing { started_at: now },
+        ] {
+            let mut settings = NeraSettings::default();
+            settings.store_alarm_configs(&[scheduled_alarm(1, 0), scheduled_alarm(2, 0)]);
+            let mut runtime = CustomAlarmRuntime::default();
+            let mut state = AlarmState { phase, ..default() };
+            assert!(collect_due_alarms(
+                &mut settings,
+                &mut state,
+                &mut runtime,
+                scheduled_time(),
+                now
+            ));
+            assert_eq!(state.pending.len(), 2);
+            assert!(settings.alarm_configs().iter().all(|alarm| !alarm.enabled));
+            // A settings edit/re-enable in the same minute must not duplicate a
+            // reminder already queued behind another alarm.
+            settings.store_alarm_configs(&[scheduled_alarm(1, 0), scheduled_alarm(2, 0)]);
+            assert!(!collect_due_alarms(
+                &mut settings,
+                &mut state,
+                &mut runtime,
+                scheduled_time(),
+                now
+            ));
+            assert_eq!(state.pending.len(), 2);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn weekly_alarms_queue_once_per_occurrence_while_another_alarm_rings() {
+        let now = Instant::now();
+        let mut settings = NeraSettings::default();
+        settings.store_alarm_configs(&[scheduled_alarm(1, 1), scheduled_alarm(2, 1)]);
+        let mut runtime = CustomAlarmRuntime::default();
+        let mut state = AlarmState {
+            phase: AlarmPhase::Ringing { started_at: now },
+            ..default()
+        };
+        for _ in 0..2 {
+            assert!(!collect_due_alarms(
+                &mut settings,
+                &mut state,
+                &mut runtime,
+                scheduled_time(),
+                now
+            ));
+        }
+        assert_eq!(state.pending.len(), 2);
+        assert!(settings.alarm_configs().iter().all(|alarm| alarm.enabled));
+        assert!(!collect_due_alarms(
+            &mut settings,
+            &mut state,
+            &mut runtime,
+            LocalDateTime {
+                day: 30,
+                ..scheduled_time()
+            },
+            now
+        ));
+        assert_eq!(state.pending.len(), 4);
+    }
+
+    #[test]
+    fn scheduled_reminders_preserve_a_future_quick_or_snooze_deadline_and_label() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(300);
+        for label in ["Quick Alarm", "Snoozed meeting"] {
+            let mut display = AlarmDisplayInfo {
+                label: label.into(),
+                ..default()
+            };
+            let mut state = AlarmState {
+                phase: AlarmPhase::Armed {
+                    deadline: later,
+                    duration: Duration::from_secs(300),
+                },
+                pending: vec![pending_alarm("First", now), pending_alarm("Second", now)],
+            };
+            assert_eq!(
+                state.advance_deadline(now, &mut display),
+                Some(Duration::ZERO)
+            );
+            assert_eq!(display.label, "First");
+            assert_eq!(state.advance_deadline(later, &mut display), None);
+            assert_eq!(display.label, "First");
+            state.phase = AlarmPhase::Idle;
+            assert_eq!(
+                state.advance_deadline(now, &mut display),
+                Some(Duration::ZERO)
+            );
+            assert_eq!(display.label, "Second");
+            state.phase = AlarmPhase::Idle;
+            assert_eq!(state.advance_deadline(now, &mut display), None);
+            assert_eq!(display.label, label);
+            assert!(matches!(state.phase, AlarmPhase::Armed { deadline, .. } if deadline == later));
+            assert_eq!(
+                state.advance_deadline(later, &mut display),
+                Some(Duration::from_secs(300))
+            );
+            assert!(state.pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_due_quick_alarm_and_same_minute_reminders_all_get_delivered() {
+        let now = Instant::now();
+        let mut display = AlarmDisplayInfo {
+            label: "Quick Alarm".into(),
+            ..default()
+        };
+        let mut state = AlarmState {
+            phase: AlarmPhase::Armed {
+                deadline: now,
+                duration: Duration::from_secs(300),
+            },
+            pending: vec![pending_alarm("One", now), pending_alarm("Two", now)],
+        };
+        for label in ["Quick Alarm", "One", "Two"] {
+            assert!(state.advance_deadline(now, &mut display).is_some());
+            assert_eq!(display.label, label);
+            state.phase = AlarmPhase::Idle;
+        }
+        assert_eq!(state.advance_deadline(now, &mut display), None);
+    }
+
+    fn alarm_runtime_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<AlarmState>()
+            .init_resource::<AlarmDisplayInfo>()
+            .init_resource::<PresentationState>()
+            .insert_resource(AlarmAssets {
+                sound: Handle::default(),
+            })
+            .add_message::<AlarmAnimationCommand>()
+            .add_message::<AlarmControlCommand>()
+            .add_message::<PresentationCommand>()
+            .add_message::<PresentationExited>()
+            .add_systems(Update, consume_alarm_control_commands)
+            .add_systems(
+                PostUpdate,
+                (cleanup_after_presentation_exit, tick_alarm_deadline).chain(),
+            );
+        #[cfg(target_os = "windows")]
+        app.init_resource::<crate::alarm_dismiss::AlarmDismissRuntime>();
+        app
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn queued_alarm_waits_for_runtime_reset_after_native_window_is_gone() {
+        use crate::alarm_dismiss::{AlarmDismissRuntime, AlarmDismissWindow};
+
+        let mut app = alarm_runtime_app();
+        app.world_mut().resource_mut::<AlarmState>().phase = AlarmPhase::Ringing {
+            started_at: Instant::now(),
+        };
+        app.world_mut().resource_mut::<AlarmState>().pending
+            .push(pending_alarm("Next", Instant::now()));
+        let panel = app.world_mut().spawn(AlarmDismissWindow).id();
+        app.insert_resource(AlarmDismissRuntime::with_window_for_test(panel));
+        // Bevy's native-close cleanup has run, but the dismiss system ran
+        // before presentation exit this frame and still owns the old window.
+        app.world_mut().despawn(panel);
+        app.world_mut().write_message(PresentationExited {
+            kind: AttentionKind::Alarm,
+        });
+        app.update();
+        assert!(!app.world().resource::<AlarmState>().is_ringing());
+        assert_eq!(app.world().resource::<AlarmState>().pending.len(), 1);
+        assert_eq!(app.world_mut().resource_mut::<Messages<PresentationCommand>>()
+            .drain().count(), 0);
+
+        // Only the completed runtime reset makes the next PresentationEntered
+        // safe for spawn_dismiss_panel to consume.
+        app.insert_resource(AlarmDismissRuntime::default());
+        app.update();
+        assert!(app.world().resource::<AlarmState>().is_ringing());
+        assert_eq!(app.world().resource::<AlarmDisplayInfo>().label, "Next");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn queued_alarm_waits_for_old_panel_and_audio_teardown() {
+        let mut app = alarm_runtime_app();
+        app.world_mut().resource_mut::<AlarmState>().phase = AlarmPhase::Ringing {
+            started_at: Instant::now(),
+        };
+        app.world_mut()
+            .resource_mut::<AlarmState>()
+            .pending
+            .push(pending_alarm("Next", Instant::now()));
+        let audio = app.world_mut().spawn(AlarmAudioPlayback).id();
+        let panel = app
+            .world_mut()
+            .spawn(crate::alarm_dismiss::AlarmDismissWindow)
+            .id();
+        app.world_mut().write_message(PresentationExited {
+            kind: AttentionKind::Alarm,
+        });
+        app.update();
+        assert!(!app.world().resource::<AlarmState>().is_ringing());
+        assert_eq!(app.world().resource::<AlarmState>().pending.len(), 1);
+        assert!(app.world().get_entity(audio).is_err());
+        app.world_mut().despawn(panel);
+        app.update();
+        assert!(app.world().resource::<AlarmState>().is_ringing());
+        assert_eq!(app.world().resource::<AlarmDisplayInfo>().label, "Next");
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<AlarmAudioPlayback>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn late_presentation_exit_cannot_stop_the_next_queued_ring() {
+        fn late_exit(
+            mut sent: Local<bool>,
+            mut exited: MessageWriter<PresentationExited>,
+            panels: Query<Entity, With<crate::alarm_dismiss::AlarmDismissWindow>>,
+            mut commands: Commands,
+        ) {
+            if *sent {
+                return;
+            }
+            *sent = true;
+            exited.write(PresentationExited {
+                kind: AttentionKind::Alarm,
+            });
+            for panel in &panels {
+                commands.entity(panel).despawn();
+            }
+        }
+        let mut app = alarm_runtime_app();
+        app.add_systems(Update, late_exit.after(consume_alarm_control_commands));
+        app.world_mut().resource_mut::<AlarmState>().phase = AlarmPhase::Ringing {
+            started_at: Instant::now(),
+        };
+        app.world_mut()
+            .resource_mut::<AlarmState>()
+            .pending
+            .push(pending_alarm("Due reminder", Instant::now()));
+        app.world_mut()
+            .spawn(crate::alarm_dismiss::AlarmDismissWindow);
+        app.world_mut()
+            .write_message(AlarmControlCommand::Snooze(Duration::ZERO));
+        app.update();
+        assert_eq!(
+            app.world().resource::<AlarmDisplayInfo>().label,
+            "Due reminder"
+        );
+        assert!(app.world().resource::<AlarmState>().is_ringing());
+        let audio = app
+            .world_mut()
+            .query_filtered::<Entity, With<AlarmAudioPlayback>>()
+            .single(app.world())
+            .unwrap();
+        // No old PresentationExited may remain for the following frame's
+        // cleanup to stop the new alarm or consume its pending snooze.
+        app.update();
+        assert!(app.world().resource::<AlarmState>().is_ringing());
+        assert!(app.world().get_entity(audio).is_ok());
+        assert_eq!(app.world().resource::<AlarmState>().pending.len(), 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn zero_snooze_survives_exit_without_retriggering_before_panel_closes() {
+        let mut app = alarm_runtime_app();
+        app.world_mut().resource_mut::<AlarmState>().phase = AlarmPhase::Ringing {
+            started_at: Instant::now(),
+        };
+        let original_quick_deadline = Instant::now() + Duration::from_secs(600);
+        app.world_mut()
+            .resource_mut::<AlarmState>()
+            .pending
+            .push(pending_alarm("Quick Alarm", original_quick_deadline));
+        let audio = app.world_mut().spawn(AlarmAudioPlayback).id();
+        let panel = app
+            .world_mut()
+            .spawn(crate::alarm_dismiss::AlarmDismissWindow)
+            .id();
+        app.world_mut()
+            .write_message(AlarmControlCommand::Snooze(Duration::ZERO));
+        app.world_mut().write_message(PresentationExited {
+            kind: AttentionKind::Alarm,
+        });
+        app.update();
+        assert!(matches!(
+            app.world().resource::<AlarmState>().phase,
+            AlarmPhase::Armed { .. }
+        ));
+        assert!(app.world().get_entity(audio).is_err());
+        app.world_mut().despawn(panel);
+        app.update();
+        let state = app.world().resource::<AlarmState>();
+        assert!(state.is_ringing());
+        assert_eq!(state.pending[0].deadline, original_quick_deadline);
+    }
 
     #[test]
     fn preset_durations_are_correct() {
@@ -805,6 +1198,7 @@ mod tests {
             phase: AlarmPhase::Ringing {
                 started_at: Instant::now(),
             },
+            ..default()
         };
 
         assert!(state.is_ringing());

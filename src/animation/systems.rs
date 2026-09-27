@@ -11,7 +11,9 @@ use crate::{
 #[cfg(target_os = "windows")]
 use crate::action_menu::{AnimationMenuChoice, NeraActionMenuCommand};
 
-use super::{AlarmAnimationCommand, NeraAnimationClips, NeraAnimationState, TemporaryAction};
+use super::{
+    AlarmAnimationCommand, NeraAnimationClips, NeraAnimationState, SittingPose, TemporaryAction,
+};
 
 #[derive(Resource, Default)]
 pub(super) struct AlarmAnimationRuntime {
@@ -42,6 +44,18 @@ fn observe_environment_support(
     clips: &NeraAnimationClips,
     state: &mut NeraAnimationState,
 ) {
+    let sitting = on_sitting_surface(environment.placement);
+    if sitting && !state.was_on_sitting_surface {
+        let available: Vec<_> = SittingPose::ALL
+            .into_iter()
+            .filter(|pose| {
+                clips
+                    .sitting_pose(*pose)
+                    .is_some_and(|clip| !clip.duration.is_zero())
+            })
+            .collect();
+        state.select_sitting_pose(&available);
+    }
     let enter_duration = clips
         .sitting_enter
         .map(|clip| clip.duration)
@@ -51,11 +65,7 @@ fn observe_environment_support(
         .map(|clip| clip.duration)
         .unwrap_or(Duration::ZERO);
 
-    state.observe_sitting_surface(
-        on_sitting_surface(environment.placement),
-        enter_duration,
-        exit_duration,
-    );
+    state.observe_sitting_surface(sitting, enter_duration, exit_duration);
 }
 
 pub(crate) fn sync_interaction_animation_actions(

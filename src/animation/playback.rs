@@ -9,7 +9,7 @@ use crate::environment::{AvatarAnchor, DesktopEnvironment};
 use super::{
     ALARM_BLEND, BASE_BLEND, BasePose, DEATH_BLEND, HEAD_STROKE_BLEND, IDLE_VARIATION_BLEND,
     IdleMicroAction, NeraAnimationState, PersonalityAction, REACTION_BLEND, SUPPORT_BLEND,
-    VisualState,
+    SittingPose, VisualState,
 };
 
 #[cfg(target_os = "windows")]
@@ -38,6 +38,8 @@ pub(crate) struct NeraAnimationClips {
     pub(super) praying: Option<ClipSlot>,
     pub(super) sitting_enter: Option<ClipSlot>,
     pub(super) sitting_loop: Option<ClipSlot>,
+    pub(super) sitting_2: Option<ClipSlot>,
+    pub(super) sitting_4: Option<ClipSlot>,
     // Legacy resolver slot only: detach is immediate, so no exit clip is preloaded.
     pub(super) sitting_exit: Option<ClipSlot>,
 
@@ -51,8 +53,6 @@ pub(crate) struct NeraAnimationClips {
     pub(super) idle_catwalk_twist: Option<ClipSlot>,
     pub(super) idle_bored: Option<ClipSlot>,
     pub(super) idle_angry_gesture: Option<ClipSlot>,
-    pub(super) idle_sitting_2: Option<ClipSlot>,
-    pub(super) idle_sitting_4: Option<ClipSlot>,
     pub(super) idle_sitting_rubbing_arm: Option<ClipSlot>,
 
     // Legacy menu resolver slots remain empty. The current radial menu has no
@@ -70,6 +70,14 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    pub(super) fn sitting_pose(&self, pose: SittingPose) -> Option<ClipSlot> {
+        match pose {
+            SittingPose::Default => self.sitting_loop,
+            SittingPose::Sitting2 => self.sitting_2,
+            SittingPose::Sitting4 => self.sitting_4,
+        }
+    }
+
     pub(crate) fn walking_ready(&self) -> bool {
         self.walking.is_some_and(|clip| !clip.duration.is_zero())
     }
@@ -122,8 +130,6 @@ impl NeraAnimationClips {
             IdleMicroAction::CatwalkIdleTwistR => self.idle_catwalk_twist,
             IdleMicroAction::Bored => self.idle_bored,
             IdleMicroAction::AngryGesture => self.idle_angry_gesture,
-            IdleMicroAction::Sitting2 => self.idle_sitting_2,
-            IdleMicroAction::Sitting4 => self.idle_sitting_4,
             IdleMicroAction::SittingRubbingArm => self.idle_sitting_rubbing_arm,
         }
     }
@@ -198,16 +204,8 @@ register_clip!(
     idle_angry_gesture,
     "Idle/AngryGesture"
 );
-register_clip!(
-    register_idle_sitting_2_animation,
-    idle_sitting_2,
-    "Sitting/Sitting2"
-);
-register_clip!(
-    register_idle_sitting_4_animation,
-    idle_sitting_4,
-    "Sitting/Sitting4"
-);
+register_clip!(register_sitting_2_animation, sitting_2, "Sitting/Sitting2");
+register_clip!(register_sitting_4_animation, sitting_4, "Sitting/Sitting4");
 register_clip!(
     register_idle_sitting_rubbing_arm_animation,
     idle_sitting_rubbing_arm,
@@ -385,13 +383,13 @@ pub(crate) fn spawn_animation_library(
             Name::new("Nera Sitting Variation 2"),
             VrmaHandle(asset_server.load(IDLE_SITTING_2_VRMA_PATH)),
         ))
-        .observe(register_idle_sitting_2_animation);
+        .observe(register_sitting_2_animation);
     parent
         .spawn((
             Name::new("Nera Sitting Variation 4"),
             VrmaHandle(asset_server.load(IDLE_SITTING_4_VRMA_PATH)),
         ))
-        .observe(register_idle_sitting_4_animation);
+        .observe(register_sitting_4_animation);
     parent
         .spawn((
             Name::new("Nera Sitting Rubbing Arm"),
@@ -478,10 +476,33 @@ pub(super) fn clip_for_visual(
     }
 }
 
-fn base_fallback(base: BasePose, clips: &NeraAnimationClips) -> Option<ClipSlot> {
-    match base {
+pub(super) fn clip_for_state(
+    state: &NeraAnimationState,
+    clips: &NeraAnimationClips,
+) -> (Option<ClipSlot>, RepeatAnimation, &'static str) {
+    if state.visual_state() == VisualState::SittingLoop {
+        return (
+            selected_sitting_clip(state, clips),
+            RepeatAnimation::Forever,
+            "SittingLoop",
+        );
+    }
+    clip_for_visual(state.visual_state(), clips)
+}
+
+fn selected_sitting_clip(
+    state: &NeraAnimationState,
+    clips: &NeraAnimationClips,
+) -> Option<ClipSlot> {
+    clips
+        .sitting_pose(state.sitting_pose.unwrap_or_default())
+        .or(clips.sitting_loop)
+}
+
+fn base_fallback(state: &NeraAnimationState, clips: &NeraAnimationClips) -> Option<ClipSlot> {
+    match state.base_pose() {
         BasePose::Idle => clips.idle,
-        BasePose::Sitting => clips.sitting_loop.or(clips.idle),
+        BasePose::Sitting => selected_sitting_clip(state, clips).or(clips.idle),
     }
 }
 
@@ -535,7 +556,7 @@ pub(crate) fn apply_animation_state(
         playback.visual = Some(visual);
     }
 
-    let (requested, requested_repeat, requested_label) = clip_for_visual(visual, &clips);
+    let (requested, requested_repeat, requested_label) = clip_for_state(&state, &clips);
 
     let (clip, repeat, label, using_requested) = if let Some(clip) = requested {
         (clip, requested_repeat, requested_label, true)
@@ -547,7 +568,7 @@ pub(crate) fn apply_animation_state(
             );
         }
 
-        let Some(fallback) = base_fallback(state.base_pose(), &clips) else {
+        let Some(fallback) = base_fallback(&state, &clips) else {
             return;
         };
 

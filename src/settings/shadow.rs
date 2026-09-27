@@ -19,6 +19,7 @@ use bevy::{
 use bevy_vrm1::prelude::VrmBone;
 
 use crate::{
+    avatar::NeraMainLight,
     desktop_physics::DesktopPhysicsState,
     environment::{DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, InteractionState, NeraLiveBone},
@@ -397,7 +398,7 @@ fn apply_light_settings(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
-    mut lights: Query<&mut DirectionalLight>,
+    mut lights: Query<&mut DirectionalLight, With<NeraMainLight>>,
 ) {
     let multiplier = settings.brightness.clamp(50, 200) as f32 / 100.0;
     let character_shadow_active = shadow_is_grounded(
@@ -433,7 +434,9 @@ mod tests {
             .init_resource::<DesktopPetInteraction>()
             .init_resource::<StartupEntrance>()
             .add_systems(Update, apply_light_settings);
-        let light = app.world_mut().spawn(DirectionalLight::default()).id();
+        let light = app.world_mut()
+            .spawn((NeraMainLight, DirectionalLight::default()))
+            .id();
 
         app.update();
         assert!(!app.world().get::<DirectionalLight>(light).unwrap().shadow_maps_enabled);
@@ -442,5 +445,52 @@ mod tests {
         app.world_mut().remove_resource::<StartupEntrance>();
         app.update();
         assert!(app.world().get::<DirectionalLight>(light).unwrap().shadow_maps_enabled);
+    }
+
+    #[test]
+    fn main_light_settings_leave_preview_lights_unchanged() {
+        let mut app = App::new();
+        app.insert_resource(NeraSettings {
+                brightness: 150,
+                shadow_type: 1,
+                ..default()
+            })
+            .insert_resource(DesktopEnvironment {
+                feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
+                ..default()
+            })
+            .init_resource::<DesktopPhysicsState>()
+            .init_resource::<DesktopPetInteraction>()
+            .add_systems(Update, apply_light_settings);
+        let main = app.world_mut()
+            .spawn((NeraMainLight, DirectionalLight::default()))
+            .id();
+        let preview = app.world_mut()
+            .spawn(DirectionalLight {
+                illuminance: 1_234.0,
+                shadow_maps_enabled: false,
+                contact_shadows_enabled: true,
+                ..default()
+            })
+            .id();
+
+        app.update();
+        let main_light = app.world().get::<DirectionalLight>(main).unwrap();
+        assert_eq!(main_light.illuminance, BASE_LIGHT_ILLUMINANCE * 1.5);
+        assert!(main_light.shadow_maps_enabled);
+        assert!(!main_light.contact_shadows_enabled);
+        {
+            let mut settings = app.world_mut().resource_mut::<NeraSettings>();
+            settings.brightness = 75;
+            settings.shadow_enabled = false;
+        }
+        app.update();
+        let main_light = app.world().get::<DirectionalLight>(main).unwrap();
+        assert_eq!(main_light.illuminance, BASE_LIGHT_ILLUMINANCE * 0.75);
+        assert!(!main_light.shadow_maps_enabled);
+        let preview_light = app.world().get::<DirectionalLight>(preview).unwrap();
+        assert_eq!(preview_light.illuminance, 1_234.0);
+        assert!(!preview_light.shadow_maps_enabled);
+        assert!(preview_light.contact_shadows_enabled);
     }
 }

@@ -695,7 +695,7 @@ mod tests {
         let vrm = world.spawn_empty().id();
         let seated = world
             .spawn(VrmaDuration(Duration::from_secs(2)))
-            .observe(crate::animation::register_idle_sitting_2_animation)
+            .observe(crate::animation::register_idle_sitting_rubbing_arm_animation)
             .id();
         let standing = world
             .spawn(VrmaDuration(Duration::from_secs(10)))
@@ -715,7 +715,7 @@ mod tests {
         brain.tick_seated_idle(0.05, clips, &mut animation);
         assert_eq!(
             animation.visual_state(),
-            VisualState::IdleMicro(IdleMicroAction::Sitting2)
+            VisualState::IdleMicro(IdleMicroAction::SittingRubbingArm)
         );
         let cooldown = brain.decision_in;
         brain.tick_seated_idle(0.05, clips, &mut animation);
@@ -743,7 +743,8 @@ mod tests {
             assert_eq!(state.base_pose(), BasePose::Sitting);
             assert!(matches!(
                 state.visual_state(),
-                VisualState::SittingLoop | VisualState::IdleMicro(IdleMicroAction::Sitting2)
+                VisualState::SittingLoop
+                    | VisualState::IdleMicro(IdleMicroAction::SittingRubbingArm)
             ));
         }
         let mut animation = app

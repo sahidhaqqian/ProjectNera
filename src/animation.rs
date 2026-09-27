@@ -5,8 +5,7 @@
 //! - Base pose, support transitions, and temporary interactions are separate.
 //! - One-shot lifetimes use the VRMA's real `VrmaDuration` instead of guessed
 //!   millisecond constants.
-//! - Sitting is a real sequence:
-//!       Sitting_Enter -> Sitting_Idle_Loop -> Sitting_Exit
+//! - Each attachment chooses one sitting position, then loops it until detach.
 //! - Dragging uses Floating.
 //! - Head/chest clicks and head strokes are semantic reactions.
 //! - Praying follows the menu lifecycle only while Nera is standing.
@@ -22,7 +21,7 @@ mod state;
 mod systems;
 mod walking_loop;
 
-pub(crate) use library::PlayLibraryAnimation;
+pub(crate) use library::{LibraryAnimationError, PlayLibraryAnimation};
 pub(crate) use playback::*;
 pub(crate) use state::*;
 pub(crate) use systems::*;
@@ -38,6 +37,7 @@ pub(crate) fn install_library_test_systems(app: &mut App) {
         .init_resource::<crate::environment::DesktopEnvironment>()
         .init_resource::<library::LibraryPlayback>()
         .add_message::<PlayLibraryAnimation>()
+        .add_message::<LibraryAnimationError>()
         .add_systems(
             Update,
             (library::sync_library_animation, apply_animation_state).chain(),
@@ -66,6 +66,7 @@ impl Plugin for NeraAnimationPlugin {
                     .before(bevy_vrm1::prelude::VrmSystemSets::Constraints),
             )
             .add_message::<PlayLibraryAnimation>()
+            .add_message::<LibraryAnimationError>()
             .add_systems(
                 Update,
                 library::sync_library_animation
@@ -459,8 +460,6 @@ mod tests {
         for visual in [
             VisualState::SittingLoop,
             VisualState::SittingEnter,
-            VisualState::IdleMicro(IdleMicroAction::Sitting2),
-            VisualState::IdleMicro(IdleMicroAction::Sitting4),
             VisualState::IdleMicro(IdleMicroAction::SittingRubbingArm),
             VisualState::DodgeWhileSitting,
         ] {
@@ -612,8 +611,6 @@ mod tests {
             idle_catwalk_twist: Some(clip(3)),
             idle_bored: Some(clip(4)),
             idle_angry_gesture: Some(clip(3)),
-            idle_sitting_2: Some(clip(5)),
-            idle_sitting_4: Some(clip(4)),
             idle_sitting_rubbing_arm: Some(clip(3)),
             ..Default::default()
         }
@@ -972,6 +969,186 @@ mod tests {
         assert_eq!(
             IdleMicroAction::ALL.len(),
             IdleMicroAction::STANDING.len() + IdleMicroAction::SITTING.len()
+        );
+    }
+
+    #[test]
+    fn sitting_position_changes_only_on_new_attachment_and_survives_reactions() {
+        use crate::environment::{
+            DesktopEnvironment, PlacementState, TaskbarAttachment, TaskbarEdge,
+        };
+        use crate::platform::NativeMonitorHandle;
+        use bevy::animation::RepeatAnimation;
+
+        #[derive(Resource, Default)]
+        struct PlayedClip(Option<Entity>);
+
+        let mut app = App::new();
+        let slots: Vec<_> = (0..5)
+            .map(|_| ClipSlot {
+                entity: app.world_mut().spawn_empty().id(),
+                duration: Duration::from_secs(2),
+            })
+            .collect();
+        app.init_resource::<DesktopEnvironment>()
+            .init_resource::<NeraAnimationPlayback>()
+            .init_resource::<PlayedClip>()
+            .add_observer(
+                |event: On<bevy_vrm1::prelude::PlayVrma>, mut played: ResMut<PlayedClip>| {
+                    played.0 = Some(event.vrma);
+                },
+            )
+            .insert_resource(NeraAnimationState {
+                sitting_rng: crate::rng::NeraRng::seeded(19),
+                ..Default::default()
+            })
+            .insert_resource(NeraAnimationClips {
+                sitting_loop: Some(slots[0]),
+                sitting_2: Some(slots[1]),
+                sitting_4: Some(slots[2]),
+                idle_sitting_rubbing_arm: Some(slots[3]),
+                dodge_while_sitting: Some(slots[4]),
+                ..Default::default()
+            })
+            .add_systems(
+                Update,
+                (sync_environment_animation_state, apply_animation_state).chain(),
+            );
+        let pending = PlacementState::PendingTaskbar {
+            monitor: NativeMonitorHandle::from_raw(1),
+            edge: TaskbarEdge::Bottom,
+            settle_frames: 1,
+        };
+        let committed = PlacementState::Taskbar(TaskbarAttachment {
+            monitor: NativeMonitorHandle::from_raw(1),
+            edge: TaskbarEdge::Bottom,
+            along_offset: 100,
+        });
+        let mut previous = None;
+        let mut seen = Vec::new();
+        for _ in 0..30 {
+            app.world_mut()
+                .resource_mut::<DesktopEnvironment>()
+                .placement = pending;
+            app.update();
+            let selected = app
+                .world()
+                .resource::<NeraAnimationState>()
+                .sitting_pose
+                .unwrap();
+            assert_ne!(
+                Some(selected),
+                previous,
+                "a new seat should vary the position"
+            );
+            previous = Some(selected);
+            if !seen.contains(&selected) {
+                seen.push(selected);
+            }
+            app.world_mut()
+                .resource_mut::<DesktopEnvironment>()
+                .placement = committed;
+            app.update();
+
+            // Many timer intervals, menu interaction, fidget, hit, and Attention
+            // must all return to the same chosen loop on this attachment.
+            for _ in 0..10 {
+                let mut state = app.world_mut().resource_mut::<NeraAnimationState>();
+                state.advance(Duration::from_secs(60));
+                state.set_praying_menu(true);
+                assert_eq!(state.visual_state(), VisualState::SittingLoop);
+                state.set_praying_menu(false);
+                assert!(state.request_idle_variation(
+                    IdleMicroAction::SittingRubbingArm,
+                    Duration::from_secs(1)
+                ));
+                app.update();
+                assert_eq!(
+                    app.world().resource::<PlayedClip>().0,
+                    Some(slots[3].entity)
+                );
+                let mut state = app.world_mut().resource_mut::<NeraAnimationState>();
+                state.advance(Duration::from_secs(1));
+                state.request_sitting_dodge(Duration::from_secs(1));
+                app.update();
+                assert_eq!(
+                    app.world().resource::<PlayedClip>().0,
+                    Some(slots[4].entity)
+                );
+                let mut state = app.world_mut().resource_mut::<NeraAnimationState>();
+                state.advance(Duration::from_secs(1));
+                state.suspend_support_for_attention();
+                state.restore_support_after_attention(true);
+                app.update();
+                let state = app.world().resource::<NeraAnimationState>();
+                assert_eq!(state.sitting_pose, Some(selected));
+                assert_eq!(state.visual_state(), VisualState::SittingLoop);
+                let clips = app.world().resource::<NeraAnimationClips>();
+                let expected = clips.sitting_pose(selected).unwrap().entity;
+                assert_eq!(clip_for_state(state, clips).1, RepeatAnimation::Forever);
+                assert_eq!(app.world().resource::<PlayedClip>().0, Some(expected));
+            }
+            app.world_mut()
+                .resource_mut::<DesktopEnvironment>()
+                .placement = PlacementState::Free;
+            app.update();
+            assert_eq!(
+                app.world().resource::<NeraAnimationState>().visual_state(),
+                VisualState::Idle
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            3,
+            "all three sitting positions must be reachable"
+        );
+    }
+
+    #[test]
+    fn sitting_position_ignores_unloaded_clips_and_does_not_switch_when_they_arrive() {
+        use crate::environment::{DesktopEnvironment, PlacementState, TaskbarEdge};
+        use crate::platform::NativeMonitorHandle;
+        let mut app = App::new();
+        app.init_resource::<NeraAnimationState>()
+            .init_resource::<DesktopEnvironment>()
+            .insert_resource(NeraAnimationClips {
+                sitting_loop: Some(clip(2)),
+                sitting_2: Some(clip(0)), // Not usable yet.
+                ..Default::default()
+            })
+            .add_systems(Update, sync_environment_animation_state);
+        let seat = PlacementState::PendingTaskbar {
+            monitor: NativeMonitorHandle::from_raw(1),
+            edge: TaskbarEdge::Bottom,
+            settle_frames: 1,
+        };
+        app.world_mut()
+            .resource_mut::<DesktopEnvironment>()
+            .placement = seat;
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().sitting_pose,
+            Some(SittingPose::Default)
+        );
+        app.world_mut()
+            .resource_mut::<NeraAnimationClips>()
+            .sitting_2 = Some(clip(3));
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().sitting_pose,
+            Some(SittingPose::Default)
+        );
+        app.world_mut()
+            .resource_mut::<DesktopEnvironment>()
+            .placement = PlacementState::Free;
+        app.update();
+        app.world_mut()
+            .resource_mut::<DesktopEnvironment>()
+            .placement = seat;
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().sitting_pose,
+            Some(SittingPose::Sitting2)
         );
     }
 }

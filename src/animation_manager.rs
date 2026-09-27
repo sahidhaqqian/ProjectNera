@@ -562,7 +562,9 @@ fn handle_actions(
         if state.combine_job.is_some() {
             continue;
         }
-        state.error = None;
+        if state.error.take().is_some() {
+            state.dirty = true;
+        }
         match action {
             ManagerAction::Close => state.close_requested = true,
             ManagerAction::Back => {

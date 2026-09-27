@@ -43,6 +43,7 @@ fn decode_event(line: &str) -> Option<Event> {
 struct ManagerProcess {
     child: Option<Child>,
     events: Option<Mutex<mpsc::Receiver<Event>>>,
+    pending_playback_error: Option<(String, String)>,
 }
 
 impl Drop for ManagerProcess {
@@ -50,6 +51,7 @@ impl Drop for ManagerProcess {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
+            crate::platform::set_animation_manager_process_id(None);
         }
     }
 }
@@ -68,6 +70,7 @@ impl ManagerProcess {
             command.env("NERA_GALLERY_SMOKE_TEST", "1");
         }
         let mut child = command.spawn()?;
+        crate::platform::set_animation_manager_process_id(Some(child.id()));
         let output = child.stdout.take().expect("piped manager output");
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
@@ -93,7 +96,7 @@ impl Plugin for AnimationManagerHostPlugin {
             .add_message::<OpenAnimationManager>()
             .add_systems(
                 Update,
-                (poll_manager, open_manager)
+                (poll_manager, open_manager, forward_playback_errors)
                     .chain()
                     .before(crate::pet_behavior::update_pet_behavior),
             );
@@ -153,12 +156,51 @@ fn poll_manager(
         // The reader drains the pipe asynchronously; retain its receiver until
         // the next launch so the final Back/Play event cannot race process exit.
         process.child = None;
+        crate::platform::set_animation_manager_process_id(None);
     }
     gate.window_open = process.child.is_some();
 }
 
+fn forward_playback_errors(
+    mut errors: MessageReader<crate::animation::LibraryAnimationError>,
+    mut process: ResMut<ManagerProcess>,
+) {
+    for error in errors.read() {
+        process.pending_playback_error = Some((error.path.clone(), error.reason.clone()));
+    }
+    let Some(error) = &process.pending_playback_error else {
+        return;
+    };
+    // Keep the latest error until a gallery is available, including load failures
+    // arriving after the user closed it. JSON preserves file names and newlines.
+    let encoded = serde_json::to_string(error).expect("serializing two strings");
+    if process
+        .child
+        .as_mut()
+        .and_then(|child| child.stdin.as_mut())
+        .is_some_and(|input| writeln!(input, "PLAYBACK_ERROR\t{encoded}").is_ok())
+    {
+        process.pending_playback_error = None;
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Control {
+    Focus,
+    PlaybackError(String, String),
+}
+
+fn decode_control(line: &str) -> Option<Control> {
+    if line == "FOCUS" {
+        return Some(Control::Focus);
+    }
+    let (path, reason) =
+        serde_json::from_str::<(String, String)>(line.strip_prefix("PLAYBACK_ERROR\t")?).ok()?;
+    Some(Control::PlaybackError(path, reason))
+}
+
 #[derive(Resource)]
-struct Controls(Mutex<mpsc::Receiver<()>>);
+struct Controls(Mutex<mpsc::Receiver<Control>>);
 
 pub(crate) fn run_worker() {
     use bevy::render::{
@@ -169,8 +211,10 @@ pub(crate) fn run_worker() {
     let (send, receive) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-            if line == "FOCUS" && send.send(()).is_err() {
-                break;
+            if let Some(control) = decode_control(&line) {
+                if send.send(control).is_err() {
+                    break;
+                }
             }
         }
         // EOF drops the sender. The worker exits if its parent terminates.
@@ -221,14 +265,20 @@ pub(crate) fn run_worker() {
 fn receive_controls(
     controls: Res<Controls>,
     mut windows: Query<&mut Window, With<ManagerWindow>>,
+    mut state: ResMut<super::ManagerState>,
     mut exit: MessageWriter<AppExit>,
 ) {
     loop {
         match controls.0.lock().unwrap().try_recv() {
-            Ok(()) => {
+            Ok(Control::Focus) => {
                 for mut window in &mut windows {
                     window.focused = true;
                 }
+            }
+            Ok(Control::PlaybackError(path, reason)) => {
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                state.error = Some(format!("{name}: {reason}"));
+                state.dirty = true;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 exit.write(AppExit::Success);
@@ -369,6 +419,38 @@ fn smoke_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_playback_failure_reaches_the_gallery_error_label() {
+        let path = "animations/imported/quoted \"name\".vrma";
+        let reason = "Invalid VRMA\nSelect another animation";
+        let line = format!(
+            "PLAYBACK_ERROR\t{}",
+            serde_json::to_string(&(path, reason)).unwrap()
+        );
+        assert_eq!(
+            decode_control(&line),
+            Some(Control::PlaybackError(path.into(), reason.into()))
+        );
+        assert_eq!(decode_control("FOCUS"), Some(Control::Focus));
+        assert_eq!(decode_control("PLAYBACK_ERROR\tmalformed"), None);
+        let (send, receive) = mpsc::channel();
+        send.send(decode_control(&line).unwrap()).unwrap();
+        let mut app = App::new();
+        let mut state = super::super::ManagerState::for_test();
+        state.dirty = false;
+        app.insert_resource(state)
+            .insert_resource(Controls(Mutex::new(receive)))
+            .add_message::<AppExit>()
+            .add_systems(Update, receive_controls);
+        app.update();
+        let state = app.world().resource::<super::super::ManagerState>();
+        assert!(state.dirty);
+        assert_eq!(
+            state.error.as_deref(),
+            Some("quoted \"name\".vrma: Invalid VRMA\nSelect another animation")
+        );
+    }
+
     #[test]
     fn pipe_protocol_only_accepts_library_paths_and_back() {
         assert_eq!(decode_event("NERA_MANAGER\tBACK"), Some(Event::Back));

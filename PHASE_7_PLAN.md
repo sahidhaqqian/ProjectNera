@@ -2,7 +2,7 @@
 
 Status: fondasi behavior, movement, dan kontrol pengguna sudah diimplementasikan
 memakai aset yang tersedia. `cargo check` berhasil;
-`cargo test`: **206 passed, 0 failed, 5 ignored** (tes native/aset lokal opt-in existing).
+`cargo test`: **229 passed, 0 failed, 5 ignored** (tes native/aset lokal opt-in existing).
 Binary debug terbaru selesai dikompilasi dan di-link. `cargo build` gagal menimpa
 `nera.exe` yang masih berjalan; hasil compiler disalin dan diverifikasi sebagai
 `target/debug/nera-updated.exe`. Tutup Nera lama sebelum membuka build tersebut.
@@ -33,12 +33,27 @@ dimatikan.
 Walking memakai assets/animations/animasi_basic/Walking.vrma. Setiap perjalanan
 menunggu LookAround selesai sebelum jeda hadap dan gerak. Idle berdiri memakai
 LookAround, Relax, Sleepy, Blush, Catwalk_Idle_Twist_R, Bored, dan Angry_Gesture.
-Idle duduk memakai Sitting_2, Sitting_4, dan Sitting_Rubbing_Arm. Hit kepala/dada
+Setiap mulai duduk, Nera memilih satu posisi dari Sitting_Idle_Loop, Sitting_2,
+atau Sitting_4 yang sudah siap, menghindari posisi sebelumnya bila ada alternatif.
+Posisi ini di-loop sepanjang sesi duduk dan tidak diganti timer idle. Duduk ulang
+memilih lagi; menu, dodge, dan kembali dari alarm mempertahankan pilihan tadi.
+Sitting_Rubbing_Arm tetap sebagai gerakan kecil saat duduk. Hit kepala/dada
 saat duduk memicu Dodge_While_Sitting tanpa melepas attachment atau menghitung
 combo death berdiri. Tujuh klip tambahan dipindahkan dari Bookmarks ke
 animasi_basic; menu titik tiga klip dasar disembunyikan, preview tetap tersedia.
 Physics, interaksi, alarm, dan prioritas animasi tetap berada pada sistem existing.
 Tidak diperlukan hunting VRMA baru untuk fondasi ini.
+
+Perbaikan reliability: semua alarm pada menit yang sama masuk antrean meski quick
+alarm/snooze aktif; deadline dan label timer tetap tersimpan. Cleanup alarm lama
+selesai sebelum alarm berikutnya dimulai. Alt+F4/native close pada panel alarm
+menutup Attention melalui lifecycle biasa. Pemutaran galeri memvalidasi VRMA
+sebelum memasangnya ke rig, memakai timeout 20 detik per tahap, dan menampilkan
+error di manager tanpa mengunci pilihan berikutnya. Cache desktop dibatasi 32
+clip/64 MiB total ukuran file sumber, maksimum 16 MiB per file. Saat penuh, clip
+cached tetap bisa dimainkan; clip baru memerlukan restart Nera. Batas ini bukan
+hasil pengukuran RAM. Semua HWND proses Nera dan worker manager dikecualikan dari
+support/fullscreen; settings lampu hanya mengubah NeraMainLight.
 
 ## Kontrol pengguna dan cadence
 
@@ -141,7 +156,7 @@ Tes otomatis memeriksa keputusan berbasis seed, anti-repetition, cooldown,
 settings lama/batas nilai, interupsi, geometri tujuan/support, dan motion tanpa
 overshoot. Hasil terintegrasi: `cargo check` berhasil, binary debug tersedia seperti
 catatan di atas, dan
-`cargo test` **206 passed, 0 failed, 5 ignored**.
+`cargo test` **229 passed, 0 failed, 5 ignored**.
 Tes tersebut tidak membuktikan kualitas gerak dan perilaku HWND nyata.
 
 Pengujian visual dijalankan pengguna; pekerjaan implementasi ini **tidak
@@ -162,8 +177,14 @@ menjalankan Nera**. Checklist native berikut masih perlu dilakukan:
    stabil; menu titik tiga hanya muncul pada animasi non-dasar.
 7. Pemakaian 60 menit dan 20 siklus buka/tutup manager, termasuk memilih beberapa
    animasi desktop; bandingkan RAM, CPU, dan frame time dengan baseline release.
+8. Dua alarm jatuh tempo pada menit sama saat quick alarm/snooze aktif; tutup panel
+   pertama lewat Alt+F4 dan pastikan panel berikutnya tampil serta timer lama tetap
+   tersedia. Pilih VRMA rusak, lalu file valid; ulangi sampai batas cache dan
+   pastikan error terlihat serta clip cached tetap bisa dimainkan.
 
-Cache playback menyimpan klip yang pernah dimainkan. Sebelum memperluas koleksi
+Cache playback menyimpan klip yang pernah dimainkan sampai batas admission di atas.
+Tes 400 permintaan pada cache penuh memeriksa jumlah entity dan replay, bukan
+profiling RAM aplikasi native selama 30–60 menit. Sebelum memperluas koleksi
 otomatis, ukur private bytes/RAM pet, manager, serta total keduanya, dan periksa
 stabilitas setelah warm-up. Target idle **100–300 MB** adalah sasaran profiling,
 bukan jaminan hasil Phase 7. Pelepasan cache perlu menjaga konsistensi graph VRM.

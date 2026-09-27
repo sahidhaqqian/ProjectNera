@@ -191,8 +191,6 @@ fn expression_for_idle_micro(
         Fidget::Relax
         | Fidget::Sleepy
         | Fidget::Bored
-        | Fidget::Sitting2
-        | Fidget::Sitting4
         | Fidget::SittingRubbingArm => Face::Relaxed,
         Fidget::AngryGesture => Face::Angry,
         // `nera_256.vrm` declares no blush preset, so the shy clip gets the

@@ -338,7 +338,21 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before making cross-subsystem changes. I
 
 Phase 7 behavior, roaming controls, home bounds, motion smoothing, fullscreen
 pause, and standing window-top movement are implemented using the existing clips.
-Validation: `cargo check` passes; `cargo test` reports **206 passed,
+Each sitting session picks one loaded base position (Sitting_Idle_Loop, Sitting_2,
+or Sitting_4) and retains it until detach; only Sitting_Rubbing_Arm is a timed
+seated gesture. Menu interaction, dodge, and returning from an alarm preserve
+that choice.
+
+Reliability fixes queue all simultaneous scheduled alarms without losing an
+existing quick/snooze deadline, dismiss Attention on native panel close, and
+validate/time out failed desktop VRMA loads with visible gallery errors. Desktop
+custom clips have an admission limit of 32 clips / 64 MiB source files (16 MiB per
+file); cached clips remain playable at capacity, while new clips require restart.
+These are source-size bounds, not measured RAM limits. Utility windows from Nera
+and its manager process are excluded from support/fullscreen detection, and light
+settings affect only the desktop key light.
+
+Validation: `cargo check` passes; `cargo test` reports **229 passed,
 0 failed, 5 ignored** (existing opt-in native/local-asset tests). The latest debug
 binary compiled and linked, but `cargo build` could not replace the running
 `target/debug/nera.exe`. Its compiled output is available as `target/debug/nera-updated.exe`;

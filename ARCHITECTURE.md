@@ -185,9 +185,14 @@ an open Animation Manager, hidden state, and fullscreen pause stop autonomy.
 Fullscreen is sampled on the pet's monitor; it does not hide Nera or disable alarm
 scheduling. `Allow Roaming` defaults off and gates locomotion;
 existing idle variations remain available. `Stay Here` persists that switch off.
-Standing and seated variations use separate pose-matched candidate sets, sharing
-the same controller, cooldown, and history. Seated variations leave placement
-unchanged, regardless of roaming preferences. Seated head/chest hits request
+Standing and seated gestures use separate pose-matched candidate sets, sharing
+the same controller, cooldown, and history. Sitting_2 and Sitting_4 are base
+positions, not periodic gestures: each new attachment chooses one loaded position
+from those two and Sitting_Idle_Loop, avoiding the preceding position when possible.
+`NeraAnimationState::sitting_pose` retains that choice until detach, including
+across menu interaction, dodge, and Attention restoration. Only Sitting_Rubbing_Arm
+is a timed seated gesture. These animations leave placement unchanged, regardless
+of roaming preferences. Seated head/chest hits request
 DodgeWhileSitting and keep the attachment; only standing hits feed the death combo.
 The imported seated clips have different authored pelvis translations. After
 animation evaluation, `avatar::preserve_seated_hips` retains the calibrated seated
@@ -278,7 +283,8 @@ when attention exits.
 
 - **Purpose:** Schedule alarms, play/stop alarm audio, request attention, and
   coordinate alarm animation and dismiss UI.
-- **Owns:** `AlarmState` (`Idle`, `Armed`, `Ringing`), `AlarmDisplayInfo`, custom
+- **Owns:** `AlarmState` (`Idle`, `Armed`, `Ringing` plus pending deadlines/display
+  snapshots), `AlarmDisplayInfo`, custom
   schedule de-duplication, alarm assets/audio entities, and alarm VRMA bootstrap.
 - **Reads/depends on:** Persistent alarm configuration, local platform time,
   action-menu commands, presentation lifecycle, and animation command messages.
@@ -304,7 +310,13 @@ Windows-only companion modules:
   namespace before loading VRMA, avoiding global retarget-table collisions.
   Card clicks emit `PlayLibraryAnimation`; `animation/library.rs` loads a clip
   on the desktop rig and requests a timed action through the normal controller.
-  Loaded desktop clip children stay cached so graph node indices remain stable.
+  Desktop selections validate the VRMA extension, bone mapping, scene, and usable
+  keyframes before attachment. Asset loading and rig initialization each have a
+  20-second timeout; errors reach the gallery through host/worker IPC and release
+  the latest pending selection. Loaded desktop clip children stay cached so graph
+  node indices remain stable. Admission stops at 32 custom clips or 64 MiB of source
+  files (16 MiB per file); cached clips remain usable and the UI explains that new
+  selections require a restart when full. These limits do not measure resident RAM.
   Desktop animation state and clip ownership remain in `animation`.
 
 ### `src/settings/` — persistent configuration and runtime application
@@ -328,7 +340,8 @@ Submodule boundaries:
 - `runtime.rs`: position recovery/recording, save helpers, and live application
   of always-on-top, size, audio, and FPS settings.
 - `ui.rs`: settings window, controls, labels, scrolling, dragging, and input gate.
-- `shadow.rs`: simple/character shadow entities and setting-driven updates.
+- `shadow.rs`: simple/character shadow entities and setting-driven updates;
+  brightness/character-shadow light changes query only `avatar::NeraMainLight`.
 - `startup.rs`: Windows startup registration read/write boundary.
 
 The UI mutates the model; it is not the model. Preserve field meanings and the
@@ -364,6 +377,9 @@ values because the windows-rs `HWND` wrapper is not a Send/Sync Bevy resource.
 `windows.rs` is large but already bounded. Add a platform helper here when the
 operation is generally native; do not spread direct Win32 calls into domain
 modules without an existing native UI reason.
+Window support discovery and fullscreen detection exclude all HWNDs owned by
+the pet process and the live manager child process; its PID is registered at
+spawn and cleared at reap/drop.
 
 ## 3. Dependency relationships
 
@@ -505,6 +521,12 @@ action-menu preset or persistent alarm schedule
 The alarm-owned failsafe stops ringing if attention never becomes active. The
 dismiss panel has a separate reachability failsafe because it is the user's
 control surface.
+The scheduler collects every due entry regardless of the current alarm phase and
+deduplicates when enqueuing. A due reminder can precede a future quick/snooze timer
+without losing its deadline or label. `PostUpdate` consumes presentation exits
+before dispatching the next alarm, and waits for DesktopPet, removal of the
+old dismiss panel, and reset of its runtime ownership. Native close/Alt+F4 and unexpected panel removal request the
+same Attention exit as Turn off, cancelling any uncommitted snooze gesture.
 
 ### Settings
 
@@ -608,7 +630,7 @@ Consequences:
 Plugin-local `Update` chains also matter:
 
 - `alarm.rs`: VRMA bootstrap -> menu/control consumption -> custom schedule ->
-  deadline -> presentation-exit cleanup -> failed-attention abort.
+  failed-attention abort. Exit cleanup and deadline dispatch run in `PostUpdate`.
 - `presentation.rs`: debug request -> presentation command handling.
 - `settings/mod.rs`: position restoration/record/save -> UI handling -> labels ->
   runtime application -> cleanup, all chained.
@@ -622,6 +644,8 @@ requires a new ordering constraint.
 
 ### `PostUpdate`
 
+- Alarm presentation-exit cleanup -> deadline dispatch runs after every `Update`
+  presentation/panel lifecycle system; an old exit cannot stop the next alarm.
 - `update_click_through` runs after `VrmSystemSets::SpringBone`, so body hit
   testing uses the evaluated pose. It runs only in desktop-pet mode with utility
   input available.
@@ -803,7 +827,7 @@ window support, attention entry/exit, settings input gating, tray recovery, and
 multi-monitor/DPI behavior on Windows.
 
 For Phase 7, `cargo check` passes; `cargo test` reports
-**206 passed, 0 failed, 5 ignored** (existing opt-in native/local-asset tests). Native visual
+**229 passed, 0 failed, 5 ignored** (existing opt-in native/local-asset tests). Native visual
 validation has not been run; GUI testing is user-led and implementation work does
 not launch Nera. Geometry/state tests do not establish real mixed-DPI or
 multi-monitor behavior, gait quality, or long-running resource stability.

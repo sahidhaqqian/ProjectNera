@@ -1,6 +1,7 @@
 //! Animation vocabulary, request priority, and authoritative runtime state.
 use std::time::Duration;
 
+use crate::rng::NeraRng;
 use bevy::prelude::*;
 
 #[cfg(target_os = "windows")]
@@ -40,6 +41,19 @@ pub(crate) enum BasePose {
     Sitting,
 }
 
+/// A base sitting position, chosen once on attachment and kept until detach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SittingPose {
+    #[default]
+    Default,
+    Sitting2,
+    Sitting4,
+}
+
+impl SittingPose {
+    pub(super) const ALL: [Self; 3] = [Self::Default, Self::Sitting2, Self::Sitting4];
+}
+
 /// One-shot idle variations, each restricted to its matching support pose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum IdleMicroAction {
@@ -50,15 +64,13 @@ pub(crate) enum IdleMicroAction {
     CatwalkIdleTwistR,
     Bored,
     AngryGesture,
-    Sitting2,
-    Sitting4,
     SittingRubbingArm,
 }
 
 impl IdleMicroAction {
     /// Complete vocabulary for capability/pose coverage in tests.
     #[cfg(test)]
-    pub(crate) const ALL: [IdleMicroAction; 10] = [
+    pub(crate) const ALL: [IdleMicroAction; 8] = [
         IdleMicroAction::LookAround,
         IdleMicroAction::Relax,
         IdleMicroAction::Sleepy,
@@ -66,8 +78,6 @@ impl IdleMicroAction {
         IdleMicroAction::CatwalkIdleTwistR,
         IdleMicroAction::Bored,
         IdleMicroAction::AngryGesture,
-        IdleMicroAction::Sitting2,
-        IdleMicroAction::Sitting4,
         IdleMicroAction::SittingRubbingArm,
     ];
 
@@ -80,7 +90,7 @@ impl IdleMicroAction {
         Self::Bored,
         Self::AngryGesture,
     ];
-    pub(crate) const SITTING: [Self; 3] = [Self::Sitting2, Self::Sitting4, Self::SittingRubbingArm];
+    pub(crate) const SITTING: [Self; 1] = [Self::SittingRubbingArm];
 
     pub(crate) fn for_pose(pose: BasePose) -> &'static [Self] {
         match pose {
@@ -91,7 +101,7 @@ impl IdleMicroAction {
 
     pub(crate) fn base_pose(self) -> BasePose {
         match self {
-            Self::Sitting2 | Self::Sitting4 | Self::SittingRubbingArm => BasePose::Sitting,
+            Self::SittingRubbingArm => BasePose::Sitting,
             _ => BasePose::Idle,
         }
     }
@@ -105,8 +115,6 @@ impl IdleMicroAction {
             IdleMicroAction::CatwalkIdleTwistR => "Idle/CatwalkIdleTwistR",
             IdleMicroAction::Bored => "Idle/Bored",
             IdleMicroAction::AngryGesture => "Idle/AngryGesture",
-            IdleMicroAction::Sitting2 => "Sitting/Sitting2",
-            IdleMicroAction::Sitting4 => "Sitting/Sitting4",
             IdleMicroAction::SittingRubbingArm => "Sitting/RubbingArm",
         }
     }
@@ -275,6 +283,9 @@ pub(crate) enum VisualState {
 #[derive(Resource, Debug)]
 pub(crate) struct NeraAnimationState {
     pub(super) base_pose: BasePose,
+    // Also remembers the last seat across detach, avoiding consecutive repeats.
+    pub(super) sitting_pose: Option<SittingPose>,
+    pub(super) sitting_rng: NeraRng,
     pub(super) active_actions: Vec<ActiveAction>,
     pub(super) support_transition: Option<TimedSupportTransition>,
     pub(super) was_on_sitting_surface: bool,
@@ -291,6 +302,8 @@ impl Default for NeraAnimationState {
     fn default() -> Self {
         Self {
             base_pose: BasePose::Idle,
+            sitting_pose: None,
+            sitting_rng: NeraRng::from_entropy(),
             active_actions: Vec::with_capacity(4),
             support_transition: None,
             was_on_sitting_surface: false,
@@ -302,6 +315,20 @@ impl Default for NeraAnimationState {
 }
 
 impl NeraAnimationState {
+    pub(super) fn select_sitting_pose(&mut self, available: &[SittingPose]) {
+        let candidates: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|pose| available.len() == 1 || Some(*pose) != self.sitting_pose)
+            .collect();
+        self.sitting_pose = Some(
+            self.sitting_rng
+                .pick_index(candidates.len())
+                .map(|index| candidates[index])
+                .unwrap_or_default(),
+        );
+    }
+
     pub(crate) fn base_pose(&self) -> BasePose {
         self.base_pose
     }

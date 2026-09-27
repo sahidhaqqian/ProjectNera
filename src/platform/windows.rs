@@ -1,6 +1,7 @@
 use std::{
     ffi::c_void,
     mem::size_of,
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use bevy::{
@@ -89,6 +90,25 @@ use windows::Win32::{
 
 pub const BASE_DPI: u32 = 96;
 const MONITOR_PRIMARY_FLAG: u32 = 1;
+
+// The gallery has its own renderer process. Track only the child we own so its
+// windows cannot become pet supports or trigger fullscreen DND either.
+static ANIMATION_MANAGER_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn set_animation_manager_process_id(process_id: Option<u32>) {
+    ANIMATION_MANAGER_PROCESS_ID.store(process_id.unwrap_or(0), Ordering::Relaxed);
+}
+
+fn is_external_application_process(
+    process_id: u32,
+    own_process_id: u32,
+    manager_process_id: u32,
+) -> bool {
+    process_id != 0
+        && own_process_id != 0
+        && process_id != own_process_id
+        && process_id != manager_process_id
+}
 // -----------------------------------------------------------------------------
 // Native Handle
 // -----------------------------------------------------------------------------
@@ -398,6 +418,22 @@ fn is_window_candidate(
 
     // HWND masih hidup?
     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return false;
+    }
+
+    let mut process_id = 0;
+    let mut own_process_id = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        GetWindowThreadProcessId(nera_hwnd.hwnd(), Some(&mut own_process_id));
+    }
+    // Settings, alarm panels, and other Nera utilities are not desktop support
+    // surfaces even if they are ordinary top-level windows without TOOLWINDOW.
+    if !is_external_application_process(
+        process_id,
+        own_process_id,
+        ANIMATION_MANAGER_PROCESS_ID.load(Ordering::Relaxed),
+    ) {
         return false;
     }
 
@@ -772,8 +808,12 @@ pub fn foreground_fullscreen_on_monitor(
         GetWindowThreadProcessId(own_hwnd.hwnd(), Some(&mut own_process));
     }
     // Failure to identify the process cannot establish an external app. This
-    // also excludes every Nera utility HWND, not just the transparent canvas.
-    if foreground_process == 0 || own_process == 0 {
+    // also excludes every Nera utility HWND and our gallery child process.
+    if !is_external_application_process(
+        foreground_process,
+        own_process,
+        ANIMATION_MANAGER_PROCESS_ID.load(Ordering::Relaxed),
+    ) {
         return false;
     }
     let Some(rect) = window_rect(native_handle_from_hwnd(foreground)) else {
@@ -842,6 +882,17 @@ fn fullscreen_candidate(candidate: FullscreenCandidate<'_>) -> bool {
 #[cfg(test)]
 mod fullscreen_tests {
     use super::*;
+
+    #[test]
+    fn desktop_windows_exclude_own_utility_and_gallery_processes() {
+        assert!(!is_external_application_process(42, 42, 57));
+        assert!(!is_external_application_process(57, 42, 57));
+        assert!(!is_external_application_process(0, 42, 57));
+        assert!(!is_external_application_process(88, 0, 57));
+        assert!(is_external_application_process(88, 42, 57));
+        // Closing the gallery releases its PID; absence is represented by zero.
+        assert!(is_external_application_process(57, 42, 0));
+    }
 
     fn candidate() -> FullscreenCandidate<'static> {
         FullscreenCandidate {

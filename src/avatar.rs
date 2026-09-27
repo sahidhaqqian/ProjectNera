@@ -20,6 +20,9 @@ pub(crate) struct NeraAvatar;
 pub(crate) struct NeraMainCamera;
 
 #[derive(Component)]
+pub(crate) struct NeraMainLight;
+
+#[derive(Component)]
 pub(crate) struct LookAtTarget;
 
 const VRM_PATH: &str = "vrm/nera_256.vrm";
@@ -41,6 +44,7 @@ pub(crate) fn setup_camera(mut commands: Commands) {
 pub(crate) fn setup_lighting(mut commands: Commands) {
     commands.spawn((
         Name::new("Nera Key Light"),
+        NeraMainLight,
         DirectionalLight {
             illuminance: 10_000.0,
             shadow_maps_enabled: false,

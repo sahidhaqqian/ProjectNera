@@ -21,15 +21,13 @@ use bevy::{
     camera::RenderTarget,
     prelude::*,
     ui::UiTargetCamera,
-    window::{WindowLevel, WindowPosition, WindowRef},
+    window::{WindowCloseRequested, WindowLevel, WindowPosition, WindowRef},
 };
 
 use crate::{
     alarm::{AlarmControlCommand, AlarmDisplayInfo, DEFAULT_SNOOZE_DURATION},
     environment::DesktopEnvironment,
-    platform::{
-        self, LocalDateTime, NativeWindowHandle, PhysicalPoint, PhysicalRect,
-    },
+    platform::{self, LocalDateTime, NativeWindowHandle, PhysicalPoint, PhysicalRect},
     presentation::{
         AttentionKind, PresentationCommand, PresentationEntered,
         PresentationExited, PresentationState,
@@ -80,7 +78,7 @@ const SECONDARY_TEXT: Color = Color::srgb(0.88, 0.9, 0.96);
 // -----------------------------------------------------------------------------
 
 #[derive(Component)]
-struct AlarmDismissWindow;
+pub(crate) struct AlarmDismissWindow;
 
 /// Garbage-collection tag mirroring `settings::SettingsOwned`.
 #[derive(Component)]
@@ -128,7 +126,7 @@ impl AlarmPanelSnapshot {
 }
 
 #[derive(Resource, Default)]
-struct AlarmDismissRuntime {
+pub(crate) struct AlarmDismissRuntime {
     window: Option<Entity>,
     hwnd: Option<NativeWindowHandle>,
     requested_at: Option<Instant>,
@@ -152,6 +150,7 @@ impl Plugin for AlarmDismissPlugin {
                     place_dismiss_panel,
                     drag_dismiss_panel,
                     update_alarm_action_buttons,
+                    handle_native_close,
                     commit_alarm_action_after_release,
                     spawn_failsafe,
                     cleanup_dismiss_panel,
@@ -707,10 +706,7 @@ fn place_dismiss_panel(
 
 fn drag_dismiss_panel(
     mouse: Res<ButtonInput<MouseButton>>,
-    drag_regions: Query<
-        &Interaction,
-        (Changed<Interaction>, With<AlarmDismissDragRegion>),
-    >,
+    drag_regions: Query<&Interaction, (Changed<Interaction>, With<AlarmDismissDragRegion>)>,
     mut windows: Query<&mut Window, With<AlarmDismissWindow>>,
 ) {
     // Same rule as Settings: winit expects start_drag_move() directly from a
@@ -758,6 +754,28 @@ fn update_alarm_action_buttons(
                 button.action,
             );
         }
+    }
+}
+
+/// Alt+F4/native close has the same meaning as Turn off. Bevy removes the
+/// native window in Last; request presentation teardown in Update while its
+/// identity is still known, so PresentationExited stops audio and animation.
+fn handle_native_close(
+    mut requests: MessageReader<WindowCloseRequested>,
+    windows: Query<(), With<AlarmDismissWindow>>,
+    mut runtime: ResMut<AlarmDismissRuntime>,
+    mut presentation: MessageWriter<PresentationCommand>,
+) {
+    let requested = requests
+        .read()
+        .any(|request| Some(request.window) == runtime.window);
+    let disappeared = runtime
+        .window
+        .is_some_and(|window| !windows.contains(window));
+    if requested || disappeared {
+        // A close cancels a not-yet-committed button gesture, including snooze.
+        runtime.pending_action = None;
+        presentation.write(PresentationCommand::ExitAttention);
     }
 }
 
@@ -889,6 +907,18 @@ fn collect_orphaned_dismiss_entities(
 }
 
 impl AlarmDismissRuntime {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.window.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_window_for_test(window: Entity) -> Self {
+        Self {
+            window: Some(window),
+            ..default()
+        }
+    }
+
     fn reset(&mut self) {
         self.window = None;
         self.hwnd = None;
@@ -906,6 +936,88 @@ impl AlarmDismissRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dismiss_action_app() -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<AlarmDismissRuntime>()
+            .init_resource::<PresentationState>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<WindowCloseRequested>()
+            .add_message::<PresentationCommand>()
+            .add_message::<PresentationExited>()
+            .add_message::<AlarmControlCommand>()
+            .add_systems(
+                Update,
+                (handle_native_close, commit_alarm_action_after_release).chain(),
+            );
+        let panel = app.world_mut().spawn(AlarmDismissWindow).id();
+        app.world_mut().resource_mut::<AlarmDismissRuntime>().window = Some(panel);
+        (app, panel)
+    }
+
+    #[test]
+    fn native_close_exits_attention_and_cancels_uncommitted_snooze() {
+        let (mut app, panel) = dismiss_action_app();
+        app.world_mut()
+            .resource_mut::<AlarmDismissRuntime>()
+            .pending_action = Some(AlarmPanelAction::SnoozeFiveMinutes);
+        app.world_mut()
+            .write_message(WindowCloseRequested { window: panel });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![PresentationCommand::ExitAttention]
+        );
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<AlarmControlCommand>>()
+                .drain()
+                .count(),
+            0
+        );
+        assert!(
+            app.world()
+                .resource::<AlarmDismissRuntime>()
+                .pending_action
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_close_of_another_window_does_not_dismiss_alarm() {
+        let (mut app, _) = dismiss_action_app();
+        let other = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .write_message(WindowCloseRequested { window: other });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn disappeared_panel_also_exits_attention_after_it_was_revealed() {
+        let (mut app, panel) = dismiss_action_app();
+        app.world_mut()
+            .resource_mut::<AlarmDismissRuntime>()
+            .revealed = true;
+        app.world_mut().despawn(panel);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![PresentationCommand::ExitAttention]
+        );
+    }
 
     #[test]
     fn panel_sits_on_the_right_and_is_vertically_centered() {
