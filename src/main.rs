@@ -1,6 +1,7 @@
 mod alarm;
 mod animation;
 mod avatar;
+mod character;
 
 mod desktop_physics;
 
@@ -21,6 +22,8 @@ mod presentation;
 mod rng;
 mod settings;
 mod startup_entrance;
+mod utility_window;
+mod vrm0_migration;
 mod walking;
 
 #[cfg(target_os = "windows")]
@@ -110,6 +113,7 @@ fn main() {
     app.add_plugins(SettingsPlugin::new("io.github.sahidhaqqi.projectnera"));
 
     let launch_visible = !app.world().resource::<NeraSettings>().start_hidden;
+    character::register_asset_source(&mut app);
 
     app.add_plugins(
         DefaultPlugins
@@ -165,6 +169,7 @@ fn main() {
         PresentationPlugin,
         alarm::AlarmPlugin,
         NeraSettingsPlugin,
+        character::CharacterPlugin,
     ));
 
     #[cfg(target_os = "windows")]
@@ -174,6 +179,7 @@ fn main() {
         AnimationManagerHostPlugin,
         AlarmDismissPlugin,
         AlarmSettingsPlugin,
+        utility_window::UtilityWindowPlugin,
     ));
 
     app.insert_resource(ClearColor(Color::NONE))

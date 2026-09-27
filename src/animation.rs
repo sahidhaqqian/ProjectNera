@@ -29,6 +29,71 @@ pub(crate) use walking_loop::smooth_walking_cycle;
 
 pub(crate) struct NeraAnimationPlugin;
 
+/// Clip entities and their graph indices belong to one rig. Keep the current
+/// seated/standing behavior, but discard every reference to the replaced rig.
+pub(crate) fn reset_for_character_change(world: &mut World) {
+    world.insert_resource(NeraAnimationClips::default());
+    world.insert_resource(NeraAnimationPlayback::default());
+    world.insert_resource(library::LibraryPlayback::default());
+    world.insert_resource(walking_loop::WalkingCycle::default());
+    world
+        .resource_mut::<NeraAnimationState>()
+        .active_actions
+        .retain(|active| !matches!(active.action, TemporaryAction::LibraryAnimation(_)));
+}
+
+pub(crate) fn character_animation_ready(world: &World) -> bool {
+    let (requested, _, _) = playback::clip_for_state(
+        world.resource::<NeraAnimationState>(),
+        world.resource::<NeraAnimationClips>(),
+    );
+    requested.is_some_and(|clip| {
+        world.resource::<NeraAnimationPlayback>().current_clip == Some(clip.entity)
+    })
+}
+
+#[cfg(test)]
+mod character_swap_tests {
+    use super::*;
+
+    #[test]
+    fn character_swap_preserves_seated_pose_and_rejects_standing_fallback_reveal() {
+        let mut world = World::new();
+        let idle = world.spawn_empty().id();
+        let seated = world.spawn_empty().id();
+        let mut state = NeraAnimationState::default();
+        state.set_base_pose(BasePose::Sitting);
+        state.sitting_pose = Some(SittingPose::Sitting2);
+        world.insert_resource(state);
+        world.insert_resource(NeraAnimationClips {
+            idle: Some(playback::ClipSlot {
+                entity: idle,
+                duration: Duration::from_secs(1),
+            }),
+            sitting_2: Some(playback::ClipSlot {
+                entity: seated,
+                duration: Duration::from_secs(1),
+            }),
+            ..default()
+        });
+        world.init_resource::<NeraAnimationPlayback>();
+        world.resource_mut::<NeraAnimationPlayback>().current_clip = Some(idle);
+        assert!(!character_animation_ready(&world));
+        world.resource_mut::<NeraAnimationPlayback>().current_clip = Some(seated);
+        assert!(character_animation_ready(&world));
+        reset_for_character_change(&mut world);
+        assert_eq!(
+            world.resource::<NeraAnimationState>().base_pose(),
+            BasePose::Sitting,
+        );
+        assert_eq!(
+            world.resource::<NeraAnimationState>().sitting_pose,
+            Some(SittingPose::Sitting2),
+        );
+        assert!(!character_animation_ready(&world));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn install_library_test_systems(app: &mut App) {
     app.init_resource::<NeraAnimationState>()

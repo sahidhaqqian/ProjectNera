@@ -44,6 +44,7 @@ struct ManagerProcess {
     child: Option<Child>,
     events: Option<Mutex<mpsc::Receiver<Event>>>,
     pending_playback_error: Option<(String, String)>,
+    character_path: String,
 }
 
 impl Drop for ManagerProcess {
@@ -57,11 +58,17 @@ impl Drop for ManagerProcess {
 }
 
 impl ManagerProcess {
-    fn spawn(&mut self, executable: &std::path::Path, smoke_test: bool) -> std::io::Result<()> {
+    fn spawn(
+        &mut self,
+        executable: &std::path::Path,
+        smoke_test: bool,
+        character_path: &str,
+    ) -> std::io::Result<()> {
         use std::os::windows::process::CommandExt;
         let mut command = Command::new(executable);
         command
             .arg("--animation-manager-worker")
+            .env("NERA_GALLERY_CHARACTER", character_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -84,6 +91,7 @@ impl ManagerProcess {
         });
         self.child = Some(child);
         self.events = Some(Mutex::new(receive));
+        self.character_path = character_path.to_owned();
         Ok(())
     }
 }
@@ -96,7 +104,12 @@ impl Plugin for AnimationManagerHostPlugin {
             .add_message::<OpenAnimationManager>()
             .add_systems(
                 Update,
-                (poll_manager, open_manager, forward_playback_errors)
+                (
+                    poll_manager,
+                    open_manager,
+                    forward_character,
+                    forward_playback_errors,
+                )
                     .chain()
                     .before(crate::pet_behavior::update_pet_behavior),
             );
@@ -111,6 +124,7 @@ fn open_manager(
     mut requests: MessageReader<OpenAnimationManager>,
     mut process: ResMut<ManagerProcess>,
     mut gate: ResMut<AnimationManagerInputGate>,
+    character: Option<Res<crate::character::ActiveCharacter>>,
 ) {
     if requests.read().next().is_none() {
         return;
@@ -123,11 +137,38 @@ fn open_manager(
     }
     let smoke =
         cfg!(debug_assertions) && std::env::var_os("NERA_GALLERY_HOST_SMOKE_TEST").is_some();
-    let result = std::env::current_exe().and_then(|exe| process.spawn(&exe, smoke));
+    let path = character.as_ref().map_or(
+        crate::character::DEFAULT_CHARACTER,
+        |character| character.asset_path.as_str(),
+    );
+    let result = std::env::current_exe().and_then(|exe| process.spawn(&exe, smoke, path));
     if let Err(error) = result {
         error!("Could not open Animation Manager: {error}");
     }
     gate.window_open = process.child.is_some();
+}
+
+fn forward_character(
+    character: Option<Res<crate::character::ActiveCharacter>>,
+    mut process: ResMut<ManagerProcess>,
+) {
+    let Some(character) = character else {
+        return;
+    };
+    if process.child.is_none() || process.character_path == character.asset_path {
+        return;
+    }
+    // Only ActiveCharacter is forwarded: a failed import keeps the last rig in
+    // both processes. JSON keeps spaces, quotes and Unicode file names intact.
+    let encoded = serde_json::to_string(&character.asset_path).expect("serializing asset path");
+    if process
+        .child
+        .as_mut()
+        .and_then(|child| child.stdin.as_mut())
+        .is_some_and(|input| writeln!(input, "CHARACTER\t{encoded}").is_ok())
+    {
+        process.character_path.clone_from(&character.asset_path);
+    }
 }
 
 fn poll_manager(
@@ -188,11 +229,17 @@ fn forward_playback_errors(
 enum Control {
     Focus,
     PlaybackError(String, String),
+    Character(String),
 }
 
 fn decode_control(line: &str) -> Option<Control> {
     if line == "FOCUS" {
         return Some(Control::Focus);
+    }
+    if let Some(path) = line.strip_prefix("CHARACTER\t") {
+        return serde_json::from_str::<String>(path)
+            .ok()
+            .map(Control::Character);
     }
     let (path, reason) =
         serde_json::from_str::<(String, String)>(line.strip_prefix("PLAYBACK_ERROR\t")?).ok()?;
@@ -220,6 +267,7 @@ pub(crate) fn run_worker() {
         // EOF drops the sender. The worker exits if its parent terminates.
     });
     let mut app = App::new();
+    crate::character::register_asset_source(&mut app);
     app.add_plugins(
         DefaultPlugins
             .set(AssetPlugin {
@@ -240,21 +288,29 @@ pub(crate) fn run_worker() {
                 ..default()
             }),
     );
-    app.add_plugins((VrmPlugin, VrmaPlugin, AnimationManagerPlugin))
-        .insert_resource(Controls(Mutex::new(receive)))
-        .add_message::<crate::animation::PlayLibraryAnimation>()
-        .add_message::<crate::settings::ReturnToActionMenu>()
-        .add_systems(Startup, |mut open: MessageWriter<OpenAnimationManager>| {
-            open.write_default();
-        })
-        .add_systems(
-            Update,
-            (
-                receive_controls,
-                forward_play.after(super::handle_actions),
-                forward_back.after(super::close_after_release),
-            ),
-        );
+    let character_path = std::env::var("NERA_GALLERY_CHARACTER")
+        .unwrap_or_else(|_| crate::character::DEFAULT_CHARACTER.to_owned());
+    app.add_plugins((
+        VrmPlugin,
+        VrmaPlugin,
+        crate::utility_window::UtilityWindowPlugin,
+        AnimationManagerPlugin,
+    ))
+    .insert_resource(super::preview::PreviewRuntime::for_character(character_path))
+    .insert_resource(Controls(Mutex::new(receive)))
+    .add_message::<crate::animation::PlayLibraryAnimation>()
+    .add_message::<crate::settings::ReturnToActionMenu>()
+    .add_systems(Startup, |mut open: MessageWriter<OpenAnimationManager>| {
+        open.write_default();
+    })
+    .add_systems(
+        Update,
+        (
+            receive_controls.before(super::preview::sync_visible_previews),
+            forward_play.after(super::handle_actions),
+            forward_back.after(super::close_after_release),
+        ),
+    );
     #[cfg(debug_assertions)]
     if std::env::var_os("NERA_GALLERY_SMOKE_TEST").is_some() {
         app.add_systems(Update, smoke_test.after(super::sync_gallery_scrollbar));
@@ -267,11 +323,15 @@ fn receive_controls(
     mut windows: Query<&mut Window, With<ManagerWindow>>,
     mut state: ResMut<super::ManagerState>,
     mut exit: MessageWriter<AppExit>,
+    mut previews: ResMut<super::preview::PreviewRuntime>,
+    mut images: ResMut<Assets<Image>>,
+    mut commands: Commands,
 ) {
     loop {
         match controls.0.lock().unwrap().try_recv() {
             Ok(Control::Focus) => {
                 for mut window in &mut windows {
+                    window.set_minimized(false);
                     window.focused = true;
                 }
             }
@@ -279,6 +339,9 @@ fn receive_controls(
                 let name = path.rsplit('/').next().unwrap_or(&path);
                 state.error = Some(format!("{name}: {reason}"));
                 state.dirty = true;
+            }
+            Ok(Control::Character(path)) => {
+                previews.set_character(path, &mut commands, &mut images);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 exit.write(AppExit::Success);
@@ -420,6 +483,17 @@ fn smoke_test(
 mod tests {
     use super::*;
     #[test]
+    fn character_protocol_preserves_asset_paths_and_rejects_malformed_messages() {
+        let path = "characters://Nera \"custom\" 日本語.vrm";
+        assert_eq!(
+            decode_control(&format!("CHARACTER\t{}", serde_json::to_string(path).unwrap())),
+            Some(Control::Character(path.into()))
+        );
+        assert_eq!(decode_control("CHARACTER\tmalformed"), None);
+        assert_eq!(decode_control("CHARACTER\t42"), None);
+    }
+
+    #[test]
     fn desktop_playback_failure_reaches_the_gallery_error_label() {
         let path = "animations/imported/quoted \"name\".vrma";
         let reason = "Invalid VRMA\nSelect another animation";
@@ -440,6 +514,8 @@ mod tests {
         state.dirty = false;
         app.insert_resource(state)
             .insert_resource(Controls(Mutex::new(receive)))
+            .init_resource::<super::super::preview::PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
             .add_message::<AppExit>()
             .add_systems(Update, receive_controls);
         app.update();
@@ -506,7 +582,7 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/nera.exe");
         for _ in 0..2 {
             let mut process = ManagerProcess::default();
-            process.spawn(&executable, true).unwrap();
+            process.spawn(&executable, true, crate::character::DEFAULT_CHARACTER).unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
             let status = loop {
                 if let Some(status) = process.child.as_mut().unwrap().try_wait().unwrap() {

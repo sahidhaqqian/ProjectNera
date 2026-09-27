@@ -21,7 +21,7 @@ use bevy::{
     camera::RenderTarget,
     prelude::*,
     ui::UiTargetCamera,
-    window::{WindowCloseRequested, WindowLevel, WindowPosition, WindowRef},
+    window::{WindowCloseRequested, WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints},
 };
 
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
         AttentionKind, PresentationCommand, PresentationEntered,
         PresentationExited, PresentationState,
     },
+    utility_window::{UtilityWindow, spawn_window_controls},
 };
 
 // -----------------------------------------------------------------------------
@@ -226,15 +227,22 @@ fn spawn_dismiss_panel(
         .spawn((
             Name::new("Nera Alarm Dismiss Window"),
             AlarmDismissWindow,
+            UtilityWindow::new(14.0),
             Window {
                 title: "Nera Alarm".into(),
                 resolution: (PANEL_WIDTH_LOGICAL, PANEL_HEIGHT_LOGICAL).into(),
-                resizable: false,
+                resizable: true,
+                resize_constraints: WindowResizeConstraints {
+                    min_width: PANEL_WIDTH_LOGICAL as f32,
+                    min_height: PANEL_HEIGHT_LOGICAL as f32,
+                    ..default()
+                },
                 decorations: false,
                 transparent: true,
                 window_level: WindowLevel::AlwaysOnTop,
                 position: WindowPosition::Automatic,
-                skip_taskbar: true,
+                // A minimized ringing panel must remain reachable from the taskbar.
+                skip_taskbar: false,
                 // Alarm presentation must not steal keyboard focus from the app
                 // the user was using when it fired.
                 focused: false,
@@ -325,7 +333,7 @@ fn spawn_alarm_panel_ui(
                 ),
             ))
             .with_children(|panel| {
-                spawn_alarm_header(panel);
+                spawn_alarm_header(panel, window);
                 spawn_alarm_card(panel, &snapshot);
 
                 // Actions live outside the information card. Keeping them in a
@@ -362,29 +370,37 @@ fn spawn_alarm_panel_ui(
         });
 }
 
-fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
+fn spawn_alarm_header(parent: &mut ChildSpawnerCommands, window: Entity) {
     parent
         .spawn((
             Name::new("Nera Alarm Header"),
-            Button,
-            AlarmDismissDragRegion,
             Node {
                 width: percent(100),
                 height: px(54),
+                flex_shrink: 0.0,
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
+                column_gap: px(8),
                 ..default()
             },
             BackgroundColor(Color::NONE),
         ))
         .with_children(|header| {
             header
-                .spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(2),
-                    ..default()
-                })
+                .spawn((
+                    Button,
+                    AlarmDismissDragRegion,
+                    Node {
+                        flex_grow: 1.0,
+                        height: percent(100),
+                        flex_direction: FlexDirection::Column,
+                        justify_content: JustifyContent::Center,
+                        row_gap: px(2),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                ))
                 .with_children(|copy| {
                     copy.spawn((
                         Text::new("Alarm"),
@@ -429,6 +445,34 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
                         TextColor(Color::srgb(0.58, 0.7, 1.0)),
                     ));
                 });
+
+            spawn_window_controls(header, window);
+            header.spawn((
+                Button,
+                AlarmActionButton {
+                    action: AlarmPanelAction::Dismiss,
+                    normal: SECONDARY_COLOR,
+                    hovered: SECONDARY_HOVER,
+                    pressed: SECONDARY_PRESSED,
+                },
+                Node {
+                    width: px(36),
+                    height: px(42),
+                    flex_shrink: 0.0,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    border_radius: BorderRadius::all(px(14)),
+                    ..default()
+                },
+                BackgroundColor(SECONDARY_COLOR),
+                Outline::new(px(1), Val::ZERO, SECONDARY_OUTLINE),
+            )).with_children(|button| {
+                button.spawn((
+                    Text::new("X"),
+                    TextFont { font_size: FontSize::Px(18.0), ..default() },
+                    TextColor(SECONDARY_TEXT),
+                ));
+            });
         });
 }
 

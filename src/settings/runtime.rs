@@ -16,6 +16,34 @@ pub(super) struct StartupRuntime {
     pub(super) enabled: bool,
 }
 
+/// Last values applied to global runtime controls. `NeraSettings` contains many
+/// unrelated fields, so its Bevy change flag alone is too broad: moving Nera or
+/// editing an alarm must not reapply and log audio/FPS settings.
+#[derive(Resource, Default)]
+pub(super) struct AppliedRuntimeSettings {
+    audio: Option<(u8, bool)>,
+    fps_limit: Option<u16>,
+}
+
+impl AppliedRuntimeSettings {
+    fn take_audio_change(&mut self, volume: u8, muted: bool) -> bool {
+        let next = (volume, muted);
+        if self.audio == Some(next) {
+            return false;
+        }
+        self.audio = Some(next);
+        true
+    }
+
+    fn take_fps_change(&mut self, fps_limit: u16) -> bool {
+        if self.fps_limit == Some(fps_limit) {
+            return false;
+        }
+        self.fps_limit = Some(fps_limit);
+        true
+    }
+}
+
 // Persisted WindowMoved coordinates are desktop physical pixels. These values
 // match Nera's normal 600x950 launch canvas closely enough to detect stale
 // positions after monitor/DPI/layout changes.
@@ -343,10 +371,13 @@ pub(super) fn apply_character_size(
 
 pub(super) fn apply_audio_settings(
     settings: Res<NeraSettings>,
+    mut applied: ResMut<AppliedRuntimeSettings>,
     mut global_volume: ResMut<GlobalVolume>,
     mut active_sinks: Query<&mut AudioSink>,
 ) {
-    if !settings.is_changed() {
+    if !settings.is_changed()
+        || !applied.take_audio_change(settings.master_volume, settings.audio_muted)
+    {
         return;
     }
 
@@ -375,8 +406,12 @@ pub(super) fn apply_audio_settings(
     );
 }
 
-pub(super) fn apply_fps_limit(settings: Res<NeraSettings>, mut winit: ResMut<WinitSettings>) {
-    if !settings.is_changed() {
+pub(super) fn apply_fps_limit(
+    settings: Res<NeraSettings>,
+    mut applied: ResMut<AppliedRuntimeSettings>,
+    mut winit: ResMut<WinitSettings>,
+) {
+    if !settings.is_changed() || !applied.take_fps_change(settings.fps_limit) {
         return;
     }
 
@@ -407,6 +442,22 @@ pub(crate) fn save_settings_before_exit(commands: &mut Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_setting_cache_only_accepts_relevant_value_changes() {
+        let mut applied = AppliedRuntimeSettings::default();
+
+        assert!(applied.take_audio_change(100, false));
+        assert!(!applied.take_audio_change(100, false));
+        assert!(applied.take_audio_change(75, false));
+        assert!(applied.take_audio_change(75, true));
+        assert!(!applied.take_audio_change(75, true));
+
+        assert!(applied.take_fps_change(0));
+        assert!(!applied.take_fps_change(0));
+        assert!(applied.take_fps_change(60));
+        assert!(!applied.take_fps_change(60));
+    }
 
     #[test]
     fn entrance_positions_wait_for_support_and_ignore_delayed_native_events() {
@@ -480,6 +531,7 @@ mod tests {
             window_x: 100,
             window_y: 150,
             character_size: 100,
+            character_asset: String::new(),
             ground_offset: 0,
             walking_enabled: false,
             activity_level: 1,

@@ -25,8 +25,6 @@ pub(crate) struct NeraMainLight;
 #[derive(Component)]
 pub(crate) struct LookAtTarget;
 
-const VRM_PATH: &str = "vrm/nera_256.vrm";
-
 pub(crate) fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Name::new("Nera Camera"),
@@ -76,7 +74,7 @@ pub(crate) fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>)
             NeraAvatar,
             // Reveal only once the startup entrance has a loaded rig and pose.
             Visibility::Hidden,
-            VrmHandle(asset_server.load(VRM_PATH)),
+            VrmHandle(asset_server.load(crate::character::DEFAULT_CHARACTER)),
             LookAt::Target(target),
             Transform::from_xyz(0.0, -0.85, 0.0),
         ))

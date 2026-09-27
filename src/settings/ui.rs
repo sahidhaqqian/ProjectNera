@@ -12,6 +12,7 @@ use super::runtime::{
     PositionRuntime, StartupRuntime, save_settings_before_exit, save_settings_deferred,
 };
 use super::{NeraSettings, startup};
+use crate::utility_window::{UtilityWindow, spawn_window_controls};
 
 #[derive(Message, Default)]
 pub(crate) struct OpenSettingsWindow;
@@ -33,16 +34,17 @@ pub(crate) struct ReturnToActionMenu;
 #[derive(Resource, Default)]
 pub(crate) struct SettingsInputGate {
     window_open: bool,
+    minimized: bool,
     close_requested: bool,
     return_to_menu_requested: bool,
 }
 
 pub(crate) fn nera_input_available(gate: Res<SettingsInputGate>) -> bool {
-    !gate.window_open
+    !gate.window_open || gate.minimized
 }
 
 pub(crate) fn nera_input_blocked(gate: Res<SettingsInputGate>) -> bool {
-    gate.window_open
+    gate.window_open && !gate.minimized
 }
 // =============================================================================
 // Settings window
@@ -140,6 +142,12 @@ pub(super) struct SettingsDragRegion;
 #[derive(Component)]
 pub(super) struct SettingsScrollArea;
 
+#[derive(Component)]
+struct SettingsFooter;
+
+#[derive(Component)]
+pub(super) struct CharacterImportStatus;
+
 #[derive(Component, Clone, Copy)]
 pub(super) enum SettingsButtonAction {
     ToggleAlwaysOnTop,
@@ -167,11 +175,12 @@ pub(super) enum SettingsButtonAction {
     ResetDefaults,
     CloseWindow,
     Exit,
+    ImportCharacter,
 }
 
 pub(super) fn open_settings_window(
     mut open: MessageReader<OpenSettingsWindow>,
-    existing: Query<Entity, With<SettingsWindow>>,
+    mut existing: Query<&mut Window, With<SettingsWindow>>,
     settings: Res<NeraSettings>,
     startup_state: Res<StartupRuntime>,
     mut input_gate: ResMut<SettingsInputGate>,
@@ -184,7 +193,12 @@ pub(super) fn open_settings_window(
     // One settings window only. If it is already open, do not create a second
     // copy with a separate camera/UI tree.
     if !existing.is_empty() {
+        for mut window in &mut existing {
+            window.set_minimized(false);
+            window.focused = true;
+        }
         input_gate.window_open = true;
+        input_gate.minimized = false;
         return;
     }
 
@@ -192,6 +206,7 @@ pub(super) fn open_settings_window(
     // Closing is deferred until the close-button mouse gesture has released,
     // so winit never loses the corresponding mouse-up event.
     input_gate.window_open = true;
+    input_gate.minimized = false;
     input_gate.close_requested = false;
     input_gate.return_to_menu_requested = false;
 
@@ -199,15 +214,15 @@ pub(super) fn open_settings_window(
         .spawn((
             Name::new("Nera Settings Window"),
             SettingsWindow,
+            UtilityWindow::new(14.0),
             Window {
                 title: "Nera Settings".into(),
                 resolution: (580, 820).into(),
                 resizable: true,
                 resize_constraints: WindowResizeConstraints {
-                    min_width: 460.0,
+                    min_width: 560.0,
                     min_height: 520.0,
-                    max_width: 960.0,
-                    max_height: 1200.0,
+                    ..default()
                 },
                 // The OS chrome is intentionally removed. The visible rounded
                 // shell is Bevy UI drawn on a transparent native window.
@@ -300,7 +315,7 @@ fn spawn_settings_ui(
                 ),
             ))
             .with_children(|panel| {
-                spawn_settings_header(panel);
+                spawn_settings_header(panel, window);
 
                 // The settings list is now a real clipped/scrollable viewport.
                 // Keep the draggable header and small footer fixed outside it.
@@ -541,51 +556,43 @@ fn spawn_settings_ui(
                             );
                         });
 
-                        settings_card(scroll, "APP", |card| {
-                            action_button(
-                                card,
-                                "Reset to defaults",
-                                SettingsButtonAction::ResetDefaults,
-                            );
-
-                            card.spawn((
-                                Text::new("Reset restores app settings, startup state, audio, size, and saved position"),
-                                TextFont {
-                                    font_size: FontSize::Px(11.0),
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.45, 0.5, 0.64)),
-                            ));
-
-                            action_button(
-                                card,
-                                "Exit Nera",
-                                SettingsButtonAction::Exit,
-                            );
-                        });
-
                     });
 
+                // A sibling of the scroll viewport, so these actions stay
+                // visible even at the minimum window height.
                 panel.spawn((
-                    Text::new(format!(
-                        "Project Nera v{}  ·  Drag window edges to resize  ·  Wheel / touchpad to scroll",
-                        env!("CARGO_PKG_VERSION"),
-                    )),
-                    TextFont {
-                        font_size: FontSize::Px(11.0),
+                    Name::new("Nera Settings Fixed Navigation"),
+                    SettingsFooter,
+                    Node {
+                        width: percent(100),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(8),
+                        padding: UiRect::top(px(8)),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.32, 0.37, 0.5)),
-                ));
+                )).with_children(|footer| {
+                    action_button(footer, "Reset to defaults", SettingsButtonAction::ResetDefaults);
+                    action_button(footer, "Exit Nera", SettingsButtonAction::Exit);
+                    action_button(footer, "Import Character (.vrm)", SettingsButtonAction::ImportCharacter);
+                    footer.spawn((
+                        CharacterImportStatus,
+                        Text::new("Choose a VRM character (0.x or 1.0)"),
+                        TextFont { font_size: FontSize::Px(12.0), ..default() },
+                        TextColor(Color::srgb(0.60, 0.67, 0.82)),
+                        Node { max_height: px(48), overflow: Overflow::clip(), ..default() },
+                    ));
+                });
             });
         });
 }
 
-fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
+fn spawn_settings_header(parent: &mut ChildSpawnerCommands, window: Entity) {
     parent
         .spawn(Node {
             width: percent(100),
             height: px(58),
+            flex_shrink: 0.0,
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             column_gap: px(10),
@@ -599,6 +606,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     Node {
                         width: px(68),
                         height: px(42),
+                        flex_shrink: 0.0,
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         border_radius: BorderRadius::all(px(13)),
@@ -641,7 +649,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     title.spawn((
                         Text::new("NERA SETTINGS"),
                         TextFont {
-                            font_size: FontSize::Px(28.0),
+                            font_size: FontSize::Px(23.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.89, 0.91, 1.0)),
@@ -657,6 +665,8 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     ));
                 });
 
+            spawn_window_controls(header, window);
+
             header
                 .spawn((
                     Button,
@@ -664,6 +674,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     Node {
                         width: px(42),
                         height: px(42),
+                        flex_shrink: 0.0,
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         border_radius: BorderRadius::all(px(13)),
@@ -990,6 +1001,7 @@ fn action_button(
             Node {
                 width: percent(100),
                 height: px(46),
+                flex_shrink: 0.0,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border_radius: BorderRadius::all(px(13)),
@@ -1028,6 +1040,11 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
             Interaction::Pressed => Color::srgb(0.44, 0.10, 0.16),
             Interaction::Hovered => Color::srgb(0.35, 0.095, 0.14),
             Interaction::None => Color::srgb(0.24, 0.075, 0.11),
+        },
+        SettingsButtonAction::ImportCharacter => match interaction {
+            Interaction::Pressed => Color::srgb(0.10, 0.27, 0.72),
+            Interaction::Hovered => Color::srgb(0.16, 0.39, 0.94),
+            Interaction::None => Color::srgb(0.12, 0.32, 0.82),
         },
         SettingsButtonAction::CloseWindow | SettingsButtonAction::BackToMenu => match interaction {
             Interaction::Pressed => Color::srgb(0.20, 0.23, 0.34),
@@ -1075,6 +1092,7 @@ pub(super) fn handle_settings_buttons(
     mut primary: Query<&mut Window, With<PrimaryWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    mut restore_character: MessageWriter<crate::character::RestoreDefaultCharacter>,
 ) {
     for (interaction, action, mut background) in &mut interactions {
         *background = BackgroundColor(button_color(*action, *interaction));
@@ -1270,6 +1288,7 @@ pub(super) fn handle_settings_buttons(
             }
             SettingsButtonAction::ResetDefaults => {
                 *settings = NeraSettings::default();
+                restore_character.write(crate::character::RestoreDefaultCharacter);
 
                 if let Err(error) = startup::set_enabled(false) {
                     warn!("Settings: reset could not disable Start with Windows: {error}");
@@ -1300,7 +1319,71 @@ pub(super) fn handle_settings_buttons(
                 save_settings_before_exit(&mut commands);
                 exit.write(AppExit::Success);
             }
+            // The picker has its own system so it can use the utility HWND
+            // without borrowing the primary pet Window.
+            SettingsButtonAction::ImportCharacter => {}
         }
+    }
+}
+
+pub(super) fn import_character_from_settings(
+    actions: Query<(&Interaction, &SettingsButtonAction), Changed<Interaction>>,
+    windows: Query<&UtilityWindow, With<SettingsWindow>>,
+    mut status: ResMut<crate::character::CharacterImportStatus>,
+    mut imports: MessageWriter<crate::character::ImportCharacter>,
+) {
+    if status.loading
+        || !actions.iter().any(|(interaction, action)| {
+            *interaction == Interaction::Pressed
+                && matches!(action, SettingsButtonAction::ImportCharacter)
+        })
+    {
+        return;
+    }
+    let Some(owner) = windows.single().ok().and_then(UtilityWindow::native_handle) else {
+        status.message = "Window is still opening; try Import again.".into();
+        return;
+    };
+    match crate::platform::pick_asset_file(
+        owner,
+        "Import Character",
+        "VRM character (*.vrm)\0*.vrm\0\0",
+    ) {
+        Ok(Some(path)) => {
+            imports.write(crate::character::ImportCharacter(path));
+        }
+        Ok(None) => {}
+        Err(error) => status.message = error,
+    }
+}
+
+pub(super) fn update_character_import_status(
+    status: Res<crate::character::CharacterImportStatus>,
+    mut labels: Query<&mut Text, With<CharacterImportStatus>>,
+) {
+    let message = if status.message.is_empty() {
+        "Choose a VRM character (0.x or 1.0)"
+    } else {
+        &status.message
+    };
+    for mut text in &mut labels {
+        if text.0 != message {
+            text.0 = message.to_owned();
+        }
+    }
+}
+
+pub(super) fn sync_settings_minimized(
+    windows: Query<&UtilityWindow, With<SettingsWindow>>,
+    mut gate: ResMut<SettingsInputGate>,
+) {
+    let minimized = windows.iter().any(|window| {
+        window
+            .native_handle()
+            .is_some_and(crate::platform::is_window_minimized)
+    });
+    if gate.minimized != minimized {
+        gate.minimized = minimized;
     }
 }
 
@@ -1606,6 +1689,7 @@ pub(super) fn close_settings_after_mouse_release(
     let reopen_menu = gate.return_to_menu_requested;
 
     gate.window_open = false;
+    gate.minimized = false;
     gate.close_requested = false;
     gate.return_to_menu_requested = false;
 
@@ -1629,6 +1713,7 @@ pub(super) fn observe_settings_window_removed(
     }
 
     gate.window_open = false;
+    gate.minimized = false;
     gate.close_requested = false;
     gate.return_to_menu_requested = false;
 }
@@ -1636,6 +1721,113 @@ pub(super) fn observe_settings_window_removed(
 #[cfg(test)]
 mod walking_checkbox_tests {
     use super::*;
+
+    #[test]
+    fn reopening_minimized_settings_restores_existing_window_and_input_gate() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<StartupRuntime>()
+            .insert_resource(SettingsInputGate {
+                window_open: true,
+                minimized: true,
+                ..default()
+            })
+            .add_message::<OpenSettingsWindow>()
+            .add_systems(Update, open_settings_window);
+        let settings_window = app
+            .world_mut()
+            .spawn((
+                SettingsWindow,
+                Window {
+                    focused: false,
+                    ..default()
+                },
+            ))
+            .id();
+
+        assert!(
+            app.world_mut()
+                .run_system_once(nera_input_available)
+                .unwrap()
+        );
+        assert!(!app.world_mut().run_system_once(nera_input_blocked).unwrap());
+
+        app.world_mut().write_message(OpenSettingsWindow);
+        app.update();
+
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<SettingsWindow>>()
+                .iter(world)
+                .count(),
+            1
+        );
+        let mut window = world.get_mut::<Window>(settings_window).unwrap();
+        assert!(window.focused);
+        assert_eq!(window.internal.take_minimize_request(), Some(false));
+        assert!(!world.run_system_once(nera_input_available).unwrap());
+        assert!(world.run_system_once(nera_input_blocked).unwrap());
+    }
+
+    #[test]
+    fn exit_and_character_import_stay_outside_the_scrolling_settings_body() {
+        let mut app = App::new();
+        app.add_systems(Startup, |mut commands: Commands| {
+            let window = commands.spawn_empty().id();
+            let camera = commands.spawn_empty().id();
+            spawn_settings_ui(
+                &mut commands,
+                window,
+                camera,
+                &NeraSettings::default(),
+                &StartupRuntime::default(),
+            );
+        });
+        app.update();
+        let world = app.world_mut();
+        let footer = world
+            .query_filtered::<Entity, With<SettingsFooter>>()
+            .single(world)
+            .unwrap();
+        let scroll = world
+            .query_filtered::<Entity, With<SettingsScrollArea>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(
+            world.get::<ChildOf>(footer).unwrap().parent(),
+            world.get::<ChildOf>(scroll).unwrap().parent()
+        );
+        assert_eq!(world.get::<Node>(footer).unwrap().flex_shrink, 0.0);
+        let actions: Vec<_> = world
+            .get::<Children>(footer)
+            .unwrap()
+            .iter()
+            .filter_map(|entity| world.get::<SettingsButtonAction>(entity))
+            .collect();
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                SettingsButtonAction::ResetDefaults,
+                SettingsButtonAction::Exit,
+                SettingsButtonAction::ImportCharacter,
+            ]
+        ));
+        let reset_count = world
+            .query::<&SettingsButtonAction>()
+            .iter(world)
+            .filter(|action| matches!(action, SettingsButtonAction::ResetDefaults))
+            .count();
+        assert_eq!(reset_count, 1);
+        let exit_count = world
+            .query::<&SettingsButtonAction>()
+            .iter(world)
+            .filter(|action| matches!(action, SettingsButtonAction::Exit))
+            .count();
+        assert_eq!(exit_count, 1);
+    }
 
     #[test]
     fn labels_and_checkbox_refresh_when_walking_is_enabled_and_reset() {

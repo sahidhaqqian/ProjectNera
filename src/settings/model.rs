@@ -242,6 +242,8 @@ pub(crate) struct NeraSettings {
 
     /// Uniform VRM scale in percent. Kept proportional; no independent X/Y stretch.
     pub(crate) character_size: u16,
+    /// Empty selects bundled Nera; imported models use the private characters asset source.
+    pub(crate) character_asset: String,
     /// Standing support offset in logical pixels. Positive values keep the visible
     /// feet slightly above the desktop support line; negative values sink them lower.
     pub(crate) ground_offset: i16,
@@ -344,6 +346,7 @@ impl Default for NeraSettings {
             window_x: 200,
             window_y: 200,
             character_size: 100,
+            character_asset: String::new(),
             ground_offset: 0,
             walking_enabled: false,
             activity_level: 1,

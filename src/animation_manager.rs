@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::utility_window::UtilityWindow;
 use bevy::{
     camera::RenderTarget,
     input::{
@@ -302,22 +303,8 @@ fn open_window(
         .spawn((
             Name::new("Nera Animation Manager Window"),
             ManagerWindow,
-            Window {
-                title: "Nera Animations".into(),
-                resolution: (1120, 980).into(),
-                resizable: true,
-                resize_constraints: WindowResizeConstraints {
-                    min_width: 860.0,
-                    min_height: 680.0,
-                    max_width: 1500.0,
-                    max_height: 1200.0,
-                },
-                decorations: false,
-                transparent: true,
-                window_level: WindowLevel::AlwaysOnTop,
-                position: WindowPosition::Automatic,
-                ..default()
-            },
+            UtilityWindow::new(16.0),
+            manager_window_descriptor(),
         ))
         .id();
     commands.spawn((
@@ -331,6 +318,31 @@ fn open_window(
         },
         RenderTarget::Window(WindowRef::Entity(window)),
     ));
+}
+
+fn manager_window_descriptor() -> Window {
+    Window {
+        title: "Nera Animations".into(),
+        resolution: (1120, 980).into(),
+        resizable: true,
+        resize_constraints: WindowResizeConstraints {
+            min_width: 860.0,
+            min_height: 680.0,
+            // Leave the default unbounded maximum so Windows maximize can use
+            // the monitor's full work area on any resolution.
+            ..default()
+        },
+        // Keep the transparent rounded shell. Its own header buttons and edge
+        // hit testing request native window operations without OS chrome.
+        decorations: false,
+        transparent: true,
+        // Keep the manager above the pet; its owned import dialog inherits the
+        // correct native z-order and can no longer appear behind this window.
+        window_level: WindowLevel::AlwaysOnTop,
+        position: WindowPosition::Automatic,
+        skip_taskbar: false,
+        ..default()
+    }
 }
 
 fn handle_keyboard(
@@ -549,6 +561,7 @@ fn handle_actions(
     mut animation_players: Query<&mut AnimationPlayer>,
     children: Query<&Children>,
     mut desktop_requests: MessageWriter<crate::animation::PlayLibraryAnimation>,
+    windows: Query<&UtilityWindow, With<ManagerWindow>>,
 ) {
     for (interaction, action, mut color) in &mut actions {
         *color = BackgroundColor(match interaction {
@@ -593,16 +606,34 @@ fn handle_actions(
                 state.dirty = true;
             }
             ManagerAction::Import => {
-                if let Some(path) = pick_vrma_file() {
-                    match state.registry.import(&path) {
-                        Ok(_) => {
-                            state.tab = GalleryTab::All;
-                            state.search.clear();
-                            state.scroll_y = 0.0;
-                        }
-                        Err(error) => state.error = Some(error.to_string()),
-                    }
+                let Some(owner) = windows.single().ok().and_then(UtilityWindow::native_handle)
+                else {
+                    state.error =
+                        Some("Animation Manager window is not ready; try Import again.".into());
                     state.dirty = true;
+                    continue;
+                };
+                match crate::platform::pick_asset_file(
+                    owner,
+                    "Import VRMA",
+                    "VRMA animation (*.vrma)\0*.vrma\0\0",
+                ) {
+                    Ok(Some(path)) => {
+                        match state.registry.import(&path) {
+                            Ok(_) => {
+                                state.tab = GalleryTab::All;
+                                state.search.clear();
+                                state.scroll_y = 0.0;
+                            }
+                            Err(error) => state.error = Some(error.to_string()),
+                        }
+                        state.dirty = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        state.error = Some(error);
+                        state.dirty = true;
+                    }
                 }
             }
             ManagerAction::Reset => {
@@ -945,39 +976,20 @@ fn cleanup_closed_window(
     gate.pointer_over_window = false;
 }
 
-#[cfg(target_os = "windows")]
-fn pick_vrma_file() -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows::{
-        Win32::UI::Controls::Dialogs::{
-            GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
-        },
-        core::{PCWSTR, PWSTR},
-    };
-    let mut buffer = [0u16; 32768];
-    let filter: Vec<u16> = "VRMA animation (*.vrma)\0*.vrma\0\0"
-        .encode_utf16()
-        .collect();
-    let title: Vec<u16> = "Import VRMA\0".encode_utf16().collect();
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        lpstrFile: PWSTR(buffer.as_mut_ptr()),
-        nMaxFile: buffer.len() as u32,
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
-        ..Default::default()
-    };
-    if !unsafe { GetOpenFileNameW(&mut dialog).as_bool() } {
-        return None;
-    }
-    let len = buffer.iter().position(|unit| *unit == 0)?;
-    Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len])))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manager_window_keeps_transparent_shell_and_allows_unbounded_maximize() {
+        let window = manager_window_descriptor();
+        assert!(!window.decorations);
+        assert!(window.transparent);
+        assert!(window.resizable);
+        assert!(!window.resize_constraints.max_width.is_finite());
+        assert!(!window.resize_constraints.max_height.is_finite());
+        assert!(!window.skip_taskbar);
+    }
 
     #[test]
     fn native_close_waits_until_combine_export_finishes() {

@@ -23,6 +23,7 @@ use crate::settings::{
     NeraSettings,
     save_settings_deferred,
 };
+use crate::utility_window::{UtilityWindow, spawn_window_controls};
 
 const MAX_ALARMS: usize = 12;
 
@@ -42,15 +43,16 @@ pub(crate) struct OpenAlarmSettingsWindow;
 #[derive(Resource, Default)]
 pub(crate) struct AlarmSettingsInputGate {
     window_open: bool,
+    minimized: bool,
     close_requested: bool,
 }
 
 pub(crate) fn nera_input_available(gate: Res<AlarmSettingsInputGate>) -> bool {
-    !gate.window_open
+    !gate.window_open || gate.minimized
 }
 
 pub(crate) fn nera_input_blocked(gate: Res<AlarmSettingsInputGate>) -> bool {
-    gate.window_open
+    gate.window_open && !gate.minimized
 }
 
 #[derive(Component)]
@@ -124,6 +126,7 @@ impl Plugin for AlarmSettingsPlugin {
         app.init_resource::<AlarmSettingsInputGate>()
             .init_resource::<AlarmSettingsUiState>()
             .add_message::<OpenAlarmSettingsWindow>()
+            .add_systems(PreUpdate, sync_alarm_window_minimized)
             .add_systems(
                 Update,
                 (
@@ -143,7 +146,7 @@ impl Plugin for AlarmSettingsPlugin {
 
 fn open_alarm_settings_window(
     mut open: MessageReader<OpenAlarmSettingsWindow>,
-    existing: Query<Entity, With<AlarmSettingsWindow>>,
+    mut existing: Query<&mut Window, With<AlarmSettingsWindow>>,
     mut gate: ResMut<AlarmSettingsInputGate>,
     mut ui: ResMut<AlarmSettingsUiState>,
     mut commands: Commands,
@@ -152,12 +155,16 @@ fn open_alarm_settings_window(
         return;
     }
 
-    if !existing.is_empty() {
+    if let Ok(mut window) = existing.single_mut() {
+        window.set_minimized(false);
+        window.focused = true;
         gate.window_open = true;
+        gate.minimized = false;
         return;
     }
 
     gate.window_open = true;
+    gate.minimized = false;
     gate.close_requested = false;
     ui.view = AlarmSettingsView::List;
     ui.draft = None;
@@ -167,6 +174,7 @@ fn open_alarm_settings_window(
         .spawn((
             Name::new("Nera Alarm Settings Window"),
             AlarmSettingsWindow,
+            UtilityWindow::new(14.0),
             Window {
                 title: "Nera Alarms".into(),
                 resolution: (660, 800).into(),
@@ -174,8 +182,7 @@ fn open_alarm_settings_window(
                 resize_constraints: WindowResizeConstraints {
                     min_width: 560.0,
                     min_height: 650.0,
-                    max_width: 920.0,
-                    max_height: 1080.0,
+                    ..default()
                 },
                 decorations: false,
                 transparent: true,
@@ -200,6 +207,18 @@ fn open_alarm_settings_window(
     ));
 
     info!("Nera Alarm Settings -> opened (multi-alarm manager)");
+}
+
+fn sync_alarm_window_minimized(
+    windows: Query<&UtilityWindow, With<AlarmSettingsWindow>>,
+    mut gate: ResMut<AlarmSettingsInputGate>,
+) {
+    let minimized = windows.single().ok()
+        .and_then(UtilityWindow::native_handle)
+        .is_some_and(crate::platform::is_window_minimized);
+    if gate.minimized != minimized {
+        gate.minimized = minimized;
+    }
 }
 
 fn rebuild_alarm_settings_ui(
@@ -315,7 +334,7 @@ fn spawn_alarm_list_ui(
     let enabled = alarms.iter().filter(|alarm| alarm.enabled).count();
 
     spawn_root(commands, window, camera, |panel| {
-        spawn_header(panel, "Alarms", Some("Manage your Nera alarms"), false);
+        spawn_header(panel, window, "Alarms", Some("Manage your Nera alarms"), false);
 
         panel.spawn((
             Text::new(format!(
@@ -474,6 +493,7 @@ fn spawn_alarm_editor_ui(
     spawn_root(commands, window, camera, |panel| {
         spawn_header(
             panel,
+            window,
             "Edit Alarm",
             Some("Schedule, repeat days, and label"),
             true,
@@ -607,7 +627,7 @@ fn spawn_time_picker_ui(
     alarm: &AlarmConfig,
 ) {
     spawn_root(commands, window, camera, |panel| {
-        spawn_header(panel, "Set Time", Some("Choose when Nera should ring"), true);
+        spawn_header(panel, window, "Set Time", Some("Choose when Nera should ring"), true);
 
         panel
             .spawn((
@@ -689,7 +709,7 @@ fn spawn_date_picker_ui(
     alarm: &AlarmConfig,
 ) {
     spawn_root(commands, window, camera, |panel| {
-        spawn_header(panel, "Set Date", Some("Choose the one-time alarm date"), true);
+        spawn_header(panel, window, "Set Date", Some("Choose the one-time alarm date"), true);
 
         panel
             .spawn((
@@ -837,6 +857,7 @@ fn spawn_picker_stepper(
 
 fn spawn_header(
     parent: &mut ChildSpawnerCommands,
+    window: Entity,
     title: &str,
     subtitle: Option<&str>,
     show_back: bool,
@@ -845,6 +866,7 @@ fn spawn_header(
         .spawn(Node {
             width: percent(100),
             height: px(64),
+            flex_shrink: 0.0,
             align_items: AlignItems::Center,
             column_gap: px(10),
             ..default()
@@ -865,6 +887,7 @@ fn spawn_header(
                     AlarmSettingsDragRegion,
                     Node {
                         flex_grow: 1.0,
+                        min_width: px(0),
                         height: percent(100),
                         flex_direction: FlexDirection::Column,
                         justify_content: JustifyContent::Center,
@@ -888,6 +911,7 @@ fn spawn_header(
                     }
                 });
 
+            spawn_window_controls(header, window);
             spawn_small_button(
                 header,
                 "X",
@@ -1333,6 +1357,7 @@ fn commit_alarm_settings_close_after_release(
     }
 
     gate.window_open = false;
+    gate.minimized = false;
     gate.close_requested = false;
     ui.view = AlarmSettingsView::List;
     ui.draft = None;
@@ -1362,6 +1387,7 @@ fn observe_alarm_settings_window_removed(
     }
 
     gate.window_open = false;
+    gate.minimized = false;
     gate.close_requested = false;
     ui.view = AlarmSettingsView::List;
     ui.draft = None;
@@ -1403,6 +1429,37 @@ fn schedule_summary(alarm: &AlarmConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopen_restores_existing_alarm_window_without_discarding_draft() {
+        let mut app = App::new();
+        app.insert_resource(AlarmSettingsInputGate {
+            window_open: true,
+            minimized: true,
+            ..default()
+        })
+        .insert_resource(AlarmSettingsUiState {
+            view: AlarmSettingsView::Edit,
+            draft: Some(AlarmConfig::default_new(7)),
+            rebuild: false,
+        })
+        .add_message::<OpenAlarmSettingsWindow>()
+        .add_systems(Update, open_alarm_settings_window);
+        let window = app.world_mut().spawn((
+            AlarmSettingsWindow,
+            Window { focused: false, ..default() },
+        )).id();
+        app.world_mut().write_message(OpenAlarmSettingsWindow);
+        app.update();
+
+        let mut window = app.world_mut().get_mut::<Window>(window).unwrap();
+        assert_eq!(window.internal.take_minimize_request(), Some(false));
+        assert!(window.focused);
+        assert!(!app.world().resource::<AlarmSettingsInputGate>().minimized);
+        let state = app.world().resource::<AlarmSettingsUiState>();
+        assert_eq!(state.view, AlarmSettingsView::Edit);
+        assert_eq!(state.draft.as_ref().unwrap().id, 7);
+    }
 
     #[test]
     fn time_preview_handles_midnight_and_pm() {

@@ -66,6 +66,7 @@ use windows::Win32::{
             GWL_EXSTYLE,
             GWL_STYLE,
             IsIconic,
+            IsZoomed,
             IsWindow,
             IsWindowVisible,
             SetWindowPos,
@@ -788,6 +789,47 @@ pub fn is_window_minimized(
         )
         .as_bool()
     }
+}
+
+pub fn is_window_maximized(handle: NativeWindowHandle) -> bool {
+    unsafe { IsZoomed(handle.hwnd()).as_bool() }
+}
+
+/// An owned dialog stays above its transparent always-on-top utility window.
+pub fn pick_asset_file(
+    owner: NativeWindowHandle,
+    title: &str,
+    filter: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::{
+        Win32::UI::Controls::Dialogs::{
+            CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+            OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        },
+        core::{PCWSTR, PWSTR},
+    };
+    let mut buffer = [0u16; 32768];
+    let filter: Vec<u16> = filter.encode_utf16().collect();
+    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner.hwnd(),
+        lpstrFile: PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut dialog).as_bool() } {
+        let error = unsafe { CommDlgExtendedError() };
+        return if error.0 == 0 { Ok(None) } else {
+            Err(format!("Could not open file picker (Windows error {}).", error.0))
+        };
+    }
+    let len = buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len());
+    Ok(Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len]))))
 }
 
 /// Whether an external foreground application covers the physical monitor.

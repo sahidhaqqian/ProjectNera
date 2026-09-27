@@ -18,58 +18,30 @@
 //!      ↓
 //! stop sound + stop alarm animation + restore DesktopPet
 
-use std::time::{
-    Duration,
-    Instant,
-};
+use std::time::{Duration, Instant};
 
 use bevy::{
-    audio::{
-        AudioPlayer,
-        AudioSink,
-        AudioSinkPlayback,
-        AudioSource,
-        PlaybackSettings,
-    },
+    audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, PlaybackSettings},
     prelude::*,
 };
 
 use bevy_vrm1::prelude::VrmaHandle;
 
 use crate::{
-    action_menu::{
-        AlarmMenuChoice,
-        NeraActionMenuCommand,
-    },
+    action_menu::{AlarmMenuChoice, NeraActionMenuCommand},
     animation::{
-        AlarmAnimationCommand,
-        register_alarm_jump_animation,
-        register_alarm_wave_animation,
+        AlarmAnimationCommand, register_alarm_jump_animation, register_alarm_wave_animation,
     },
-    presentation::{
-        AttentionKind,
-        PresentationCommand,
-        PresentationExited,
-        PresentationState,
-    },
-    settings::{
-        AlarmConfig,
-        NeraSettings,
-        save_settings_deferred,
-    },
+    presentation::{AttentionKind, PresentationCommand, PresentationExited, PresentationState},
+    settings::{AlarmConfig, NeraSettings, save_settings_deferred},
 };
 
 #[cfg(target_os = "windows")]
-use crate::platform::{
-    LocalDateTime,
-    local_datetime,
-};
+use crate::platform::{LocalDateTime, local_datetime};
 
 const ALARM_SOUND_PATH: &str = "sound/alarm.mp3";
-const ALARM_JUMP_VRMA_PATH: &str =
-    "animations/animasi_basic/jump_happy.vrma";
-const ALARM_WAVE_VRMA_PATH: &str =
-    "animations/animasi_basic/161_Waving.vrma";
+const ALARM_JUMP_VRMA_PATH: &str = "animations/animasi_basic/jump_happy.vrma";
+const ALARM_WAVE_VRMA_PATH: &str = "animations/animasi_basic/161_Waving.vrma";
 
 /// If the alarm asked for Attention but presentation never leaves DesktopPet,
 /// something failed before the dismiss UI could be created. Never leave a
@@ -294,18 +266,12 @@ impl Plugin for AlarmPlugin {
     }
 }
 
-fn load_alarm_audio(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+fn load_alarm_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(AlarmAssets {
         sound: asset_server.load(ALARM_SOUND_PATH),
     });
 
-    info!(
-        "Nera alarm audio requested | {}",
-        ALARM_SOUND_PATH,
-    );
+    info!("Nera alarm audio requested | {}", ALARM_SOUND_PATH,);
 }
 
 /// Attach alarm VRMAs to the actual Nera VRM root.
@@ -334,18 +300,14 @@ fn ensure_alarm_vrmas_under_nera(
         parent
             .spawn((
                 Name::new("Nera Alarm JumpHappy"),
-                VrmaHandle(
-                    asset_server.load(ALARM_JUMP_VRMA_PATH),
-                ),
+                VrmaHandle(asset_server.load(ALARM_JUMP_VRMA_PATH)),
             ))
             .observe(register_alarm_jump_animation);
 
         parent
             .spawn((
                 Name::new("Nera Alarm Wave"),
-                VrmaHandle(
-                    asset_server.load(ALARM_WAVE_VRMA_PATH),
-                ),
+                VrmaHandle(asset_server.load(ALARM_WAVE_VRMA_PATH)),
             ))
             .observe(register_alarm_wave_animation);
     });
@@ -354,8 +316,7 @@ fn ensure_alarm_vrmas_under_nera(
 
     info!(
         "Nera alarm VRMAs attached to VRM root | jump={} wave={}",
-        ALARM_JUMP_VRMA_PATH,
-        ALARM_WAVE_VRMA_PATH,
+        ALARM_JUMP_VRMA_PATH, ALARM_WAVE_VRMA_PATH,
     );
 }
 
@@ -404,9 +365,7 @@ fn consume_alarm_menu_commands(
                     AlarmPhase::Ringing { .. } => {
                         // Cleanup happens from PresentationExited so all alarm
                         // exit paths have one single source of truth.
-                        presentation.write(
-                            PresentationCommand::ExitAttention,
-                        );
+                        presentation.write(PresentationCommand::ExitAttention);
                     }
                 }
             }
@@ -430,11 +389,7 @@ fn consume_alarm_menu_commands(
                 };
                 display.label = "Quick Alarm".to_string();
 
-                info!(
-                    "Nera alarm armed -> {:?} ({:?})",
-                    preset,
-                    duration,
-                );
+                info!("Nera alarm armed -> {:?} ({:?})", preset, duration,);
             }
         }
     }
@@ -483,8 +438,7 @@ fn consume_alarm_control_commands(
 
         info!(
             "Nera alarm snoozed for {:?} | {} audio player(s) stopped",
-            duration,
-            stopped,
+            duration, stopped,
         );
     }
 }
@@ -506,10 +460,7 @@ fn repeat_bit_for_windows_day(day_of_week: u16) -> Option<u8> {
 
 #[cfg(target_os = "windows")]
 fn custom_alarm_matches(alarm: &AlarmConfig, now: LocalDateTime) -> bool {
-    if !alarm.enabled
-        || now.hour != alarm.hour as u16
-        || now.minute != alarm.minute as u16
-    {
+    if !alarm.enabled || now.hour != alarm.hour as u16 || now.minute != alarm.minute as u16 {
         return false;
     }
 
@@ -533,13 +484,18 @@ fn tick_custom_alarm_schedule(
     mut state: ResMut<AlarmState>,
     mut runtime: ResMut<CustomAlarmRuntime>,
 ) {
-    if collect_due_alarms(
-        &mut settings,
+    // Reading the alarm book every frame must not mark the entire settings
+    // resource changed. That used to wake unrelated audio/FPS systems and spam
+    // their INFO logs at the render rate.
+    let settings_changed = collect_due_alarms(
+        settings.bypass_change_detection(),
         &mut state,
         &mut runtime,
         local_datetime(),
         Instant::now(),
-    ) {
+    );
+    if settings_changed {
+        settings.set_changed();
         save_settings_deferred(&mut commands);
     }
 }
@@ -621,8 +577,7 @@ fn tick_alarm_deadline(
     mut animation: MessageWriter<AlarmAnimationCommand>,
     mut display: ResMut<AlarmDisplayInfo>,
     presentation_state: Res<PresentationState>,
-    #[cfg(target_os = "windows")]
-    dismiss_runtime: Res<crate::alarm_dismiss::AlarmDismissRuntime>,
+    #[cfg(target_os = "windows")] dismiss_runtime: Res<crate::alarm_dismiss::AlarmDismissRuntime>,
     #[cfg(target_os = "windows")] dismiss_panels: Query<
         (),
         With<crate::alarm_dismiss::AlarmDismissWindow>,
@@ -719,12 +674,8 @@ fn cleanup_after_presentation_exit(
     }
 }
 
-fn should_abort_failed_attention(
-    presentation_is_desktop_pet: bool,
-    ringing_for: Duration,
-) -> bool {
-    presentation_is_desktop_pet
-        && ringing_for >= ALARM_ATTENTION_FAILSAFE
+fn should_abort_failed_attention(presentation_is_desktop_pet: bool, ringing_for: Duration) -> bool {
+    presentation_is_desktop_pet && ringing_for >= ALARM_ATTENTION_FAILSAFE
 }
 
 /// Defense-in-depth for a failed Attention transition.  The dismiss box is
@@ -762,8 +713,7 @@ fn abort_ringing_if_attention_never_started(
 
     error!(
         "Nera alarm Attention failed to start within {:?}; stopped {} audio player(s) and returned alarm runtime to Idle",
-        ALARM_ATTENTION_FAILSAFE,
-        stopped,
+        ALARM_ATTENTION_FAILSAFE, stopped,
     );
 }
 
@@ -978,7 +928,9 @@ mod tests {
         app.world_mut().resource_mut::<AlarmState>().phase = AlarmPhase::Ringing {
             started_at: Instant::now(),
         };
-        app.world_mut().resource_mut::<AlarmState>().pending
+        app.world_mut()
+            .resource_mut::<AlarmState>()
+            .pending
             .push(pending_alarm("Next", Instant::now()));
         let panel = app.world_mut().spawn(AlarmDismissWindow).id();
         app.insert_resource(AlarmDismissRuntime::with_window_for_test(panel));
@@ -991,8 +943,13 @@ mod tests {
         app.update();
         assert!(!app.world().resource::<AlarmState>().is_ringing());
         assert_eq!(app.world().resource::<AlarmState>().pending.len(), 1);
-        assert_eq!(app.world_mut().resource_mut::<Messages<PresentationCommand>>()
-            .drain().count(), 0);
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .count(),
+            0
+        );
 
         // Only the completed runtime reset makes the next PresentationEntered
         // safe for spawn_dismiss_panel to consume.
@@ -1161,8 +1118,8 @@ mod tests {
     /// `tick_alarm_deadline` fires it through the single real trigger path.
     #[test]
     fn test_now_arms_an_already_expired_deadline() {
-        let duration = preset_duration(AlarmMenuChoice::TestNow)
-            .expect("Test Now is a timer preset");
+        let duration =
+            preset_duration(AlarmMenuChoice::TestNow).expect("Test Now is a timer preset");
 
         assert_eq!(duration, Duration::ZERO);
 
@@ -1172,18 +1129,12 @@ mod tests {
 
     #[test]
     fn default_snooze_is_five_minutes() {
-        assert_eq!(
-            DEFAULT_SNOOZE_DURATION,
-            Duration::from_secs(300),
-        );
+        assert_eq!(DEFAULT_SNOOZE_DURATION, Duration::from_secs(300),);
     }
 
     #[test]
     fn cancel_is_not_a_timer_preset() {
-        assert_eq!(
-            preset_duration(AlarmMenuChoice::Cancel),
-            None,
-        );
+        assert_eq!(preset_duration(AlarmMenuChoice::Cancel), None,);
     }
 
     #[test]
@@ -1204,7 +1155,6 @@ mod tests {
         assert!(state.is_ringing());
         assert!(state.remaining().is_none());
     }
-
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -1231,8 +1181,17 @@ mod tests {
             minute: 30,
         };
         assert!(custom_alarm_matches(&alarm, exact));
-        assert!(!custom_alarm_matches(&alarm, LocalDateTime { day: 24, ..exact }));
-        assert!(!custom_alarm_matches(&alarm, LocalDateTime { minute: 31, ..exact }));
+        assert!(!custom_alarm_matches(
+            &alarm,
+            LocalDateTime { day: 24, ..exact }
+        ));
+        assert!(!custom_alarm_matches(
+            &alarm,
+            LocalDateTime {
+                minute: 31,
+                ..exact
+            }
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -1260,8 +1219,22 @@ mod tests {
             minute: 0,
         };
         assert!(custom_alarm_matches(&alarm, monday));
-        assert!(custom_alarm_matches(&alarm, LocalDateTime { day: 25, day_of_week: 5, ..monday }));
-        assert!(!custom_alarm_matches(&alarm, LocalDateTime { day: 27, day_of_week: 0, ..monday }));
+        assert!(custom_alarm_matches(
+            &alarm,
+            LocalDateTime {
+                day: 25,
+                day_of_week: 5,
+                ..monday
+            }
+        ));
+        assert!(!custom_alarm_matches(
+            &alarm,
+            LocalDateTime {
+                day: 27,
+                day_of_week: 0,
+                ..monday
+            }
+        ));
     }
 
     #[test]

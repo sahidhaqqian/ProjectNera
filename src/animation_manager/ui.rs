@@ -205,7 +205,7 @@ pub(super) fn rebuild_ui(
     if !state.dirty {
         return;
     }
-    let (Ok(_window), Ok(camera)) = (windows.single(), cameras.single()) else {
+    let (Ok(window), Ok(camera)) = (windows.single(), cameras.single()) else {
         return;
     };
     for root in &roots {
@@ -276,12 +276,21 @@ pub(super) fn rebuild_ui(
                                     label(title, "ANIMATIONS", 27.0, PRIMARY);
                                     label(
                                         title,
-                                        "Drag the scrollbar or press Home / End to jump",
+                                        "Drag title to move / edges to resize",
                                         13.0,
                                         MUTED,
                                     );
                                 });
-                            button(header, "X", ManagerAction::Close, px(48), &state);
+                            header
+                                .spawn(Node {
+                                    column_gap: px(8),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                })
+                                .with_children(|controls| {
+                                    crate::utility_window::spawn_window_controls(controls, window);
+                                    button(controls, "X", ManagerAction::Close, px(44), &state);
+                                });
                         });
 
                     panel

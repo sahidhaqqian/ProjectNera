@@ -45,15 +45,44 @@ struct PreviewScene {
     warmup_frames: u8,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(super) struct PreviewRuntime {
+    character_path: String,
     active: HashMap<String, PreviewScene>,
     light: Option<Entity>,
     requested: HashSet<String>,
     changed_at: Option<std::time::Instant>,
 }
 
+impl Default for PreviewRuntime {
+    fn default() -> Self {
+        Self::for_character(crate::character::DEFAULT_CHARACTER.to_owned())
+    }
+}
+
 impl PreviewRuntime {
+    pub(super) fn for_character(character_path: String) -> Self {
+        Self {
+            character_path,
+            active: HashMap::new(),
+            light: None,
+            requested: HashSet::new(),
+            changed_at: None,
+        }
+    }
+
+    pub(super) fn set_character(
+        &mut self,
+        path: String,
+        commands: &mut Commands,
+        images: &mut Assets<Image>,
+    ) {
+        if self.character_path != path {
+            self.clear(commands, images);
+            self.character_path = path;
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.active.is_empty()
     }
@@ -325,7 +354,7 @@ pub(super) fn sync_visible_previews(
             .spawn((
                 Name::new("Nera Gallery Preview Avatar"),
                 PreviewAvatarRoot,
-                VrmHandle(assets.load("vrm/nera_256.vrm")),
+                VrmHandle(assets.load(runtime.character_path.clone())),
                 Transform::default(),
                 Visibility::Hidden,
                 layer,
@@ -357,6 +386,63 @@ pub(super) fn sync_visible_previews(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_change_releases_old_preview_assets_once() {
+        #[derive(Resource)]
+        struct NextCharacter(String);
+
+        fn change_character(
+            character: Res<NextCharacter>,
+            mut previews: ResMut<PreviewRuntime>,
+            mut images: ResMut<Assets<Image>>,
+            mut commands: Commands,
+        ) {
+            previews.set_character(character.0.clone(), &mut commands, &mut images);
+        }
+
+        let mut app = App::new();
+        app.init_resource::<PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .insert_resource(NextCharacter(crate::character::DEFAULT_CHARACTER.into()))
+            .add_systems(Update, change_character);
+        let root = app.world_mut().spawn_empty().id();
+        let clip = app.world_mut().spawn(ChildOf(root)).id();
+        let camera = app.world_mut().spawn_empty().id();
+        let light = app.world_mut().spawn_empty().id();
+        let image = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
+        let image_id = image.id();
+        {
+            let mut previews = app.world_mut().resource_mut::<PreviewRuntime>();
+            previews.light = Some(light);
+            previews.requested.insert("idle.vrma".into());
+            previews.active.insert("idle.vrma".into(), PreviewScene {
+                root,
+                camera,
+                clip,
+                image,
+                slot: 0,
+                prepared: true,
+                started: true,
+                warmup_frames: PREVIEW_PLAYBACK_WARMUP_FRAMES,
+            });
+        }
+
+        app.update();
+        assert!(app.world().get_entity(root).is_ok(), "unchanged selection keeps previews");
+        assert!(app.world().resource::<Assets<Image>>().contains(image_id));
+
+        app.world_mut().resource_mut::<NextCharacter>().0 = "characters://custom.vrm".into();
+        app.update();
+        for entity in [root, clip, camera, light] {
+            assert!(app.world().get_entity(entity).is_err());
+        }
+        assert!(!app.world().resource::<Assets<Image>>().contains(image_id));
+        let previews = app.world().resource::<PreviewRuntime>();
+        assert!(previews.active.is_empty());
+        assert!(previews.requested.is_empty());
+        assert_eq!(previews.character_path, "characters://custom.vrm");
+    }
 
     #[test]
     #[ignore = "renders the full gallery and measures process memory"]
@@ -528,8 +614,8 @@ mod tests {
     #[test]
     fn native_close_releases_preview_entities_and_render_targets() {
         use super::super::{
-            AnimationManagerInputGate, ManagerOwned, ManagerWindow, cleanup_closed_window,
-            sync_manager_pointer_gate,
+            AnimationManagerInputGate, ManagerOwned, ManagerWindow,
+            cleanup_closed_window, sync_manager_pointer_gate,
         };
         let mut app = App::new();
         app.init_resource::<Assets<Image>>()

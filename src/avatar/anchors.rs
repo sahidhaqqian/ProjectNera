@@ -62,8 +62,12 @@ fn death_fallback_floor_y_logical(environment: &DesktopEnvironment) -> Option<f3
     Some(rect.height().max(1) as f32 / scale * DEATH_FALLBACK_FLOOR_RATIO)
 }
 
-fn support_anchor_geometry(settings: &NeraSettings) -> (f32, f32) {
-    (settings.character_scale(), settings.ground_offset_logical())
+fn support_anchor_geometry(settings: &NeraSettings, hips: Entity) -> (Entity, f32, f32) {
+    (
+        hips,
+        settings.character_scale(),
+        settings.ground_offset_logical(),
+    )
 }
 
 /// Keep the last standing sample until the idle blend has removed the seated
@@ -207,12 +211,17 @@ pub(crate) fn update_avatar_anchors(
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
     mut grounding: ResMut<DeathVisualGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
-    mut applied_support_geometry: Local<Option<(f32, f32)>>,
+    mut applied_support_geometry: Local<Option<(Entity, f32, f32)>>,
     mut standing_sample: Local<StandingAnchorSampling>,
     mut seat_sample: Local<SeatAnchorSampling>,
     camera_query: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
     mut avatar_query: Query<
-        (&mut Transform, &GlobalTransform, Option<&HipsBoneEntity>),
+        (
+            &mut Transform,
+            &GlobalTransform,
+            Option<&HipsBoneEntity>,
+            Has<crate::character::CharacterReveal>,
+        ),
         With<NeraAvatar>,
     >,
     children_query: Query<&Children>,
@@ -232,10 +241,16 @@ pub(crate) fn update_avatar_anchors(
         return;
     };
 
-    let Ok((mut avatar_transform, avatar_global, hips_bone_entity)) = avatar_query.single_mut()
+    let Ok((mut avatar_transform, avatar_global, hips_bone_entity, preparing_character)) =
+        avatar_query.single_mut()
     else {
         return;
     };
+    // Preserve the previous contact points while a replacement rig is hidden
+    // for pose preparation. Initial startup still calibrates its hidden rig.
+    if preparing_character {
+        return;
+    }
 
     // IMPORTANT:
     // `VrmBone` is not unique to the rendered VRM. Every loaded VRMA also owns
@@ -322,9 +337,10 @@ pub(crate) fn update_avatar_anchors(
         // Remembered HWND positions change settings on every walking step.
         // Only geometry changes may replace the rigid standing support with
         // the current pose; otherwise the gait would move its own floor.
-        // Retain a pending geometry change while airborne, then apply it on
-        // the next supported frame.
-        let geometry = support_anchor_geometry(&settings);
+        // A replacement rig also changes geometry even at the same size. Keep
+        // that refresh pending through loading, sitting and airborne poses,
+        // then apply it once a standing sample can safely own the support.
+        let geometry = support_anchor_geometry(&settings, hips_bone_entity.0);
         if *applied_support_geometry != Some(geometry) && !physics.falling {
             physics.refresh_support_anchor(environment.feet_anchor_logical);
             *applied_support_geometry = Some(geometry);
@@ -599,18 +615,26 @@ mod tests {
     #[test]
     fn moving_the_window_or_toggling_walking_does_not_change_support_geometry() {
         let mut settings = NeraSettings::default();
-        let standing_geometry = support_anchor_geometry(&settings);
+        let mut world = World::new();
+        let hips = world.spawn_empty().id();
+        let replacement = world.spawn_empty().id();
+        let standing_geometry = support_anchor_geometry(&settings, hips);
         settings.window_x += 200;
         settings.window_y -= 100;
         settings.walking_enabled = !settings.walking_enabled;
         settings.follow_mouse = !settings.follow_mouse;
-        assert_eq!(support_anchor_geometry(&settings), standing_geometry);
+        assert_eq!(support_anchor_geometry(&settings, hips), standing_geometry);
+        assert_ne!(
+            support_anchor_geometry(&settings, replacement),
+            standing_geometry,
+            "a replacement character must refresh standing support at the same settings"
+        );
 
         settings.character_size = 125;
-        assert_ne!(support_anchor_geometry(&settings), standing_geometry);
-        let resized_geometry = support_anchor_geometry(&settings);
+        assert_ne!(support_anchor_geometry(&settings, hips), standing_geometry);
+        let resized_geometry = support_anchor_geometry(&settings, hips);
         settings.ground_offset = 10;
-        assert_ne!(support_anchor_geometry(&settings), resized_geometry);
+        assert_ne!(support_anchor_geometry(&settings, hips), resized_geometry);
     }
 
     #[test]

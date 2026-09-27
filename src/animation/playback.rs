@@ -400,7 +400,7 @@ pub(crate) fn spawn_animation_library(
 
 #[derive(Resource, Default)]
 pub(crate) struct NeraAnimationPlayback {
-    current_clip: Option<Entity>,
+    pub(super) current_clip: Option<Entity>,
     visual: Option<VisualState>,
     revision: u64,
 }

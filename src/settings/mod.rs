@@ -34,10 +34,12 @@ impl Plugin for NeraSettingsPlugin {
         app.add_plugins(shadow::NeraShadowPlugin)
             .init_resource::<SettingsInputGate>()
             .init_resource::<StartupRuntime>()
+            .init_resource::<AppliedRuntimeSettings>()
             .init_resource::<PositionRuntime>()
             .add_message::<OpenSettingsWindow>()
             .add_message::<ReturnToActionMenu>()
             .add_systems(Startup, initialize_startup_state)
+            .add_systems(PreUpdate, sync_settings_minimized)
             .add_systems(
                 Update,
                 (
@@ -46,13 +48,13 @@ impl Plugin for NeraSettingsPlugin {
                     record_primary_window_position,
                     flush_position_save,
                     open_settings_window,
-                    handle_settings_buttons,
+                    (handle_settings_buttons, import_character_from_settings).chain(),
                     handle_roaming_radius_slider,
                     drag_settings_window,
                     scroll_settings_window,
                     close_settings_after_mouse_release,
                     update_settings_labels,
-                    update_character_settings_labels,
+                    (update_character_settings_labels, update_character_import_status),
                     update_audio_settings_labels,
                     update_roaming_settings_labels,
                     apply_always_on_top,
