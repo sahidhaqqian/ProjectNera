@@ -14,14 +14,34 @@ const GLB_JSON: u32 = 0x4E4F_534A;
 pub(crate) struct MigratedVrm {
     pub(crate) bytes: Vec<u8>,
     pub(crate) converted: bool,
+    pub(crate) migrated_from_vrm0: bool,
 }
 
 pub(crate) fn migrate_vrm0(bytes: Vec<u8>) -> Result<MigratedVrm, String> {
     let (json_length, mut document) = parse_document(&bytes)?;
     if document.pointer("/extensions/VRMC_vrm").is_some() {
+        let repaired_legacy = has_previous_vrm0_range_swap(&document);
+        let had_marker = has_vrm0_migration_marker(&document);
+        let inferred_legacy = looks_like_unmarked_vrm0_migration(&document);
+        let migrated_from_vrm0 = had_marker || repaired_legacy || inferred_legacy;
+        if migrated_from_vrm0 && !had_marker {
+            mark_vrm0_migration(&mut document);
+        }
+        // Repair files produced by Nera's first 0.x migrator, which mapped the
+        // legacy xRange to outputScale. A value around 90 degrees can rotate
+        // eyeball meshes completely out of view. The repair is also a guard
+        // against unsafe gaze ranges in ordinary imported VRM 1.0 files.
+        if sanitize_vrm1_look_at(&mut document) || (migrated_from_vrm0 && !had_marker) {
+            return Ok(MigratedVrm {
+                bytes: rebuild_glb(&bytes, json_length, &document)?,
+                converted: false,
+                migrated_from_vrm0,
+            });
+        }
         return Ok(MigratedVrm {
             bytes,
             converted: false,
+            migrated_from_vrm0,
         });
     }
     let vrm0 = document
@@ -59,11 +79,84 @@ pub(crate) fn migrate_vrm0(bytes: Vec<u8>) -> Result<MigratedVrm, String> {
     if document.pointer("/extensions/VRMC_springBone").is_some() {
         add_extension_name(&mut document, "extensionsUsed", "VRMC_springBone");
     }
+    mark_vrm0_migration(&mut document);
 
     Ok(MigratedVrm {
         bytes: rebuild_glb(&bytes, json_length, &document)?,
         converted: true,
+        migrated_from_vrm0: true,
     })
+}
+
+fn has_vrm0_migration_marker(document: &Value) -> bool {
+    document
+        .pointer("/asset/extras/neraMigratedFromVrm0")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn mark_vrm0_migration(document: &mut Value) {
+    let Some(asset) = document.get_mut("asset").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let extras = asset
+        .entry("extras")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !extras.is_object() {
+        *extras = Value::Object(Map::new());
+    }
+    extras
+        .as_object_mut()
+        .expect("extras was normalized to an object")
+        .insert("neraMigratedFromVrm0".into(), Value::Bool(true));
+}
+
+fn looks_like_unmarked_vrm0_migration(document: &Value) -> bool {
+    let kept_legacy_unlit = document
+        .get("extensionsUsed")
+        .and_then(Value::as_array)
+        .is_some_and(|extensions| {
+            extensions
+                .iter()
+                .any(|extension| extension.as_str() == Some("KHR_materials_unlit"))
+        });
+    let has_mtoon = document
+        .get("materials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|material| {
+            material
+                .pointer("/extensions/VRMC_materials_mtoon")
+                .is_some()
+        });
+    let scene = document.get("scene").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let roots = document
+        .get("scenes")
+        .and_then(Value::as_array)
+        .and_then(|scenes| scenes.get(scene))
+        .and_then(|scene| scene.get("nodes"))
+        .and_then(Value::as_array);
+    let has_migration_rotation = roots.is_some_and(|roots| {
+        roots.iter().filter_map(Value::as_u64).any(|root| {
+            let Some(rotation) = document
+                .pointer(&format!("/nodes/{root}/rotation"))
+                .and_then(Value::as_array)
+                .filter(|rotation| rotation.len() == 4)
+            else {
+                return false;
+            };
+            let values = rotation
+                .iter()
+                .map(|value| value.as_f64().unwrap_or(f64::NAN))
+                .collect::<Vec<_>>();
+            values[0].abs() < 0.001
+                && (values[1].abs() - 1.0).abs() < 0.001
+                && values[2].abs() < 0.001
+                && values[3].abs() < 0.001
+        })
+    });
+    kept_legacy_unlit && !has_mtoon && has_migration_rotation
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -325,8 +418,11 @@ fn migrate_look_at(vrm0: &Value) -> Value {
     let range = |key: &str| {
         let source = first.get(key).unwrap_or(&Value::Null);
         json!({
-            "inputMaxValue": source.pointer("/curve/7/x").and_then(Value::as_f64).unwrap_or(90.0),
-            "outputScale": source.get("xRange").and_then(Value::as_f64).unwrap_or(10.0),
+            // VRM 0.x DegreeMap uses xRange for the input angle and yRange
+            // for the resulting eye-bone angle. These map directly to the
+            // VRM 1.0 RangeMap fields below.
+            "inputMaxValue": source.get("xRange").and_then(Value::as_f64).unwrap_or(90.0),
+            "outputScale": source.get("yRange").and_then(Value::as_f64).unwrap_or(10.0),
         })
     };
     json!({
@@ -340,6 +436,78 @@ fn migrate_look_at(vrm0: &Value) -> Value {
         "rangeMapHorizontalOuter": range("lookAtHorizontalOuter"),
         "rangeMapVerticalDown": range("lookAtVerticalDown"),
         "rangeMapVerticalUp": range("lookAtVerticalUp"),
+    })
+}
+
+fn sanitize_vrm1_look_at(document: &mut Value) -> bool {
+    const RANGE_KEYS: [&str; 4] = [
+        "rangeMapHorizontalInner",
+        "rangeMapHorizontalOuter",
+        "rangeMapVerticalDown",
+        "rangeMapVerticalUp",
+    ];
+    let legacy_swap = has_previous_vrm0_range_swap(document);
+    let Some(look_at) = document
+        .pointer_mut("/extensions/VRMC_vrm/lookAt")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+
+    // This exact pattern identifies files emitted by the earlier broken
+    // mapping: all four default legacy xRange values became both input and
+    // output angles. Restore the legacy default yRange of 10 degrees.
+    let mut changed = false;
+    for key in RANGE_KEYS {
+        let Some(range) = look_at.get_mut(key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let input = range
+            .get("inputMaxValue")
+            .and_then(Value::as_f64)
+            .unwrap_or(90.0)
+            .clamp(1.0, 180.0);
+        let output = if legacy_swap {
+            10.0
+        } else {
+            range
+                .get("outputScale")
+                .and_then(Value::as_f64)
+                .unwrap_or(10.0)
+                .clamp(0.0, 45.0)
+        };
+        if range.get("inputMaxValue").and_then(Value::as_f64) != Some(input) {
+            range.insert("inputMaxValue".into(), json!(input));
+            changed = true;
+        }
+        if range.get("outputScale").and_then(Value::as_f64) != Some(output) {
+            range.insert("outputScale".into(), json!(output));
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn has_previous_vrm0_range_swap(document: &Value) -> bool {
+    const RANGE_KEYS: [&str; 4] = [
+        "rangeMapHorizontalInner",
+        "rangeMapHorizontalOuter",
+        "rangeMapVerticalDown",
+        "rangeMapVerticalUp",
+    ];
+    let Some(look_at) = document
+        .pointer("/extensions/VRMC_vrm/lookAt")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    RANGE_KEYS.iter().all(|key| {
+        let Some(range) = look_at.get(*key) else {
+            return false;
+        };
+        let input = range.get("inputMaxValue").and_then(Value::as_f64);
+        let output = range.get("outputScale").and_then(Value::as_f64);
+        matches!((input, output), (Some(input), Some(output)) if input >= 60.0 && (input - output).abs() < 0.001)
     })
 }
 
@@ -670,12 +838,27 @@ mod tests {
         let old_json_length = u32_at(&original, 12).unwrap() as usize;
         let migrated = migrate_vrm0(original.clone()).unwrap();
         assert!(migrated.converted);
+        assert!(migrated.migrated_from_vrm0);
         let (new_json_length, document) = parse_document(&migrated.bytes).unwrap();
         assert!(document.pointer("/extensions/VRM").is_none());
         assert_eq!(
             document.pointer("/extensions/VRMC_vrm/specVersion"),
             Some(&json!("1.0"))
         );
+        assert_eq!(
+            document.pointer("/asset/extras/neraMigratedFromVrm0"),
+            Some(&json!(true))
+        );
+        for key in [
+            "rangeMapHorizontalInner",
+            "rangeMapHorizontalOuter",
+            "rangeMapVerticalDown",
+            "rangeMapVerticalUp",
+        ] {
+            let range = &document["extensions"]["VRMC_vrm"]["lookAt"][key];
+            assert_eq!(range["inputMaxValue"], json!(90.0));
+            assert_eq!(range["outputScale"], json!(10.0));
+        }
         serde_json::from_value::<VrmExtensions>(document["extensions"].clone()).unwrap();
         assert_eq!(
             &original[20 + old_json_length..],
@@ -684,6 +867,58 @@ mod tests {
 
         let second = migrate_vrm0(migrated.bytes.clone()).unwrap();
         assert!(!second.converted);
+        assert!(second.migrated_from_vrm0);
         assert_eq!(second.bytes, migrated.bytes);
+    }
+
+    #[test]
+    fn repairs_the_previous_migrators_unsafe_eye_rotation_ranges() {
+        let original = include_bytes!("../assets/vrm/nera0.0.vrm").to_vec();
+        let migrated = migrate_vrm0(original).unwrap();
+        let (json_length, mut document) = parse_document(&migrated.bytes).unwrap();
+        for key in [
+            "rangeMapHorizontalInner",
+            "rangeMapHorizontalOuter",
+            "rangeMapVerticalDown",
+            "rangeMapVerticalUp",
+        ] {
+            document["extensions"]["VRMC_vrm"]["lookAt"][key]["outputScale"] = json!(90.0);
+        }
+        let broken = rebuild_glb(&migrated.bytes, json_length, &document).unwrap();
+        let repaired = migrate_vrm0(broken.clone()).unwrap();
+        assert!(!repaired.converted);
+        assert_ne!(repaired.bytes, broken);
+        let (_, repaired_document) = parse_document(&repaired.bytes).unwrap();
+        for key in [
+            "rangeMapHorizontalInner",
+            "rangeMapHorizontalOuter",
+            "rangeMapVerticalDown",
+            "rangeMapVerticalUp",
+        ] {
+            assert_eq!(
+                repaired_document["extensions"]["VRMC_vrm"]["lookAt"][key]["outputScale"],
+                json!(10.0)
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_unmarked_files_written_by_the_earlier_migrator() {
+        let migrated = migrate_vrm0(include_bytes!("../assets/vrm/nera0.0.vrm").to_vec()).unwrap();
+        let (json_length, mut document) = parse_document(&migrated.bytes).unwrap();
+        document["asset"]["extras"]
+            .as_object_mut()
+            .unwrap()
+            .remove("neraMigratedFromVrm0");
+        let unmarked = rebuild_glb(&migrated.bytes, json_length, &document).unwrap();
+
+        let recognized = migrate_vrm0(unmarked).unwrap();
+        assert!(!recognized.converted);
+        assert!(recognized.migrated_from_vrm0);
+        let (_, recognized_document) = parse_document(&recognized.bytes).unwrap();
+        assert_eq!(
+            recognized_document.pointer("/asset/extras/neraMigratedFromVrm0"),
+            Some(&json!(true))
+        );
     }
 }

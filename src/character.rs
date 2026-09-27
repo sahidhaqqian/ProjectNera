@@ -41,12 +41,14 @@ pub(crate) struct CharacterImportStatus {
 #[derive(Resource)]
 pub(crate) struct ActiveCharacter {
     pub(crate) asset_path: String,
+    pub(crate) migrated_from_vrm0: bool,
 }
 
 impl Default for ActiveCharacter {
     fn default() -> Self {
         Self {
             asset_path: DEFAULT_CHARACTER.to_owned(),
+            migrated_from_vrm0: false,
         }
     }
 }
@@ -61,11 +63,13 @@ struct CharacterImport {
 struct ImportedCharacter {
     path: String,
     converted: bool,
+    migrated_from_vrm0: bool,
 }
 
 struct PendingCharacter {
     path: String,
     converted: bool,
+    migrated_from_vrm0: bool,
     handle: Handle<VrmAsset>,
     started: Duration,
     entity: Option<Entity>,
@@ -177,6 +181,7 @@ fn receive_import(
             Ok(ImportedCharacter {
                 path: DEFAULT_CHARACTER.to_owned(),
                 converted: false,
+                migrated_from_vrm0: false,
             })
         } else {
             import_model(&selected.unwrap(), &character_directory())
@@ -198,6 +203,7 @@ fn update_import(world: &mut World) {
                         handle: world.resource::<AssetServer>().load(imported.path.clone()),
                         path: imported.path,
                         converted: imported.converted,
+                        migrated_from_vrm0: imported.migrated_from_vrm0,
                         started: world.resource::<Time<Real>>().elapsed(),
                         entity: None,
                     });
@@ -252,7 +258,13 @@ fn update_import(world: &mut World) {
             && world.get::<Initialized>(entity).is_some()
             && world.get::<HipsBoneEntity>(entity).is_some()
         {
-            commit_character(world, entity, &pending.path, pending.converted);
+            commit_character(
+                world,
+                entity,
+                &pending.path,
+                pending.converted,
+                pending.migrated_from_vrm0,
+            );
             return;
         }
         runtime.pending = Some(pending);
@@ -266,7 +278,13 @@ fn import_failed(world: &mut World, reason: String) {
     status.message = reason;
 }
 
-fn commit_character(world: &mut World, entity: Entity, path: &str, converted: bool) {
+fn commit_character(
+    world: &mut World,
+    entity: Entity,
+    path: &str,
+    converted: bool,
+    migrated_from_vrm0: bool,
+) {
     let old: Vec<_> = world
         .query_filtered::<Entity, With<NeraAvatar>>()
         .iter(world)
@@ -309,7 +327,9 @@ fn commit_character(world: &mut World, entity: Entity, path: &str, converted: bo
     world.commands().entity(entity).with_children(|parent| {
         crate::animation::spawn_animation_library(parent, &asset_server);
     });
-    world.resource_mut::<ActiveCharacter>().asset_path = path.to_owned();
+    let mut active = world.resource_mut::<ActiveCharacter>();
+    active.asset_path = path.to_owned();
+    active.migrated_from_vrm0 = migrated_from_vrm0;
     world.resource_mut::<NeraSettings>().character_asset = if path == DEFAULT_CHARACTER {
         String::new()
     } else {
@@ -436,6 +456,7 @@ fn import_model(path: &Path, directory: &Path) -> Result<ImportedCharacter, Stri
     Ok(ImportedCharacter {
         path: format!("characters://{name}"),
         converted: migrated.converted,
+        migrated_from_vrm0: migrated.migrated_from_vrm0,
     })
 }
 
@@ -711,6 +732,7 @@ mod tests {
         let original = std::fs::read(&source).unwrap();
         let imported = import_model(&source, &directory).unwrap();
         assert!(imported.converted);
+        assert!(imported.migrated_from_vrm0);
         let destination = directory.join(saved_filename(&imported.path).unwrap());
         let converted = std::fs::read(&destination).unwrap();
         assert!(validate_glb(&converted).is_ok());
@@ -743,6 +765,7 @@ mod tests {
         app.world_mut().resource_mut::<CharacterImport>().pending = Some(PendingCharacter {
             path: "characters://model-new.vrm".into(),
             converted: false,
+            migrated_from_vrm0: false,
             handle,
             started: Duration::ZERO,
             entity: Some(candidate),

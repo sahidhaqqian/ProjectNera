@@ -191,7 +191,20 @@ struct AlarmAudioPlayback;
 /// loading/retargeting pattern used by Idle/Sitting/reaction animations.
 #[derive(Resource, Default)]
 struct AlarmVrmaBootstrap {
-    spawned: bool,
+    owner: Option<Entity>,
+}
+
+impl AlarmVrmaBootstrap {
+    /// Alarm clips are retargeted under one concrete VRM entity. Replacing the
+    /// character invalidates that ancestry, so a new owner must receive its own
+    /// Jump/Wave sources even when this bootstrap already ran earlier.
+    fn bind(&mut self, owner: Entity) -> bool {
+        if self.owner == Some(owner) {
+            return false;
+        }
+        self.owner = Some(owner);
+        true
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,16 +298,15 @@ fn ensure_alarm_vrmas_under_nera(
     mut bootstrap: ResMut<AlarmVrmaBootstrap>,
     named_entities: Query<(Entity, &Name)>,
 ) {
-    if bootstrap.spawned {
-        return;
-    }
-
     let Some((nera, _)) = named_entities
         .iter()
         .find(|(_, name)| name.as_str() == "Nera")
     else {
         return;
     };
+    if !bootstrap.bind(nera) {
+        return;
+    }
 
     commands.entity(nera).with_children(|parent| {
         parent
@@ -311,8 +323,6 @@ fn ensure_alarm_vrmas_under_nera(
             ))
             .observe(register_alarm_wave_animation);
     });
-
-    bootstrap.spawned = true;
 
     info!(
         "Nera alarm VRMAs attached to VRM root | jump={} wave={}",
@@ -720,6 +730,19 @@ fn abort_ringing_if_attention_never_started(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alarm_vrmas_rebind_after_character_entity_changes() {
+        let mut world = World::new();
+        let first_character = world.spawn_empty().id();
+        let replacement_character = world.spawn_empty().id();
+        let mut bootstrap = AlarmVrmaBootstrap::default();
+
+        assert!(bootstrap.bind(first_character));
+        assert!(!bootstrap.bind(first_character));
+        assert!(bootstrap.bind(replacement_character));
+        assert!(!bootstrap.bind(replacement_character));
+    }
 
     fn pending_alarm(label: &str, deadline: Instant) -> PendingAlarm {
         PendingAlarm {

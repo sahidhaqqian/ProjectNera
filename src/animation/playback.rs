@@ -110,15 +110,21 @@ impl NeraAnimationClips {
             .unwrap_or(Duration::ZERO)
     }
 
-    pub(crate) fn startup_intro_ready(&self) -> bool {
-        [
-            self.idle,
-            self.floating,
-            self.falling_to_landing,
-            self.alarm_wave,
-        ]
-        .into_iter()
-        .all(|slot| slot.is_some_and(|clip| !clip.duration.is_zero()))
+    /// Falling and landing can start independently from the optional greeting.
+    /// The Wave clip is checked when the greeting is actually requested.
+    pub(crate) fn startup_motion_ready(&self) -> bool {
+        [self.idle, self.floating, self.falling_to_landing]
+            .into_iter()
+            .all(|slot| slot.is_some_and(|clip| !clip.duration.is_zero()))
+    }
+
+    /// The startup intro is optional, but the pet must not be revealed before
+    /// its rig has received a usable base pose. This lets startup distinguish
+    /// "Idle is already playing" from "every entrance clip is available".
+    pub(crate) fn idle_playback_ready(&self, playback: &NeraAnimationPlayback) -> bool {
+        self.idle.is_some_and(|clip| {
+            !clip.duration.is_zero() && playback.current_clip == Some(clip.entity)
+        })
     }
 
     pub(super) fn idle_micro(&self, action: IdleMicroAction) -> Option<ClipSlot> {

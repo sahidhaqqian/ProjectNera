@@ -6,6 +6,7 @@ pub(crate) use anchors::{DeathVisualGrounding, preserve_seated_hips, update_avat
 
 use crate::{
     animation::{NeraAnimationState, spawn_animation_library},
+    character::ActiveCharacter,
     environment::DesktopEnvironment,
     interaction::cursor_position_in_nera_window,
     settings::NeraSettings,
@@ -87,6 +88,7 @@ pub(crate) fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>)
 pub(crate) fn update_look_at_target(
     time: Res<Time>,
     settings: Res<NeraSettings>,
+    character: Res<ActiveCharacter>,
     environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
@@ -108,7 +110,12 @@ pub(crate) fn update_look_at_target(
             .map(|cursor_pos| {
                 let intensity = f32::from(settings.follow_intensity.clamp(25, 100)) / 100.0;
 
-                let map_x = (cursor_pos.x / window.resolution.width() - 0.5) * 4.0 * intensity;
+                let map_x = horizontal_gaze_x(
+                    cursor_pos.x,
+                    window.resolution.width(),
+                    intensity,
+                    character.migrated_from_vrm0,
+                );
 
                 let map_y =
                     0.5 + (0.5 - cursor_pos.y / window.resolution.height()) * 4.0 * intensity;
@@ -124,6 +131,11 @@ pub(crate) fn update_look_at_target(
     // gaze responsive while removing the robotic cursor-to-bone snapping.
     let blend = 1.0 - (-12.0 * time.delta_secs()).exp();
     target_transform.translation = target_transform.translation.lerp(desired, blend);
+}
+
+fn horizontal_gaze_x(cursor_x: f32, window_width: f32, intensity: f32, legacy: bool) -> f32 {
+    let x = (cursor_x / window_width.max(1.0) - 0.5) * 4.0 * intensity;
+    if legacy { -x } else { x }
 }
 
 /// VRMA reactions such as HitHead and ShakeHeadNo1 need temporary ownership of
@@ -234,6 +246,13 @@ mod tests {
         assert_eq!(hips.translation, Vec3::new(0.02, 0.94, -0.03));
         assert_eq!(hips.rotation, original.rotation);
         assert_eq!(hips.scale, original.scale);
+    }
+
+    #[test]
+    fn legacy_vrm0_gaze_corrects_the_horizontal_coordinate_direction() {
+        assert!(horizontal_gaze_x(75.0, 100.0, 1.0, false) > 0.0);
+        assert!(horizontal_gaze_x(75.0, 100.0, 1.0, true) < 0.0);
+        assert!(horizontal_gaze_x(25.0, 100.0, 1.0, true) > 0.0);
     }
 
     #[test]

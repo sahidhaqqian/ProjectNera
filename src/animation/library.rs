@@ -31,31 +31,73 @@ struct LoadingClip {
     source_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+struct CachedClip {
+    entity: Entity,
+    source_bytes: u64,
+    last_used: u64,
+}
+
 #[derive(Resource, Default)]
 pub(super) struct LibraryPlayback {
-    // Keep loaded children in place: removing them would renumber the VRM graph
-    // nodes used by existing production clips and their retarget tables.
-    clips: HashMap<String, Entity>,
+    clips: HashMap<String, CachedClip>,
     source_bytes: u64,
+    access_clock: u64,
     requested: Option<String>,
     loading: Option<LoadingClip>,
 }
 
 impl LibraryPlayback {
-    fn can_admit(&self, source_bytes: u64) -> Result<(), &'static str> {
+    fn validate_source_size(source_bytes: u64) -> Result<(), &'static str> {
         if source_bytes > MAX_CLIP_SOURCE_BYTES {
             return Err("Animation exceeds the 16 MiB desktop playback limit.");
         }
-        // The VRM dependency exposes no stable node removal API. Keep existing
-        // nodes intact and bound admission instead of corrupting their indices.
-        if self.clips.len() >= MAX_LIBRARY_CLIPS
+        Ok(())
+    }
+
+    fn cache_clip(&mut self, path: String, entity: Entity, source_bytes: u64) {
+        self.access_clock = self.access_clock.wrapping_add(1);
+        self.source_bytes = self.source_bytes.saturating_add(source_bytes);
+        self.clips.insert(
+            path,
+            CachedClip {
+                entity,
+                source_bytes,
+                last_used: self.access_clock,
+            },
+        );
+    }
+
+    fn cached_entity(&mut self, path: &str) -> Option<Entity> {
+        self.access_clock = self.access_clock.wrapping_add(1);
+        let clip = self.clips.get_mut(path)?;
+        clip.last_used = self.access_clock;
+        Some(clip.entity)
+    }
+
+    fn evict_for(&mut self, source_bytes: u64, protected: Option<Entity>) -> Vec<Entity> {
+        let mut evicted = Vec::new();
+        while self.clips.len() >= MAX_LIBRARY_CLIPS
             || self.source_bytes.saturating_add(source_bytes) > MAX_LIBRARY_SOURCE_BYTES
         {
-            return Err(
-                "Desktop animation cache is full (32 clips / 64 MiB of source files). Cached clips still work; restart Nera to play new clips.",
-            );
+            let candidate = self
+                .clips
+                .iter()
+                .filter(|(_, clip)| Some(clip.entity) != protected)
+                .min_by(|(path_a, clip_a), (path_b, clip_b)| {
+                    clip_a
+                        .last_used
+                        .cmp(&clip_b.last_used)
+                        .then_with(|| path_a.cmp(path_b))
+                })
+                .map(|(path, _)| path.clone());
+            let Some(path) = candidate else { break };
+            let clip = self.clips.remove(&path).expect("LRU candidate exists");
+            self.source_bytes = self.source_bytes.saturating_sub(clip.source_bytes);
+            evicted.push(clip.entity);
+            info!("Evicted desktop animation cache entry: {path}");
         }
-        Ok(())
+        evicted
     }
 
     fn reject(
@@ -220,8 +262,7 @@ pub(super) fn sync_library_animation(
             }
             runtime.reject(loading.path, reason, &mut errors);
         } else if clip_ready == Some(true) {
-            runtime.source_bytes += loading.source_bytes;
-            runtime.clips.insert(loading.path, loading.entity.unwrap());
+            runtime.cache_clip(loading.path, loading.entity.unwrap(), loading.source_bytes);
         } else {
             if loading.entity.is_none()
                 && assets.is_loaded_with_dependencies(loading.handle.id())
@@ -248,7 +289,7 @@ pub(super) fn sync_library_animation(
     let Some(path) = runtime.requested.clone() else {
         return;
     };
-    if let Some(&entity) = runtime.clips.get(&path) {
+    if let Some(entity) = runtime.cached_entity(&path) {
         let Ok((_, loaded)) = ready.get(entity) else {
             return;
         };
@@ -286,9 +327,16 @@ pub(super) fn sync_library_animation(
                 return;
             }
         };
-    if let Err(reason) = runtime.can_admit(source_bytes) {
+    if let Err(reason) = LibraryPlayback::validate_source_size(source_bytes) {
         runtime.reject(path, reason.into(), &mut errors);
         return;
+    }
+    let protected = match state.visual_state() {
+        super::VisualState::LibraryAnimation(entity) => Some(entity),
+        _ => None,
+    };
+    for entity in runtime.evict_for(source_bytes, protected) {
+        commands.entity(entity).despawn();
     }
     runtime.loading = Some(LoadingClip {
         handle: assets.load(path.clone()),
@@ -393,7 +441,7 @@ mod tests {
             app.update();
         }
         let runtime = app.world().resource::<LibraryPlayback>();
-        assert_eq!(runtime.clips["registered.vrma"], entity);
+        assert_eq!(runtime.clips["registered.vrma"].entity, entity);
         assert!(runtime.loading.is_none());
         assert_eq!(
             app.world().resource::<NeraAnimationState>().visual_state(),
@@ -407,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn hundreds_of_selections_at_capacity_keep_cached_clips_playable_and_nodes_stable() {
+    fn lru_eviction_keeps_recent_and_current_clips() {
         let mut app = library_app(crate::nera_asset_path());
         app.finish();
         app.cleanup();
@@ -425,48 +473,79 @@ mod tests {
             .collect();
         {
             let mut runtime = app.world_mut().resource_mut::<LibraryPlayback>();
-            runtime.clips.extend(retained.clone());
-            runtime.source_bytes = MAX_LIBRARY_CLIPS as u64 * 1024;
-        }
-        for index in 0..400 {
-            let cached = &retained[index % retained.len()];
-            app.world_mut().write_message(PlayLibraryAnimation {
-                path: if index % 2 == 0 {
-                    "animations/animasi_basic/idle.vrma".into()
-                } else {
-                    cached.0.clone()
-                },
-            });
-            app.update();
-            let runtime = app.world().resource::<LibraryPlayback>();
-            assert!(runtime.loading.is_none());
-            assert!(runtime.requested.is_none());
+            for (path, entity) in &retained {
+                runtime.cache_clip(path.clone(), *entity, 1024);
+            }
+            assert_eq!(runtime.cached_entity("cached-0.vrma"), Some(retained[0].1));
+            let evicted = runtime.evict_for(1024, Some(retained[1].1));
+            assert_eq!(evicted, vec![retained[2].1]);
+            assert!(runtime.clips.contains_key("cached-0.vrma"));
+            assert!(runtime.clips.contains_key("cached-1.vrma"));
+            assert!(!runtime.clips.contains_key("cached-2.vrma"));
+            runtime.cache_clip("new.vrma".into(), Entity::PLACEHOLDER, 1024);
             assert_eq!(runtime.clips.len(), MAX_LIBRARY_CLIPS);
             assert_eq!(runtime.source_bytes, MAX_LIBRARY_CLIPS as u64 * 1024);
-            for (path, entity) in &retained {
-                assert_eq!(runtime.clips[path], *entity);
-                assert!(app.world().get_entity(*entity).is_ok());
-            }
-            if index % 2 == 1 {
-                assert_eq!(
-                    app.world().resource::<NeraAnimationState>().visual_state(),
-                    VisualState::LibraryAnimation(cached.1)
-                );
-            }
         }
-        eprintln!(
-            "400 desktop selections: retained 32 stable clip entities; cache replays succeeded at capacity"
+    }
+
+    #[test]
+    fn full_cache_evicts_and_starts_the_new_selection_without_restart_error() {
+        let mut app = library_app(crate::nera_asset_path());
+        app.finish();
+        app.cleanup();
+        for index in 0..MAX_LIBRARY_CLIPS {
+            let entity = app
+                .world_mut()
+                .spawn(LibraryClipReady {
+                    duration: Duration::from_secs(1),
+                    warmup: 0,
+                })
+                .id();
+            app.world_mut()
+                .resource_mut::<LibraryPlayback>()
+                .cache_clip(format!("cached-{index}.vrma"), entity, 1024);
+        }
+        app.world_mut().write_message(PlayLibraryAnimation {
+            path: "animations/animasi_basic/idle.vrma".into(),
+        });
+
+        app.update();
+
+        let runtime = app.world().resource::<LibraryPlayback>();
+        assert_eq!(runtime.clips.len(), MAX_LIBRARY_CLIPS - 1);
+        assert_eq!(
+            runtime
+                .loading
+                .as_ref()
+                .map(|loading| loading.path.as_str()),
+            Some("animations/animasi_basic/idle.vrma")
+        );
+        assert!(
+            app.world()
+                .resource::<Messages<LibraryAnimationError>>()
+                .is_empty()
         );
     }
 
     #[test]
-    fn source_budget_rejects_large_files_before_loading() {
+    fn source_budget_rejects_only_oversized_files_and_evicts_for_total_budget() {
         let mut runtime = LibraryPlayback::default();
-        assert!(runtime.can_admit(MAX_CLIP_SOURCE_BYTES).is_ok());
-        assert!(runtime.can_admit(MAX_CLIP_SOURCE_BYTES + 1).is_err());
-        runtime.source_bytes = MAX_LIBRARY_SOURCE_BYTES - 1;
-        assert!(runtime.can_admit(1).is_ok());
-        assert!(runtime.can_admit(2).is_err());
+        assert!(LibraryPlayback::validate_source_size(MAX_CLIP_SOURCE_BYTES).is_ok());
+        assert!(LibraryPlayback::validate_source_size(MAX_CLIP_SOURCE_BYTES + 1).is_err());
+        for index in 0..4 {
+            runtime.cache_clip(
+                format!("large-{index}.vrma"),
+                Entity::from_bits(index + 1),
+                MAX_CLIP_SOURCE_BYTES,
+            );
+        }
+        assert_eq!(runtime.source_bytes, MAX_LIBRARY_SOURCE_BYTES);
+        let evicted = runtime.evict_for(MAX_CLIP_SOURCE_BYTES, None);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(
+            runtime.source_bytes,
+            MAX_LIBRARY_SOURCE_BYTES - MAX_CLIP_SOURCE_BYTES
+        );
     }
 
     #[test]

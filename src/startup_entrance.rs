@@ -7,7 +7,7 @@ use bevy_vrm1::prelude::HipsBoneEntity;
 
 use crate::{
     alarm::AlarmState,
-    animation::{NeraAnimationClips, NeraAnimationState, VisualState},
+    animation::{NeraAnimationClips, NeraAnimationPlayback, NeraAnimationState, VisualState},
     avatar::NeraAvatar,
     desktop_physics::DesktopPhysicsState,
     environment::{DesktopEnvironment, PlacementState},
@@ -20,6 +20,7 @@ use crate::{
 const NOTICE_DELAY: Duration = Duration::from_millis(400);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const ENTRANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const PLAYABLE_FALLBACK_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Phase {
@@ -32,11 +33,20 @@ enum Phase {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupReadiness {
+    Waiting,
+    FullIntro,
+    RevealOnly,
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct StartupEntrance {
     phase: Phase,
     elapsed: Duration,
     ready_frames: u8,
+    playable_frames: u8,
+    playable_elapsed: Duration,
     cancel_requested: bool,
 }
 
@@ -56,6 +66,39 @@ impl StartupEntrance {
     fn complete(&mut self) {
         self.phase = Phase::Done;
         self.ready_frames = 0;
+        self.playable_frames = 0;
+        self.playable_elapsed = Duration::ZERO;
+    }
+
+    fn observe_readiness(
+        &mut self,
+        full_intro_ready: bool,
+        playable_ready: bool,
+        dt: Duration,
+    ) -> StartupReadiness {
+        self.ready_frames = if full_intro_ready {
+            self.ready_frames.saturating_add(1)
+        } else {
+            0
+        };
+        self.playable_frames = if playable_ready {
+            self.playable_frames.saturating_add(1)
+        } else {
+            0
+        };
+        self.playable_elapsed = if playable_ready {
+            self.playable_elapsed.saturating_add(dt)
+        } else {
+            Duration::ZERO
+        };
+
+        if self.ready_frames >= 3 {
+            StartupReadiness::FullIntro
+        } else if self.playable_frames >= 3 && self.playable_elapsed >= PLAYABLE_FALLBACK_DELAY {
+            StartupReadiness::RevealOnly
+        } else {
+            StartupReadiness::Waiting
+        }
     }
 
     /// Returns true exactly once when the greeting should begin. A busy pose or
@@ -150,6 +193,7 @@ pub(crate) fn prepare_startup_entrance(
     time: Res<Time>,
     context: StartupContext,
     clips: Res<NeraAnimationClips>,
+    playback: Res<NeraAnimationPlayback>,
     mut entrance: ResMut<StartupEntrance>,
     mut physics: ResMut<DesktopPhysicsState>,
     mut environment: ResMut<DesktopEnvironment>,
@@ -201,24 +245,34 @@ pub(crate) fn prepare_startup_entrance(
         return;
     }
 
-    let ready = clips.startup_intro_ready()
+    let rig_ready = environment
+        .nera_hwnd
+        .is_some_and(platform::window_is_visible)
+        && avatar.iter().any(|(_, hips)| hips.is_some());
+    let playable_ready = rig_ready && clips.idle_playback_ready(&playback);
+    let full_intro_ready = playable_ready
+        && clips.startup_motion_ready()
         && environment
             .feet_anchor_logical
             .is_some_and(|anchor| anchor.is_finite())
         && environment.monitor.is_some()
-        && environment.nera_rect.is_some()
-        && environment
-            .nera_hwnd
-            .is_some_and(platform::window_is_visible)
-        && avatar.iter().any(|(_, hips)| hips.is_some());
-    entrance.ready_frames = if ready {
-        entrance.ready_frames.saturating_add(1)
-    } else {
-        0
-    };
+        && environment.nera_rect.is_some();
+    let readiness = entrance.observe_readiness(full_intro_ready, playable_ready, time.delta());
     // LoadedVrma precedes the final graph bake. Two complete updates also let
     // native position restore and the standing feet projection settle first.
-    if entrance.ready_frames < 3 {
+    if readiness == StartupReadiness::Waiting {
+        return;
+    }
+    if readiness == StartupReadiness::RevealOnly {
+        entrance.complete();
+        physics.cancel_startup_drop();
+        animation.cancel_startup_greeting();
+        for (mut visibility, _) in &mut avatar {
+            *visibility = Visibility::Inherited;
+        }
+        info!(
+            "Nera startup entrance skipped: Idle is playable while optional entrance requirements are unavailable"
+        );
         return;
     }
     if physics.begin_startup_drop(&mut environment, &mut animation) {
@@ -277,6 +331,7 @@ mod tests {
             .init_resource::<DesktopPetInteraction>()
             .init_resource::<SettingsInputGate>()
             .init_resource::<NeraAnimationClips>()
+            .init_resource::<NeraAnimationPlayback>()
             .init_resource::<StartupEntrance>()
             .init_resource::<DesktopPhysicsState>()
             .init_resource::<DesktopEnvironment>()
@@ -384,6 +439,42 @@ mod tests {
         assert_eq!(entrance.phase, Phase::Done);
         assert!(!entrance.blocks_position_save());
         assert!(!entrance.advance(VisualState::Idle, true, Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn playable_idle_reveals_without_waiting_for_optional_intro_assets() {
+        let mut entrance = StartupEntrance::default();
+        assert_eq!(
+            entrance.observe_readiness(false, true, Duration::from_millis(500)),
+            StartupReadiness::Waiting
+        );
+        assert_eq!(
+            entrance.observe_readiness(false, true, Duration::from_millis(500)),
+            StartupReadiness::Waiting
+        );
+        assert_eq!(
+            entrance.observe_readiness(false, true, Duration::from_millis(500)),
+            StartupReadiness::Waiting
+        );
+        assert_eq!(
+            entrance.observe_readiness(false, true, Duration::from_millis(500)),
+            StartupReadiness::RevealOnly
+        );
+    }
+
+    #[test]
+    fn complete_intro_wins_when_all_requirements_are_stable() {
+        let mut entrance = StartupEntrance::default();
+        for _ in 0..2 {
+            assert_eq!(
+                entrance.observe_readiness(true, true, Duration::from_millis(16)),
+                StartupReadiness::Waiting
+            );
+        }
+        assert_eq!(
+            entrance.observe_readiness(true, true, Duration::from_millis(16)),
+            StartupReadiness::FullIntro
+        );
     }
 
     #[test]
