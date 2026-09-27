@@ -63,3 +63,107 @@ must retain CPU data for the meshes it modifies.
 A separate executable was built at `target/debug/nera-memory.exe` so the running
 desktop process need not be stopped or overwritten. Exit the old Nera before
 launching this executable. Normal subsequent builds include the same changes.
+
+
+
+Boleh. Ini rangkuman data yang sudah kita dapat sejauh ini.
+
+| Tahap / Kondisi | Private RAM | Working Set | Catatan |
+|---|---:|---:|---|
+| Minimal Bevy | **2.9 MB** | 28.6 MB | Bevy core hampir tidak berat |
+| Bevy + window, tanpa renderer | **6.4 MB** | 33.3 MB | Window cost kecil |
+| Window + minimal 3D renderer | **106.0 MB** | 182.8 MB | Renderer dasar menambah ~99.6 MB |
+| + PBR default | **238.9–240.5 MB** | ~325 MB | PBR menambah ~133 MB |
+| + VRM plugin, tanpa model | **239.6 MB** | 327.3 MB | VRM plugin sendiri cuma ~0.7 MB |
+| + `nera_256.vrm` | **347.0–368.5 MB** | 433–456 MB | Model Nera menambah ~107 MB |
+| + idle VRMA | **372.7–373.8 MB** | 462–463 MB | Satu VRMA menambah sekitar ~25.7 MB |
+| Full Nera | **390–403 MB** | ~500 MB | Seluruh fitur Nera lain cuma tambah ~18–30 MB |
+
+Jadi pembagian kasarnya sekarang:
+
+```text
+Bevy core                  ~3 MB
+Window                     ~3–4 MB
+Renderer dasar            ~100 MB
+PBR                       ~133 MB
+VRM model                 ~107 MB
+VRMA pertama              ~26 MB
+Fitur Nera lainnya         ~18 MB
+--------------------------------
+Full Nera                ~390–400 MB
+```
+
+Temuan penting lainnya:
+
+- **Bevy core bukan masalah.** Minimal Bevy cuma ~2.9 MB private.
+- **VRM plugin bukan masalah.** Cuma ~0.7 MB tanpa model.
+- Tiga monster RAM utama adalah:
+  1. **PBR ~133 MB**
+  2. **VRM model ~107 MB**
+  3. **Renderer dasar ~100 MB**
+- **VRMA juga lumayan mahal**, sekitar ~25 MB untuk idle pertama.
+- Seluruh logic Nera lain—tray, settings, physics, alarm, interaction, dll—relatif kecil dibanding tiga komponen di atas.
+
+Untuk PBR, kita sudah benchmark flag:
+
+```text
+D0 default                    240.5 MB
+D1 prepass off                241.3 MB
+D2 deferred off               239.4 MB
+D3 GPU instance builder off   229.5 MB
+D4 semua off                  231.0 MB
+```
+
+Satu-satunya yang ngaruh adalah:
+
+```rust
+use_gpu_instance_buffer_builder: false
+```
+
+Penghematannya sekitar:
+- **~11 MB** di benchmark PBR
+- **~7.8 MB** di full Nera
+- CPU tidak naik
+
+Tapi ternyata **karakter Nera tidak tampil**, jadi optimasi D3 **tidak aman untuk production** dan sudah kita revert.
+
+Untuk CPU, hasil hard FPS limiter:
+
+```text
+15 FPS  → ~1%+
+24 FPS  → ~2–3%
+30 FPS  → ~3–4%
+60 FPS  → ~5%
+```
+
+Jadi CPU sangat bergantung pada workload per-frame. Keputusan sekarang:
+- 15 FPS dihapus
+- opsi **24 FPS dan 30 FPS dipertahankan**
+- hard limiter pakai `bevy_framepace`, bukan `reactive_low_power`
+
+Kesimpulan posisi sekarang:
+
+```text
+RAM current dev build: ~390–400 MB private
+CPU @24 FPS: ~2–3%
+```
+
+Dan arah optimasi berikutnya yang paling masuk akal adalah:
+
+```text
+1. Breakdown +107 MB dari model VRM
+   - textures
+   - morph targets
+   - mesh
+   - skinning
+   - materials
+
+2. Breakdown +25 MB dari VRMA
+   - preload vs lazy load
+   - baked/retargeted animation cost
+
+3. Renderer allocator / wgpu
+   - masih mungkin ada beberapa puluh MB
+```
+
+Jadi saat ini kita belum mentok, tapi **easy win sudah hampir habis**. Target 300–350 MB masih cukup realistis; target 100 MB kemungkinan butuh perubahan arsitektur/rendering yang jauh lebih besar.

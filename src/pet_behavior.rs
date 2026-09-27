@@ -1,7 +1,10 @@
 //! Central low-priority pet brain. One decision owns idle, fidgets and walking;
 //! user placement and desktop support exclusively own sitting/standing changes.
 use crate::{
-    animation::{BasePose, IdleMicroAction, NeraAnimationClips, NeraAnimationState, VisualState},
+    animation::{
+        BasePose, IdleMicroAction, LazyNeraVrma, LazyNeraVrmaRequested, NeraAnimationClips,
+        NeraAnimationState, VisualState, request_lazy_vrma,
+    },
     desktop_physics::{DesktopPhysicsState, WalkingSurface, WalkingSurfaceKey},
     environment::{DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, InteractionState, NeraReleased},
@@ -268,6 +271,9 @@ pub(crate) fn update_pet_behavior(
     mut animation: ResMut<NeraAnimationState>,
     mut walking: ResMut<WalkingRuntime>,
     mut brain: ResMut<PetBehavior>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    lazy_loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
 ) {
     let dt = time.delta_secs().min(0.05);
     let settings = &context.settings;
@@ -386,6 +392,16 @@ pub(crate) fn update_pet_behavior(
         && surface.is_some()
         && (brain.walk_in <= 0.0 || brain.edge_return);
     let mut candidates = idle_candidates(IdleMicroAction::for_pose(BasePose::Idle), &clips);
+    // Cold idle fidgets are still eligible, but selecting one for the first
+    // time merely requests its VRMA. The pet stays in Idle for that decision
+    // and the clip joins the normal candidate pool once retargeting completes.
+    for action in IdleMicroAction::for_pose(BasePose::Idle) {
+        if clips.idle_micro_duration(*action).is_none()
+            && LazyNeraVrma::for_idle_micro(*action).is_some()
+        {
+            candidates.push((Behavior::Variation(*action), 1));
+        }
+    }
     if can_walk {
         candidates.push((Behavior::Walk, 8));
     }
@@ -431,6 +447,8 @@ pub(crate) fn update_pet_behavior(
         Behavior::Variation(action) => {
             if let Some(duration) = clips.idle_micro_duration(action) {
                 animation.request_idle_variation(action, duration);
+            } else if let Some(kind) = LazyNeraVrma::for_idle_micro(action) {
+                request_lazy_vrma(kind, &mut commands, &asset_server, &lazy_loaders);
             }
         }
         Behavior::StayIdle => {}

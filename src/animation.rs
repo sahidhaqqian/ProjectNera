@@ -140,6 +140,7 @@ impl Plugin for NeraAnimationPlugin {
                     .before(tick_animation_actions),
             )
             .add_message::<AlarmAnimationCommand>()
+            .add_systems(Update, ensure_state_lazy_vrmas)
             .add_systems(
                 Update,
                 sync_alarm_animation

@@ -105,10 +105,11 @@ fn main() {
     let memory_benchmark_d3 = std::env::args().any(|arg| arg == "--memory-benchmark-d3");
     let memory_benchmark_default = std::env::args().any(|arg| arg == "--memory-benchmark");
     let benchmark = memory_benchmark_d3 || memory_benchmark_default;
-    // Nera draws one animated character, so the CPU MeshUniform path uses less
-    // memory than Bevy's GPU instance-buffer builder. `--memory-benchmark`
-    // deliberately restores Bevy's default to keep the A/B baseline runnable.
-    let use_gpu_instance_buffer_builder = memory_benchmark_default && !memory_benchmark_d3;
+    // Keep Bevy's default GPU instance-buffer path in production. The D3
+    // variant saves some memory, but it has not passed Nera's visual smoke
+    // test and can make the VRM disappear. Restrict it to the explicit
+    // benchmark flag so normal launches remain render-correct.
+    let use_gpu_instance_buffer_builder = !memory_benchmark_d3;
     let mut app = App::new();
 
     // Load persistent Nera settings before the native window is created.

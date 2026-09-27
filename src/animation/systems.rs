@@ -12,7 +12,8 @@ use crate::{
 use crate::action_menu::{AnimationMenuChoice, NeraActionMenuCommand};
 
 use super::{
-    AlarmAnimationCommand, NeraAnimationClips, NeraAnimationState, SittingPose, TemporaryAction,
+    AlarmAnimationCommand, LazyNeraVrma, LazyNeraVrmaRequested, NeraAnimationClips,
+    NeraAnimationState, SittingPose, TemporaryAction, request_lazy_vrma,
 };
 
 #[derive(Resource, Default)]
@@ -174,10 +175,19 @@ pub(super) fn sync_alarm_animation(
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
     mut runtime: ResMut<AlarmAnimationRuntime>,
+    mut ecs_commands: Commands,
+    asset_server: Res<AssetServer>,
+    lazy_loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
 ) {
     for command in commands.read() {
         match command {
             AlarmAnimationCommand::Start => {
+                request_lazy_vrma(
+                    LazyNeraVrma::AlarmJump,
+                    &mut ecs_commands,
+                    &asset_server,
+                    &lazy_loaders,
+                );
                 runtime.requested = true;
                 runtime.started = false;
                 runtime.waiting_logged = false;
@@ -202,6 +212,15 @@ pub(super) fn sync_alarm_animation(
 
     if !runtime.requested || runtime.started {
         return;
+    }
+
+    if clips.alarm_jump.is_none() {
+        request_lazy_vrma(
+            LazyNeraVrma::AlarmJump,
+            &mut ecs_commands,
+            &asset_server,
+            &lazy_loaders,
+        );
     }
 
     let (Some(wave), Some(jump)) = (clips.alarm_wave, clips.alarm_jump) else {

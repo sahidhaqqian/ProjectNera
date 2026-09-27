@@ -254,6 +254,93 @@ const IDLE_SITTING_2_VRMA_PATH: &str = "animations/animasi_basic/Sitting_2.vrma"
 const IDLE_SITTING_4_VRMA_PATH: &str = "animations/animasi_basic/Sitting_4.vrma";
 const IDLE_SITTING_RUBBING_ARM_VRMA_PATH: &str =
     "animations/animasi_basic/Sitting_Rubbing_Arm.vrma";
+
+/// Runtime animations that are useful but do not need to consume memory from
+/// process start. Their loader entities stay attached to the active VRM rig;
+/// the actual `VrmaHandle` is inserted only when a feature first requests it.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LazyNeraVrma {
+    AlarmJump,
+    Praying,
+    IdleSleepy,
+    IdleBlush,
+    IdleCatwalkTwist,
+    IdleBored,
+    IdleAngryGesture,
+}
+
+impl LazyNeraVrma {
+    fn path(self) -> &'static str {
+        match self {
+            Self::AlarmJump => ALARM_JUMP_VRMA_PATH,
+            Self::Praying => PRAYING_VRMA_PATH,
+            Self::IdleSleepy => IDLE_SLEEPY_VRMA_PATH,
+            Self::IdleBlush => IDLE_BLUSH_VRMA_PATH,
+            Self::IdleCatwalkTwist => IDLE_CATWALK_TWIST_VRMA_PATH,
+            Self::IdleBored => IDLE_BORED_VRMA_PATH,
+            Self::IdleAngryGesture => IDLE_ANGRY_GESTURE_VRMA_PATH,
+        }
+    }
+
+    pub(crate) fn for_idle_micro(action: IdleMicroAction) -> Option<Self> {
+        match action {
+            IdleMicroAction::Sleepy => Some(Self::IdleSleepy),
+            IdleMicroAction::Blush => Some(Self::IdleBlush),
+            IdleMicroAction::CatwalkIdleTwistR => Some(Self::IdleCatwalkTwist),
+            IdleMicroAction::Bored => Some(Self::IdleBored),
+            IdleMicroAction::AngryGesture => Some(Self::IdleAngryGesture),
+            IdleMicroAction::LookAround
+            | IdleMicroAction::Relax
+            | IdleMicroAction::SittingRubbingArm => None,
+        }
+    }
+}
+
+#[derive(Component)]
+pub(crate) struct LazyNeraVrmaRequested;
+
+/// Start loading one cold VRMA directly on its pre-created loader entity.
+/// No queue/message resource is required, so this is safe even during startup.
+pub(crate) fn request_lazy_vrma(
+    kind: LazyNeraVrma,
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    loaders: &Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
+) -> bool {
+    for (entity, loader_kind, requested) in loaders.iter() {
+        if *loader_kind != kind {
+            continue;
+        }
+
+        if requested.is_none() {
+            commands.entity(entity).insert((
+                VrmaHandle(asset_server.load(kind.path())),
+                LazyNeraVrmaRequested,
+            ));
+            info!("Nera lazy VRMA requested | kind={kind:?} path={}", kind.path());
+        }
+        return true;
+    }
+
+    false
+}
+
+pub(crate) fn ensure_state_lazy_vrmas(
+    state: Res<NeraAnimationState>,
+    clips: Res<NeraAnimationClips>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
+) {
+    if state.visual_state() == VisualState::Praying && clips.praying.is_none() {
+        request_lazy_vrma(
+            LazyNeraVrma::Praying,
+            &mut commands,
+            &asset_server,
+            &loaders,
+        );
+    }
+}
 pub(crate) fn spawn_animation_library(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands<'_>,
     asset_server: &AssetServer,
@@ -298,8 +385,8 @@ pub(crate) fn spawn_animation_library(
     // saved-character restore attach them to the actual active VRM hierarchy.
     parent
         .spawn((
-            Name::new("Nera Alarm JumpHappy"),
-            VrmaHandle(asset_server.load(ALARM_JUMP_VRMA_PATH)),
+            Name::new("Nera Alarm JumpHappy (lazy)"),
+            LazyNeraVrma::AlarmJump,
         ))
         .observe(register_alarm_jump_animation);
 
@@ -340,8 +427,8 @@ pub(crate) fn spawn_animation_library(
 
     parent
         .spawn((
-            Name::new("Nera Praying Menu Pose"),
-            VrmaHandle(asset_server.load(PRAYING_VRMA_PATH)),
+            Name::new("Nera Praying Menu Pose (lazy)"),
+            LazyNeraVrma::Praying,
         ))
         .observe(register_praying_animation);
 
@@ -377,35 +464,26 @@ pub(crate) fn spawn_animation_library(
         .observe(register_idle_relax_animation);
 
     parent
-        .spawn((
-            Name::new("Nera Idle Sleepy"),
-            VrmaHandle(asset_server.load(IDLE_SLEEPY_VRMA_PATH)),
-        ))
+        .spawn((Name::new("Nera Idle Sleepy (lazy)"), LazyNeraVrma::IdleSleepy))
         .observe(register_idle_sleepy_animation);
 
     parent
-        .spawn((
-            Name::new("Nera Idle Blush"),
-            VrmaHandle(asset_server.load(IDLE_BLUSH_VRMA_PATH)),
-        ))
+        .spawn((Name::new("Nera Idle Blush (lazy)"), LazyNeraVrma::IdleBlush))
         .observe(register_idle_blush_animation);
 
     parent
         .spawn((
-            Name::new("Nera Idle Catwalk Twist"),
-            VrmaHandle(asset_server.load(IDLE_CATWALK_TWIST_VRMA_PATH)),
+            Name::new("Nera Idle Catwalk Twist (lazy)"),
+            LazyNeraVrma::IdleCatwalkTwist,
         ))
         .observe(register_idle_catwalk_twist_animation);
     parent
-        .spawn((
-            Name::new("Nera Idle Bored"),
-            VrmaHandle(asset_server.load(IDLE_BORED_VRMA_PATH)),
-        ))
+        .spawn((Name::new("Nera Idle Bored (lazy)"), LazyNeraVrma::IdleBored))
         .observe(register_idle_bored_animation);
     parent
         .spawn((
-            Name::new("Nera Idle Angry Gesture"),
-            VrmaHandle(asset_server.load(IDLE_ANGRY_GESTURE_VRMA_PATH)),
+            Name::new("Nera Idle Angry Gesture (lazy)"),
+            LazyNeraVrma::IdleAngryGesture,
         ))
         .observe(register_idle_angry_gesture_animation);
     parent

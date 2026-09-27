@@ -7,7 +7,10 @@ use bevy_vrm1::prelude::{Vrm, Vrma};
 use crate::avatar::NeraAvatar;
 
 const WARMUP_SECONDS: f32 = 10.0;
-const MINIMUM_VRMA_COUNT: usize = 20;
+// Production intentionally keeps seven cold/rare VRMAs lazy. The benchmark
+// should begin once the startup/eager set is ready instead of forcing those
+// optional clips to become resident just to take a memory sample.
+const MINIMUM_VRMA_COUNT: usize = 17;
 
 pub(crate) struct FullBenchmarkPlugin {
     pub(crate) d3: bool,
