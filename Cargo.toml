@@ -2,6 +2,7 @@
 name = "nera"
 version = "0.1.0"
 edition = "2024"
+default-run = "nera"
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = [

@@ -137,10 +137,11 @@ fn open_manager(
     }
     let smoke =
         cfg!(debug_assertions) && std::env::var_os("NERA_GALLERY_HOST_SMOKE_TEST").is_some();
-    let path = character.as_ref().map_or(
-        crate::character::DEFAULT_CHARACTER,
-        |character| character.asset_path.as_str(),
-    );
+    let path = character
+        .as_ref()
+        .map_or(crate::character::DEFAULT_CHARACTER, |character| {
+            character.asset_path.as_str()
+        });
     let result = std::env::current_exe().and_then(|exe| process.spawn(&exe, smoke, path));
     if let Err(error) = result {
         error!("Could not open Animation Manager: {error}");
@@ -290,7 +291,9 @@ pub(crate) fn run_worker() {
         crate::utility_window::UtilityWindowPlugin,
         AnimationManagerPlugin,
     ))
-    .insert_resource(super::preview::PreviewRuntime::for_character(character_path))
+    .insert_resource(super::preview::PreviewRuntime::for_character(
+        character_path,
+    ))
     .insert_resource(Controls(Mutex::new(receive)))
     .add_message::<crate::animation::PlayLibraryAnimation>()
     .add_message::<crate::settings::ReturnToActionMenu>()
@@ -480,7 +483,10 @@ mod tests {
     fn character_protocol_preserves_asset_paths_and_rejects_malformed_messages() {
         let path = "characters://Nera \"custom\" 日本語.vrm";
         assert_eq!(
-            decode_control(&format!("CHARACTER\t{}", serde_json::to_string(path).unwrap())),
+            decode_control(&format!(
+                "CHARACTER\t{}",
+                serde_json::to_string(path).unwrap()
+            )),
             Some(Control::Character(path.into()))
         );
         assert_eq!(decode_control("CHARACTER\tmalformed"), None);
@@ -576,7 +582,9 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/nera.exe");
         for _ in 0..2 {
             let mut process = ManagerProcess::default();
-            process.spawn(&executable, true, crate::character::DEFAULT_CHARACTER).unwrap();
+            process
+                .spawn(&executable, true, crate::character::DEFAULT_CHARACTER)
+                .unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
             let status = loop {
                 if let Some(status) = process.child.as_mut().unwrap().try_wait().unwrap() {

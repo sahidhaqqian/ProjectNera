@@ -1,6 +1,7 @@
 mod alarm;
 mod animation;
 mod avatar;
+mod benchmark;
 mod character;
 mod memory;
 
@@ -54,6 +55,7 @@ use std::num::NonZeroU32;
 
 use bevy::{
     asset::AssetPlugin,
+    pbr::PbrPlugin,
     prelude::*,
     render::RenderPlugin,
     settings::SettingsPlugin,
@@ -100,6 +102,13 @@ fn main() {
         animation_manager::process::run_worker();
         return;
     }
+    let memory_benchmark_d3 = std::env::args().any(|arg| arg == "--memory-benchmark-d3");
+    let memory_benchmark_default = std::env::args().any(|arg| arg == "--memory-benchmark");
+    let benchmark = memory_benchmark_d3 || memory_benchmark_default;
+    // Nera draws one animated character, so the CPU MeshUniform path uses less
+    // memory than Bevy's GPU instance-buffer builder. `--memory-benchmark`
+    // deliberately restores Bevy's default to keep the A/B baseline runnable.
+    let use_gpu_instance_buffer_builder = memory_benchmark_default && !memory_benchmark_d3;
     let mut app = App::new();
 
     // Load persistent Nera settings before the native window is created.
@@ -150,9 +159,12 @@ fn main() {
             .set(RenderPlugin {
                 render_creation: memory::renderer_settings().into(),
                 ..default()
+            })
+            .set(PbrPlugin {
+                use_gpu_instance_buffer_builder,
+                ..default()
             }),
     );
-
 
     app.add_plugins((
         VrmPlugin,
@@ -257,6 +269,13 @@ fn main() {
                 settle_pending_sit.run_if(presentation::desktop_pet_active),
             )
                 .chain(),
-        )
-        .run();
+        );
+
+    if benchmark {
+        app.add_plugins(benchmark::FullBenchmarkPlugin {
+            d3: !use_gpu_instance_buffer_builder,
+        });
+    }
+
+    app.run();
 }
