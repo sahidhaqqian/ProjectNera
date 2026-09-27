@@ -107,10 +107,6 @@ pub(crate) fn physics_allowed(entrance: Res<StartupEntrance>) -> bool {
     !entrance.is_waiting()
 }
 
-pub(crate) fn autonomous_allowed(entrance: Res<StartupEntrance>) -> bool {
-    !entrance.blocks_position_save()
-}
-
 /// Invisible loading geometry must not capture clicks before the entrance.
 pub(crate) fn pet_is_revealed(entrance: Res<StartupEntrance>) -> bool {
     !entrance.is_waiting()

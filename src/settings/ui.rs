@@ -81,6 +81,21 @@ pub(super) struct WalkingEnabledValue;
 pub(super) struct WalkingCheckmark;
 
 #[derive(Component)]
+pub(super) struct ActivityLevelValue;
+
+#[derive(Component)]
+pub(super) struct RoamingRadiusValue;
+
+#[derive(Component)]
+pub(super) struct PauseFullscreenValue;
+
+#[derive(Component)]
+pub(super) struct RoamingRadiusTrack;
+
+#[derive(Component)]
+pub(super) struct RoamingRadiusThumb;
+
+#[derive(Component)]
 pub(super) struct FollowMouseValue;
 
 #[derive(Component)]
@@ -134,6 +149,8 @@ pub(super) enum SettingsButtonAction {
     CycleCharacterSize,
     CycleGroundOffset,
     ToggleWalking,
+    CycleActivityLevel,
+    TogglePauseFullscreen,
     ToggleFollowMouse,
     ToggleFollowEyes,
     ToggleFollowHead,
@@ -363,6 +380,26 @@ fn spawn_settings_ui(
 
                         settings_card(scroll, "BEHAVIOR", |card| {
                             walking_checkbox(card, settings.walking_enabled);
+                            settings_row(
+                                card,
+                                "Activity",
+                                settings.activity_level().label().into(),
+                                ActivityLevelValue,
+                                SettingsButtonAction::CycleActivityLevel,
+                            );
+                            roaming_radius_slider(card, settings.roaming_radius_px());
+                            settings_row(
+                                card,
+                                "Pause in Fullscreen",
+                                if settings.pause_roaming_fullscreen { "ON" } else { "OFF" }.into(),
+                                PauseFullscreenValue,
+                                SettingsButtonAction::TogglePauseFullscreen,
+                            );
+                            card.spawn((
+                                Text::new("Drag Nera to set home · Roaming stays on the current monitor"),
+                                TextFont { font_size: FontSize::Px(11.0), ..default() },
+                                TextColor(Color::srgb(0.45, 0.5, 0.64)),
+                            ));
                             settings_row(
                                 card,
                                 "Follow mouse",
@@ -757,7 +794,7 @@ fn walking_checkbox(parent: &mut ChildSpawnerCommands, enabled: bool) {
         })
         .with_children(|row| {
             row.spawn((
-                Text::new("Aktifkan jalan"),
+                Text::new("Allow Roaming"),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -767,7 +804,7 @@ fn walking_checkbox(parent: &mut ChildSpawnerCommands, enabled: bool) {
             row.spawn((
                 Button,
                 action,
-                Name::new("Enable walking checkbox"),
+                Name::new("Allow Roaming checkbox"),
                 Node {
                     min_width: px(178),
                     height: px(40),
@@ -801,17 +838,20 @@ fn walking_checkbox(parent: &mut ChildSpawnerCommands, enabled: bool) {
                                 Node {
                                     width: px(18),
                                     height: px(18),
-                                    display: if enabled { Display::Flex } else { Display::None },
+                                    display: if enabled {
+                                        Display::Flex
+                                    } else {
+                                        Display::None
+                                    },
                                     ..default()
                                 },
                             ))
                             .with_children(|tick| {
                                 // Draw the tick directly: the bundled font is a
                                 // subset and need not contain a checkmark glyph.
-                                for (left, top, width, angle) in [
-                                    (2.0, 9.5, 6.0, 45.0),
-                                    (5.5, 7.5, 11.0, -45.0),
-                                ] {
+                                for (left, top, width, angle) in
+                                    [(2.0, 9.5, 6.0, 45.0), (5.5, 7.5, 11.0, -45.0)]
+                                {
                                     tick.spawn((
                                         Node {
                                             position_type: PositionType::Absolute,
@@ -836,6 +876,72 @@ fn walking_checkbox(parent: &mut ChildSpawnerCommands, enabled: bool) {
                         ..default()
                     },
                     TextColor(Color::srgb(0.88, 0.9, 0.98)),
+                ));
+            });
+        });
+}
+
+fn roaming_radius_slider(parent: &mut ChildSpawnerCommands, radius: f32) {
+    parent
+        .spawn(Node {
+            width: percent(100),
+            min_height: px(66),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn(Node {
+                width: percent(100),
+                justify_content: JustifyContent::SpaceBetween,
+                ..default()
+            })
+            .with_children(|labels| {
+                labels.spawn((
+                    Text::new("Roaming Distance"),
+                    TextFont {
+                        font_size: FontSize::Px(16.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.82, 0.85, 0.94)),
+                ));
+                labels.spawn((
+                    RoamingRadiusValue,
+                    Text::new(format!("{radius:.0} px")),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.88, 0.9, 0.98)),
+                ));
+            });
+            row.spawn((
+                Button,
+                RoamingRadiusTrack,
+                bevy::ui::RelativeCursorPosition::default(),
+                Node {
+                    width: percent(100),
+                    height: px(28),
+                    border_radius: BorderRadius::all(px(10)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.095, 0.12, 0.21)),
+            ))
+            .with_children(|track| {
+                track.spawn((
+                    RoamingRadiusThumb,
+                    bevy::picking::Pickable::IGNORE,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent((radius - 300.0) / 300.0 * 100.0),
+                        margin: UiRect::left(px(-7)),
+                        top: px(5),
+                        width: px(14),
+                        height: px(18),
+                        border_radius: BorderRadius::all(px(7)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.61, 0.73, 0.98)),
                 ));
             });
         });
@@ -935,6 +1041,8 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::CycleCharacterSize
         | SettingsButtonAction::CycleGroundOffset
         | SettingsButtonAction::ToggleWalking
+        | SettingsButtonAction::CycleActivityLevel
+        | SettingsButtonAction::TogglePauseFullscreen
         | SettingsButtonAction::ToggleFollowMouse
         | SettingsButtonAction::ToggleFollowEyes
         | SettingsButtonAction::ToggleFollowHead
@@ -1044,9 +1152,21 @@ pub(super) fn handle_settings_buttons(
                 settings.walking_enabled = !settings.walking_enabled;
                 save_settings_deferred(&mut commands);
                 info!(
-                    "Settings: Walking {}",
-                    if settings.walking_enabled { "ON" } else { "OFF" }
+                    "Settings: Allow Roaming {}",
+                    if settings.walking_enabled {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
                 );
+            }
+            SettingsButtonAction::CycleActivityLevel => {
+                settings.cycle_activity_level();
+                save_settings_deferred(&mut commands);
+            }
+            SettingsButtonAction::TogglePauseFullscreen => {
+                settings.pause_roaming_fullscreen = !settings.pause_roaming_fullscreen;
+                save_settings_deferred(&mut commands);
             }
             SettingsButtonAction::ToggleFollowMouse => {
                 settings.follow_mouse = !settings.follow_mouse;
@@ -1184,6 +1304,70 @@ pub(super) fn handle_settings_buttons(
     }
 }
 
+pub(super) fn handle_roaming_radius_slider(
+    mouse: Res<ButtonInput<MouseButton>>,
+    tracks: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<RoamingRadiusTrack>>,
+    mut dragging: Local<bool>,
+    mut settings: ResMut<NeraSettings>,
+    mut commands: Commands,
+) {
+    if !mouse.pressed(MouseButton::Left) {
+        if *dragging {
+            save_settings_deferred(&mut commands);
+        }
+        *dragging = false;
+        return;
+    }
+    let Ok((interaction, cursor)) = tracks.single() else {
+        *dragging = false;
+        return;
+    };
+    if mouse.just_pressed(MouseButton::Left) && *interaction == Interaction::Pressed {
+        *dragging = true;
+    }
+    if *dragging {
+        if let Some(cursor) = cursor.normalized {
+            // Bevy 0.19 UI coordinates are normalized around the node center.
+            let radius = (300.0 + (cursor.x + 0.5).clamp(0.0, 1.0) * 300.0).round() as u16;
+            if settings.roaming_radius_px != radius {
+                settings.roaming_radius_px = radius;
+            }
+        }
+    }
+}
+
+pub(super) fn update_roaming_settings_labels(
+    settings: Res<NeraSettings>,
+    mut labels: Query<(
+        &mut Text,
+        Option<&ActivityLevelValue>,
+        Option<&RoamingRadiusValue>,
+        Option<&PauseFullscreenValue>,
+    )>,
+    mut thumbs: Query<&mut Node, With<RoamingRadiusThumb>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (mut text, activity, radius, fullscreen) in &mut labels {
+        if activity.is_some() {
+            text.0 = settings.activity_level().label().into();
+        } else if radius.is_some() {
+            text.0 = format!("{:.0} px", settings.roaming_radius_px());
+        } else if fullscreen.is_some() {
+            text.0 = if settings.pause_roaming_fullscreen {
+                "ON"
+            } else {
+                "OFF"
+            }
+            .into();
+        }
+    }
+    for mut thumb in &mut thumbs {
+        thumb.left = percent((settings.roaming_radius_px() - 300.0) / 300.0 * 100.0);
+    }
+}
+
 pub(super) fn drag_settings_window(
     mouse: Res<ButtonInput<MouseButton>>,
     drag_regions: Query<&Interaction, (Changed<Interaction>, With<SettingsDragRegion>)>,
@@ -1304,7 +1488,12 @@ pub(super) fn update_settings_labels(
             }
             .into();
         } else if walking_enabled.is_some() {
-            text.0 = if settings.walking_enabled { "Yes" } else { "No" }.into();
+            text.0 = if settings.walking_enabled {
+                "Yes"
+            } else {
+                "No"
+            }
+            .into();
         } else if follow_mouse.is_some() {
             text.0 = if settings.follow_mouse { "ON" } else { "OFF" }.into();
         } else if follow_eyes.is_some() {
@@ -1454,26 +1643,43 @@ mod walking_checkbox_tests {
         app.init_resource::<NeraSettings>()
             .init_resource::<StartupRuntime>()
             .add_systems(Update, update_settings_labels);
-        let value = app.world_mut().spawn((Text::new(""), WalkingEnabledValue)).id();
+        let value = app
+            .world_mut()
+            .spawn((Text::new(""), WalkingEnabledValue))
+            .id();
         let checkmark = app
             .world_mut()
             .spawn((Node::default(), WalkingCheckmark))
             .id();
-        let follow = app.world_mut().spawn((Text::new(""), FollowMouseValue)).id();
+        let follow = app
+            .world_mut()
+            .spawn((Text::new(""), FollowMouseValue))
+            .id();
 
         app.update();
         assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
-        assert_eq!(app.world().get::<Node>(checkmark).unwrap().display, Display::None);
+        assert_eq!(
+            app.world().get::<Node>(checkmark).unwrap().display,
+            Display::None
+        );
         assert_eq!(app.world().get::<Text>(follow).unwrap().0, "ON");
 
-        app.world_mut().resource_mut::<NeraSettings>().walking_enabled = true;
+        app.world_mut()
+            .resource_mut::<NeraSettings>()
+            .walking_enabled = true;
         app.update();
         assert_eq!(app.world().get::<Text>(value).unwrap().0, "Yes");
-        assert_eq!(app.world().get::<Node>(checkmark).unwrap().display, Display::Flex);
+        assert_eq!(
+            app.world().get::<Node>(checkmark).unwrap().display,
+            Display::Flex
+        );
 
         *app.world_mut().resource_mut::<NeraSettings>() = NeraSettings::default();
         app.update();
         assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
-        assert_eq!(app.world().get::<Node>(checkmark).unwrap().display, Display::None);
+        assert_eq!(
+            app.world().get::<Node>(checkmark).unwrap().display,
+            Display::None
+        );
     }
 }

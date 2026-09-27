@@ -1,67 +1,140 @@
-//! Small opt-in desktop-floor walking controller. Animation owns the pose;
-//! desktop physics owns native translation. No library scanning or clip cache.
-use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
-
+//! Destination-based locomotion. Behavior schedules; physics moves the HWND.
 use crate::{
-    animation::{NeraAnimationClips, NeraAnimationState, VisualState},
-    desktop_physics::DesktopPhysicsState,
-    environment::{DesktopEnvironment, PlacementState},
-    interaction::{DesktopPetInteraction, InteractionState},
-    platform::{self, NativeMonitorHandle, PhysicalRect},
-    presentation::PresentationState,
-    rng::NeraRng,
-    settings::{NeraSettings, SettingsInputGate},
+    animation::{IdleMicroAction, NeraAnimationState, VisualState},
+    desktop_physics::{DesktopPhysicsState, WalkingSurface, WalkingSurfaceKey},
+    environment::DesktopEnvironment,
+    platform::NativeMonitorHandle,
 };
+use bevy::prelude::*;
+use std::time::Duration;
 
-const RESUME_DELAY: f32 = 6.0;
-const SPEED_LOGICAL: f32 = 90.0;
-
-#[derive(Resource)]
-pub(crate) struct WalkingRuntime {
-    target: Option<i32>,
-    direction: f32,
-    cooldown: f32,
-    fraction: f32,
-    expected_left: Option<i32>,
-    monitor: Option<NativeMonitorHandle>,
-    bounds: Option<(i32, i32)>,
-    rng: NeraRng,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WalkIntent {
+    pub surface: WalkingSurfaceKey,
+    pub monitor: NativeMonitorHandle,
+    /// Relative to support origin: moving windows carry the destination.
+    pub target_x: i32,
+    pub bounds: (i32, i32),
+    pub speed: f32,
+    pub scale: f32,
+    pub return_trip: bool,
 }
 
-impl Default for WalkingRuntime {
-    fn default() -> Self {
-        Self {
-            target: None,
-            direction: 0.0,
-            cooldown: RESUME_DELAY,
-            fraction: 0.0,
-            expected_left: None,
-            monitor: None,
-            bounds: None,
-            rng: NeraRng::from_entropy(),
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WalkOutcome {
+    Arrived,
+    Edge,
+    Interrupted,
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct WalkingRuntime {
+    intent: Option<WalkIntent>,
+    direction: f32,
+    velocity: f32,
+    fraction: f32,
+    turn_remaining: f32,
+    looking_around: bool,
+    elapsed: f32,
+    expected_x: Option<i32>,
+    pub outcome: Option<WalkOutcome>,
 }
 
 impl WalkingRuntime {
     pub(crate) fn direction(&self) -> f32 {
-        self.direction
+        if self.looking_around {
+            0.0
+        } else {
+            self.direction
+        }
     }
-
-    fn stop(&mut self, animation: &mut NeraAnimationState, delay: f32) {
-        animation.set_walking(false);
-        self.target = None;
-        self.direction = 0.0;
-        self.fraction = 0.0;
-        self.expected_left = None;
-        self.cooldown = delay;
+    pub(crate) fn active(&self) -> bool {
+        self.intent.is_some()
     }
-
-    fn next_step(&mut self, left: i32, speed: f32, dt: f32) -> i32 {
-        let Some(target) = self.target else {
-            return left;
+    pub(crate) fn expected_x(&self) -> Option<i32> {
+        self.expected_x
+    }
+    pub(crate) fn take_outcome(&mut self) -> Option<WalkOutcome> {
+        let outcome = self.outcome.take();
+        if outcome.is_some() {
+            self.expected_x = None;
+        }
+        outcome
+    }
+    pub(crate) fn begin(
+        &mut self,
+        intent: WalkIntent,
+        current_x: i32,
+        turn_delay: f32,
+        animation: &mut NeraAnimationState,
+        lookaround_duration: Duration,
+    ) -> bool {
+        if self.active()
+            || !animation.request_idle_variation(IdleMicroAction::LookAround, lookaround_duration)
+        {
+            return false;
+        }
+        self.intent = Some(intent);
+        self.looking_around = true;
+        self.direction = if intent.target_x > current_x {
+            1.0
+        } else {
+            -1.0
         };
-        self.fraction += speed * dt.clamp(0.0, 0.05);
+        self.velocity = 0.0;
+        self.fraction = 0.0;
+        self.elapsed = 0.0;
+        self.turn_remaining = turn_delay.clamp(0.2, 0.4);
+        self.expected_x = Some(current_x);
+        self.outcome = None;
+        true
+    }
+    pub(crate) fn cancel(&mut self, animation: &mut NeraAnimationState) {
+        // An interruption also invalidates a completion the brain has not consumed.
+        if self.active() || self.outcome.is_some() {
+            self.finish(animation, WalkOutcome::Interrupted);
+        }
+    }
+    fn finish(&mut self, animation: &mut NeraAnimationState, outcome: WalkOutcome) {
+        if self.looking_around
+            && animation.visual_state() == VisualState::IdleMicro(IdleMicroAction::LookAround)
+        {
+            animation.cancel_idle_variation();
+        }
+        self.looking_around = false;
+        animation.set_walking(false);
+        self.intent = None;
+        self.direction = 0.0;
+        self.velocity = 0.0;
+        self.fraction = 0.0;
+        // Keep the final committed X until the brain consumes the outcome.
+        // Otherwise the last moving frame would look like a user relocation.
+        self.outcome = Some(outcome);
+    }
+
+    fn ready_to_turn(&mut self, animation: &mut NeraAnimationState) -> bool {
+        match animation.visual_state() {
+            // The animation controller owns the clip's actual lifetime; no second timer.
+            VisualState::IdleMicro(IdleMicroAction::LookAround) if self.looking_around => false,
+            VisualState::Idle => {
+                self.looking_around = false;
+                true
+            }
+            VisualState::Walking if !self.looking_around => true,
+            _ => {
+                self.cancel(animation);
+                false
+            }
+        }
+    }
+    fn next_step(&mut self, left: i32, target: i32, speed: f32, scale: f32, dt: f32) -> i32 {
+        let dt = dt.clamp(0.0, 0.05);
+        let acceleration = 240.0 * scale;
+        let remaining = left.abs_diff(target) as f32;
+        // Brake using v²/(2a), independent of frame rate and journey length.
+        let desired = speed.min((2.0 * acceleration * remaining).sqrt());
+        self.velocity += (desired - self.velocity).clamp(-acceleration * dt, acceleration * dt);
+        self.fraction += self.velocity * dt;
         let whole = self.fraction.floor() as i32;
         self.fraction -= whole as f32;
         if target > left {
@@ -72,222 +145,228 @@ impl WalkingRuntime {
     }
 }
 
-#[derive(SystemParam)]
-pub(crate) struct WalkingContext<'w, 's> {
-    settings: Res<'w, NeraSettings>,
-    interaction: Res<'w, DesktopPetInteraction>,
-    presentation: Res<'w, PresentationState>,
-    settings_gate: Res<'w, SettingsInputGate>,
-    #[cfg(target_os = "windows")]
-    alarm_gate: Res<'w, crate::alarm_settings::AlarmSettingsInputGate>,
-    primary: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-}
-
-impl WalkingContext<'_, '_> {
-    fn allows_walking(&self) -> bool {
-        #[cfg(target_os = "windows")]
-        if !crate::alarm_settings::nera_input_available(Res::clone(&self.alarm_gate)) {
-            return false;
-        }
-        self.settings.walking_enabled
-            && self.presentation.is_desktop_pet()
-            && crate::settings::nera_input_available(Res::clone(&self.settings_gate))
-            && self
-                .primary
-                .iter()
-                .next()
-                .is_some_and(|window| window.visible)
-            && self.interaction.state == InteractionState::None
-            && self.interaction.right_pressed_body_part.is_none()
-    }
+fn valid_destination(intent: WalkIntent, surface: WalkingSurface) -> bool {
+    let target = surface.origin_x.saturating_add(intent.target_x);
+    surface.key == intent.surface
+        && (surface.bounds.0..=surface.bounds.1).contains(&target)
+        && (intent.bounds.0..=intent.bounds.1).contains(&intent.target_x)
 }
 
 pub(crate) fn update_walking(
     time: Res<Time>,
     real_time: Res<Time<Real>>,
-    context: WalkingContext,
-    clips: Res<NeraAnimationClips>,
-    physics: Res<DesktopPhysicsState>,
+    mut physics: ResMut<DesktopPhysicsState>,
     mut environment: ResMut<DesktopEnvironment>,
     mut animation: ResMut<NeraAnimationState>,
     mut runtime: ResMut<WalkingRuntime>,
 ) {
-    // Always cancel on interruptions, including sleep/resume. A run condition
-    // would leave the old target and facing alive while the system is skipped.
-    let ready = context.allows_walking()
-        && clips.walking_ready()
-        && environment.placement == PlacementState::Free
-        && !environment.hidden_for_target_suspend
-        && physics.walking_floor().is_some()
-        && real_time.delta_secs() < 0.5
-        && matches!(
-            animation.visual_state(),
-            VisualState::Idle | VisualState::Walking
+    let Some(intent) = runtime.intent else { return };
+    let (Some(surface), Some(rect)) =
+        (physics.walking_surface(&environment), environment.nera_rect)
+    else {
+        runtime.cancel(&mut animation);
+        return;
+    };
+    let local_x = rect.left.saturating_sub(surface.origin_x);
+    if real_time.delta_secs() >= 0.5
+        || environment.monitor.map(|m| m.handle) != Some(intent.monitor)
+        || !valid_destination(intent, surface)
+        || runtime.expected_x != Some(local_x)
+    {
+        runtime.cancel(&mut animation);
+        return;
+    }
+    if !runtime.ready_to_turn(&mut animation) {
+        return;
+    }
+    let dt = time.delta_secs().min(0.05);
+    runtime.elapsed += dt;
+    if runtime.elapsed > 15.0 {
+        runtime.cancel(&mut animation);
+        return;
+    }
+    // Face while idle, then begin the gait.
+    if runtime.turn_remaining > 0.0 {
+        runtime.turn_remaining = (runtime.turn_remaining - dt).max(0.0);
+        return;
+    }
+    if !animation.set_walking(true) {
+        runtime.cancel(&mut animation);
+        return;
+    }
+    let next_x = runtime.next_step(local_x, intent.target_x, intent.speed, intent.scale, dt);
+    if !physics.walk_horizontal(surface.origin_x.saturating_add(next_x), &mut environment) {
+        runtime.cancel(&mut animation);
+        return;
+    }
+    runtime.expected_x = Some(next_x);
+    if next_x == intent.target_x {
+        let edge = !intent.return_trip && (next_x == intent.bounds.0 || next_x == intent.bounds.1);
+        runtime.finish(
+            &mut animation,
+            if edge {
+                WalkOutcome::Edge
+            } else {
+                WalkOutcome::Arrived
+            },
         );
-    if !ready {
-        runtime.stop(&mut animation, RESUME_DELAY);
-        return;
-    }
-    let (Some(rect), Some(monitor), Some(hwnd)) = (
-        environment.nera_rect,
-        environment.monitor,
-        environment.nera_hwnd,
-    ) else {
-        runtime.stop(&mut animation, RESUME_DELAY);
-        return;
-    };
-    let Some(bounds) = walking_bounds(monitor.work_area, rect.width()) else {
-        runtime.stop(&mut animation, RESUME_DELAY);
-        return;
-    };
-    if physics.walking_floor() != Some(monitor.handle)
-        || !platform::window_is_visible(hwnd)
-        || platform::is_window_minimized(hwnd)
-        || platform::is_window_cloaked(hwnd)
-    {
-        runtime.stop(&mut animation, RESUME_DELAY);
-        return;
-    }
-    if runtime.monitor != Some(monitor.handle)
-        || runtime.bounds != Some(bounds)
-        || runtime.expected_left.is_some_and(|left| left != rect.left)
-        || (runtime.target.is_some() && animation.visual_state() != VisualState::Walking)
-    {
-        runtime.stop(&mut animation, RESUME_DELAY);
-        runtime.monitor = Some(monitor.handle);
-        runtime.bounds = Some(bounds);
-    }
-
-    let scale =
-        environment.nera_scale_factor.clamp(0.5, 4.0) as f32 * context.settings.character_scale();
-    if runtime.target.is_none() {
-        runtime.cooldown = (runtime.cooldown - time.delta_secs().min(0.05)).max(0.0);
-        if runtime.cooldown > 0.0 {
-            return;
-        }
-        let distance = runtime.rng.range_f32(400.0, 700.0) * scale;
-        let right = runtime.rng.next_f32() >= 0.5;
-        let target = choose_target(rect.left, bounds, distance.round() as i32, right);
-        if target == rect.left || !animation.set_walking(true) {
-            runtime.stop(&mut animation, RESUME_DELAY);
-            return;
-        }
-        runtime.target = Some(target);
-        runtime.direction = if target > rect.left { 1.0 } else { -1.0 };
-        // Let the walking pose and facing settle before translating the HWND.
-        runtime.expected_left = Some(rect.left);
-        return;
-    }
-
-    let left = runtime.next_step(rect.left, SPEED_LOGICAL * scale, time.delta_secs());
-    if !physics.walk_horizontal(left, &mut environment) {
-        runtime.stop(&mut animation, RESUME_DELAY);
-        return;
-    }
-    runtime.expected_left = Some(left);
-    if runtime.target == Some(left) {
-        let delay = runtime.rng.range_f32(12.0, 25.0);
-        runtime.stop(&mut animation, delay);
-    }
-}
-
-// Use the full transparent canvas as a conservative visible-body bound. Never
-// clamp the current position: a pet partly off-screen must walk back, not jump.
-fn walking_bounds(work: PhysicalRect, width: i32) -> Option<(i32, i32)> {
-    let left = work.left.saturating_add(8);
-    let right = work.right.saturating_sub(width).saturating_sub(8);
-    (width > 0 && right > left).then_some((left, right))
-}
-
-fn choose_target(left: i32, bounds: (i32, i32), distance: i32, prefer_right: bool) -> i32 {
-    let (min, max) = bounds;
-    let distance = distance.max(1);
-    let to_right = if left <= min {
-        true
-    } else if left >= max {
-        false
-    } else {
-        let right_room = max - left;
-        let left_room = left - min;
-        // Prefer enough room for the whole walk; near an edge, head back
-        // across the desktop instead of taking another tiny step to the edge.
-        if prefer_right {
-            right_room >= distance || right_room >= left_room
-        } else {
-            left_room < distance && right_room > left_room
-        }
-    };
-    if to_right {
-        left.saturating_add(distance).clamp(min, max)
-    } else {
-        left.saturating_sub(distance).clamp(min, max)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[derive(Resource, Default)]
-    struct Allowed(bool);
-
-    #[test]
-    fn walking_requires_opt_in_visibility_and_an_unoccupied_pointer() {
-        fn sample(context: WalkingContext, mut allowed: ResMut<Allowed>) {
-            allowed.0 = context.allows_walking();
+    use bevy::ecs::system::RunSystemOnce;
+    fn intent() -> WalkIntent {
+        WalkIntent {
+            surface: WalkingSurfaceKey::Monitor(NativeMonitorHandle::from_raw(1)),
+            monitor: NativeMonitorHandle::from_raw(1),
+            target_x: 200,
+            bounds: (0, 600),
+            speed: 90.0,
+            scale: 1.0,
+            return_trip: false,
         }
-        let mut app = App::new();
-        app.init_resource::<NeraSettings>()
-            .init_resource::<DesktopPetInteraction>()
-            .init_resource::<PresentationState>()
-            .init_resource::<SettingsInputGate>()
-            .init_resource::<Allowed>()
-            .add_systems(Update, sample);
-        #[cfg(target_os = "windows")]
-        app.init_resource::<crate::alarm_settings::AlarmSettingsInputGate>();
-        let window = app
-            .world_mut()
-            .spawn((Window::default(), PrimaryWindow))
-            .id();
-        app.update();
-        assert!(!app.world().resource::<Allowed>().0);
-        app.world_mut()
-            .resource_mut::<NeraSettings>()
-            .walking_enabled = true;
-        app.update();
-        assert!(app.world().resource::<Allowed>().0);
-        for state in [
-            InteractionState::Hover,
-            InteractionState::Pressed,
-            InteractionState::Dragging,
-        ] {
-            app.world_mut()
-                .resource_mut::<DesktopPetInteraction>()
-                .state = state;
-            app.update();
-            assert!(!app.world().resource::<Allowed>().0);
-        }
-        app.world_mut()
-            .resource_mut::<DesktopPetInteraction>()
-            .state = InteractionState::None;
-        app.world_mut().get_mut::<Window>(window).unwrap().visible = false;
-        app.update();
-        assert!(!app.world().resource::<Allowed>().0);
-        app.world_mut().get_mut::<Window>(window).unwrap().visible = true;
-        app.update();
-        assert!(app.world().resource::<Allowed>().0);
     }
-
     #[test]
-    fn avatar_faces_travel_direction_and_restores_rotation_on_stop() {
+    fn arrival_preserves_last_committed_position_until_the_brain_observes_it() {
+        let mut runtime = WalkingRuntime::default();
+        let mut animation = NeraAnimationState::default();
+        runtime.begin(intent(), 100, 0.3, &mut animation, Duration::from_secs(4));
+        runtime.expected_x = Some(200);
+        runtime.finish(&mut animation, WalkOutcome::Arrived);
+        assert_eq!(runtime.expected_x(), Some(200));
+        assert_eq!(runtime.take_outcome(), Some(WalkOutcome::Arrived));
+        assert_eq!(runtime.expected_x(), None);
+    }
+    #[test]
+    fn cancellation_invalidates_completed_walks_without_losing_the_final_position() {
+        let mut runtime = WalkingRuntime::default();
+        let mut animation = NeraAnimationState::default();
+        runtime.cancel(&mut animation);
+        assert_eq!(runtime.take_outcome(), None);
+        for outcome in [WalkOutcome::Edge, WalkOutcome::Arrived] {
+            runtime.begin(intent(), 100, 0.3, &mut animation, Duration::from_secs(4));
+            runtime.expected_x = Some(200);
+            runtime.finish(&mut animation, outcome);
+            assert!(!runtime.active());
+
+            // Hover/drag/hide may arrive before the brain consumes completion.
+            // Repeated blocked frames must never uncover the old edge return.
+            runtime.cancel(&mut animation);
+            runtime.cancel(&mut animation);
+            assert_eq!(runtime.expected_x(), Some(200));
+            assert_eq!(runtime.take_outcome(), Some(WalkOutcome::Interrupted));
+            assert_eq!(runtime.take_outcome(), None);
+            assert_eq!(runtime.expected_x(), None);
+            assert_eq!(animation.visual_state(), VisualState::Idle);
+        }
+    }
+    #[test]
+    fn lookaround_finishes_before_turn_and_cancels_with_the_walk() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<NeraAnimationState>()
+            .add_systems(Update, crate::animation::tick_animation_actions);
+        let mut runtime = WalkingRuntime::default();
+        assert!(runtime.begin(
+            intent(),
+            100,
+            0.3,
+            &mut app.world_mut().resource_mut::<NeraAnimationState>(),
+            Duration::from_secs(4)
+        ));
+        assert_eq!(runtime.direction(), 0.0);
+        assert!(!runtime.ready_to_turn(&mut app.world_mut().resource_mut::<NeraAnimationState>()));
+        assert_eq!(runtime.turn_remaining, 0.3);
+        assert_eq!(runtime.expected_x(), Some(100));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(3));
+        app.update();
+        assert!(!runtime.ready_to_turn(&mut app.world_mut().resource_mut::<NeraAnimationState>()));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        assert!(runtime.ready_to_turn(&mut app.world_mut().resource_mut::<NeraAnimationState>()));
+        assert_eq!(runtime.direction(), 1.0);
+        assert_eq!(runtime.turn_remaining, 0.3);
+        runtime.cancel(&mut app.world_mut().resource_mut::<NeraAnimationState>());
+
+        // Every new trip, including the return from an edge, starts with its own look.
+        let return_trip = WalkIntent {
+            return_trip: true,
+            ..intent()
+        };
+        assert!(runtime.begin(
+            return_trip,
+            100,
+            0.3,
+            &mut app.world_mut().resource_mut::<NeraAnimationState>(),
+            Duration::from_secs(4)
+        ));
+        runtime.cancel(&mut app.world_mut().resource_mut::<NeraAnimationState>());
+        assert!(!runtime.active());
+        assert_eq!(runtime.direction(), 0.0);
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            VisualState::Idle
+        );
+        assert_eq!(runtime.take_outcome(), Some(WalkOutcome::Interrupted));
+    }
+    #[test]
+    fn walking_waits_for_a_usable_lookaround_and_drops_it_on_other_animations() {
+        let mut runtime = WalkingRuntime::default();
+        let mut animation = NeraAnimationState::default();
+        assert!(!runtime.begin(intent(), 100, 0.3, &mut animation, Duration::ZERO));
+        assert!(!runtime.active());
+        assert!(runtime.begin(intent(), 100, 0.3, &mut animation, Duration::from_secs(4)));
+        animation.set_physics_falling(true);
+        assert!(!runtime.ready_to_turn(&mut animation));
+        assert!(!runtime.active());
+        assert_eq!(animation.visual_state(), VisualState::Falling);
+        assert_eq!(runtime.take_outcome(), Some(WalkOutcome::Interrupted));
+    }
+    #[test]
+    fn moved_surface_carries_destination_but_resize_or_new_monitor_rejects_it() {
+        let intent = intent();
+        let surface = WalkingSurface {
+            key: intent.surface,
+            origin_x: -1920,
+            bounds: (-1912, -608),
+        };
+        assert!(valid_destination(intent, surface));
+        assert!(valid_destination(
+            intent,
+            WalkingSurface {
+                origin_x: -1800,
+                bounds: (-1792, -488),
+                ..surface
+            }
+        ));
+        assert!(!valid_destination(
+            intent,
+            WalkingSurface {
+                bounds: (-1912, -1800),
+                ..surface
+            }
+        ));
+        assert!(!valid_destination(
+            intent,
+            WalkingSurface {
+                key: WalkingSurfaceKey::Monitor(NativeMonitorHandle::from_raw(2)),
+                ..surface
+            }
+        ));
+    }
+    #[test]
+    fn turn_faces_travel_direction_before_gait_and_restores_original_rotation() {
         use crate::avatar::{NeraAvatar, apply_walking_pose};
         use bevy_vrm1::prelude::{HipsBoneEntity, RestTransform};
         let mut app = App::new();
         app.init_resource::<NeraAnimationState>()
-            .insert_resource(WalkingRuntime {
-                direction: 1.0,
-                ..default()
-            })
+            .init_resource::<WalkingRuntime>()
             .add_systems(Update, apply_walking_pose);
         let hips = app
             .world_mut()
@@ -300,93 +379,100 @@ mod tests {
             .world_mut()
             .spawn((NeraAvatar, Transform::IDENTITY, HipsBoneEntity(hips)))
             .id();
+        let mut animation = NeraAnimationState::default();
+        app.world_mut().resource_mut::<WalkingRuntime>().begin(
+            intent(),
+            100,
+            0.3,
+            &mut animation,
+            Duration::from_secs(4),
+        );
+        app.insert_resource(animation);
+        app.update();
+        assert_eq!(
+            app.world().get::<Transform>(avatar).unwrap().rotation,
+            Quat::IDENTITY
+        );
+        // Advance the real animation lifetime before facing the destination.
+        app.init_resource::<Time>();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(4));
+        app.world_mut()
+            .run_system_once(crate::animation::tick_animation_actions)
+            .unwrap();
+        app.world_mut()
+            .run_system_once(
+                |mut runtime: ResMut<WalkingRuntime>, mut animation: ResMut<NeraAnimationState>| {
+                    assert!(runtime.ready_to_turn(&mut animation));
+                },
+            )
+            .unwrap();
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            VisualState::Idle
+        );
+        assert!(
+            (app.world().get::<Transform>(avatar).unwrap().rotation * Vec3::Z - Vec3::X).length()
+                < 0.0001
+        );
         app.world_mut()
             .resource_mut::<NeraAnimationState>()
             .set_walking(true);
         app.update();
-        let transform = app.world().get::<Transform>(avatar).unwrap();
-        assert!((transform.rotation * Vec3::Z - Vec3::X).length() < 0.0001);
         assert_eq!(
             app.world().get::<Transform>(hips).unwrap().translation,
             Vec3::new(0.0, 0.94, 0.0)
         );
         app.world_mut().resource_mut::<WalkingRuntime>().direction = -1.0;
         app.update();
-        let transform = app.world().get::<Transform>(avatar).unwrap();
-        assert!((transform.rotation * Vec3::Z + Vec3::X).length() < 0.0001);
+        assert!(
+            (app.world().get::<Transform>(avatar).unwrap().rotation * Vec3::Z + Vec3::X).length()
+                < 0.0001
+        );
         app.world_mut()
             .resource_mut::<NeraAnimationState>()
             .set_walking(false);
+        app.world_mut().resource_mut::<WalkingRuntime>().direction = 0.0;
         app.update();
         assert_eq!(
             app.world().get::<Transform>(avatar).unwrap().rotation,
             Quat::IDENTITY
         );
     }
-
     #[test]
-    fn targets_stay_on_negative_coordinate_monitor_and_turn_at_edges() {
-        let work = PhysicalRect {
-            left: -1920,
-            top: 0,
-            right: 0,
-            bottom: 1040,
-        };
-        let bounds = walking_bounds(work, 600).unwrap();
-        for left in [bounds.0, -1500, -1000, bounds.1] {
-            for right in [true, false] {
-                let target = choose_target(left, bounds, 240, right);
-                assert!((bounds.0..=bounds.1).contains(&target));
-                assert_ne!(target, left);
+    fn acceleration_braking_and_subpixels_reach_both_targets_without_overshoot() {
+        for target in [-317, 317] {
+            for dt in [1.0 / 30.0, 1.0 / 60.0, 1.0 / 144.0] {
+                let mut runtime = WalkingRuntime::default();
+                let mut left = 0;
+                let mut peak: f32 = 0.0;
+                for _ in 0..1800 {
+                    let next = runtime.next_step(left, target, 90.0, 1.0, dt);
+                    assert!(next.abs_diff(target) <= left.abs_diff(target));
+                    peak = peak.max(runtime.velocity);
+                    left = next;
+                    if left == target {
+                        break;
+                    }
+                }
+                assert_eq!(left, target);
+                assert!(peak >= 89.0);
+                assert!(runtime.velocity < peak / 2.0);
             }
         }
-        assert!(choose_target(bounds.0, bounds, 200, false) > bounds.0);
-        assert!(choose_target(bounds.1, bounds, 200, true) < bounds.1);
-        assert!(walking_bounds(work, 2000).is_none());
     }
-
     #[test]
-    fn movement_preserves_fraction_and_never_overshoots() {
-        for target in [-107, 107] {
-            let mut runtime = WalkingRuntime {
-                target: Some(target),
-                ..default()
-            };
-            let mut left = 0;
-            for _ in 0..240 {
-                left = runtime.next_step(left, 90.0, 1.0 / 120.0);
-            }
-            assert_eq!(left, target);
-        }
-    }
-
-    #[test]
-    fn offscreen_recovery_and_stalls_do_not_teleport() {
-        let target = choose_target(-500, (8, 1312), 200, false);
-        let mut runtime = WalkingRuntime {
-            target: Some(target),
-            ..default()
-        };
-        assert_eq!(runtime.next_step(-500, 90.0, 60.0), -496);
-    }
-
-    #[test]
-    fn interruption_clears_target_fraction_and_walking_pose() {
+    fn stalls_cannot_jump_and_interruption_drops_motion() {
+        let mut runtime = WalkingRuntime::default();
+        assert!(runtime.next_step(0, 400, 90.0, 1.0, 60.0) <= 1);
         let mut animation = NeraAnimationState::default();
-        assert!(animation.set_walking(true));
-        let mut runtime = WalkingRuntime {
-            target: Some(200),
-            direction: 1.0,
-            fraction: 0.75,
-            expected_left: Some(100),
-            ..default()
-        };
-        runtime.stop(&mut animation, RESUME_DELAY);
-        assert_eq!(animation.visual_state(), VisualState::Idle);
-        assert!(runtime.target.is_none());
-        assert!(runtime.expected_left.is_none());
+        animation.set_walking(true);
+        runtime.finish(&mut animation, WalkOutcome::Interrupted);
+        assert!(!runtime.active());
         assert_eq!(runtime.direction(), 0.0);
-        assert_eq!(runtime.fraction, 0.0);
-        assert_eq!(runtime.cooldown, RESUME_DELAY);
+        assert_eq!(runtime.velocity, 0.0);
+        assert_eq!(animation.visual_state(), VisualState::Idle);
     }
 }

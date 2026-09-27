@@ -146,7 +146,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         // Petting is affection; poking is not. `HitHead` feeds the three-hit
         // damage combo that ends in Death, so it reads as surprise, not joy.
         Body::HeadStroke | Body::StartupGreeting => Face::Happy,
-        Body::HitHead => Face::Surprised,
+        Body::HitHead | Body::DodgeWhileSitting => Face::Surprised,
         Body::HitChest => Face::Angry,
         Body::Death => Face::Sad,
 
@@ -175,7 +175,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
     }
 }
 
-/// Fidgets are calm by definition, so most need no face of their own.
+/// Fidgets supply a face only when their body language calls for one.
 ///
 /// The micro-action clips are body-only like everything else Nera plays, so
 /// these overrides add the face rather than fight one.
@@ -187,8 +187,14 @@ fn expression_for_idle_micro(
 
     match action {
         // Scanning the room is attention, not emotion.
-        Fidget::LookAround => Face::Neutral,
-        Fidget::Relax | Fidget::Sleepy => Face::Relaxed,
+        Fidget::LookAround | Fidget::CatwalkIdleTwistR => Face::Neutral,
+        Fidget::Relax
+        | Fidget::Sleepy
+        | Fidget::Bored
+        | Fidget::Sitting2
+        | Fidget::Sitting4
+        | Fidget::SittingRubbingArm => Face::Relaxed,
+        Fidget::AngryGesture => Face::Angry,
         // `nera_256.vrm` declares no blush preset, so the shy clip gets the
         // nearest available emotion instead of an override that would fight it.
         Fidget::Blush => Face::Happy,
@@ -726,6 +732,42 @@ mod tests {
             )),
             NeraExpression::Neutral,
         );
+    }
+
+    #[test]
+    fn seated_dodge_releases_its_surprise_back_to_the_relaxed_seated_face() {
+        let mut state = NeraExpressionState::default();
+        let dodge = expression_for_visual(VisualState::DodgeWhileSitting);
+        assert_eq!(dodge, NeraExpression::Surprised);
+        state.advance(dodge, Duration::from_secs(1));
+        let sitting = expression_for_visual(VisualState::SittingLoop);
+        state.advance(sitting, Duration::ZERO);
+        state.advance(sitting, Duration::from_secs(1));
+        assert_eq!(
+            state.weights().live().collect::<Vec<_>>(),
+            vec![("relaxed", 1.0)],
+        );
+
+        for action in IdleMicroAction::SITTING {
+            assert_eq!(
+                expression_for_visual(VisualState::IdleMicro(action)),
+                sitting,
+            );
+        }
+    }
+
+    #[test]
+    fn new_standing_fidgets_keep_body_and_face_intent_together() {
+        for (action, face) in [
+            (IdleMicroAction::CatwalkIdleTwistR, NeraExpression::Neutral),
+            (IdleMicroAction::Bored, NeraExpression::Relaxed),
+            (IdleMicroAction::AngryGesture, NeraExpression::Angry),
+        ] {
+            assert_eq!(
+                expression_for_visual(VisualState::IdleMicro(action)),
+                face,
+            );
+        }
     }
 
     // ---------------------------------------------------------------------

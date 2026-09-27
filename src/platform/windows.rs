@@ -49,16 +49,21 @@ use windows::Win32::{
 
         WindowsAndMessaging::{
             GetWindow,
+            GW_HWNDFIRST,
+            GW_HWNDNEXT,
             GW_HWNDPREV,
             EnumWindows,
             GA_ROOT,
             GetAncestor,
             GetClassNameW,
             GetCursorPos,
+            GetForegroundWindow,
             GetShellWindow,
             GetWindowLongPtrW,
             GetWindowRect,
+            GetWindowThreadProcessId,
             GWL_EXSTYLE,
+            GWL_STYLE,
             IsIconic,
             IsWindow,
             IsWindowVisible,
@@ -72,6 +77,8 @@ use windows::Win32::{
             HWND_TOPMOST,
             WS_EX_TOOLWINDOW,
             WS_EX_TOPMOST,
+            WS_CAPTION,
+            WS_MAXIMIZE,
         },
     },
 };
@@ -399,6 +406,10 @@ fn is_window_candidate(
         return false;
     }
 
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        return false;
+    }
+
     // Jangan ambil shell desktop.
     let shell_window = unsafe {
         GetShellWindow()
@@ -570,7 +581,7 @@ fn direct_window_at_point(
 pub fn window_at_point(
     point: PhysicalPoint,
     nera_hwnd: NativeWindowHandle,
-    windows: &[DesktopWindow],
+    _windows: &[DesktopWindow],
 ) -> Option<NativeWindowHandle> {
     // Fast/native path.
     if let Some(handle) =
@@ -582,17 +593,30 @@ pub fn window_at_point(
         return Some(handle);
     }
 
-    // Fallback:
-    //
-    // Kalau WindowFromPoint menemukan Nera sendiri,
-    // cari candidate berikutnya dari snapshot desktop.
-    windows
-        .iter()
-        .find(|window| {
-            window.handle != nera_hwnd
-                && window.rect.contains(point)
-        })
-        .map(|window| window.handle)
+    // Nera can obscure the native hit-test. Walk live top-level z-order until
+    // the first eligible containing window rather than trusting discovery's
+    // older positions/order while a supporting window is dragged or covered.
+    let mut candidate = unsafe { GetWindow(nera_hwnd.hwnd(), GW_HWNDFIRST) }.ok()?;
+    // HWNDs may disappear or be reordered during traversal. A bounded walk
+    // avoids a pathological cycle and conservatively denies support on failure.
+    for _ in 0..512 {
+        if candidate.0.is_null() {
+            break;
+        }
+        if let Some(window) = desktop_window_from_hwnd(candidate, nera_hwnd) {
+            if window.rect.contains(point) {
+                return Some(window.handle);
+            }
+        }
+        let Some(next) = unsafe { GetWindow(candidate, GW_HWNDNEXT) }.ok() else {
+            break;
+        };
+        if next == candidate {
+            break;
+        }
+        candidate = next;
+    }
+    None
 }
 
 
@@ -730,6 +754,167 @@ pub fn is_window_minimized(
     }
 }
 
+/// Whether an external foreground application covers the physical monitor.
+/// The monitor work area is deliberately not used: a normally maximized app
+/// that still leaves the taskbar visible must not activate do-not-disturb.
+pub fn foreground_fullscreen_on_monitor(
+    own_hwnd: NativeWindowHandle,
+    monitor: MonitorInfo,
+) -> bool {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null() || !unsafe { IsWindow(Some(foreground)) }.as_bool() {
+        return false;
+    }
+    let mut foreground_process = 0;
+    let mut own_process = 0;
+    unsafe {
+        GetWindowThreadProcessId(foreground, Some(&mut foreground_process));
+        GetWindowThreadProcessId(own_hwnd.hwnd(), Some(&mut own_process));
+    }
+    // Failure to identify the process cannot establish an external app. This
+    // also excludes every Nera utility HWND, not just the transparent canvas.
+    if foreground_process == 0 || own_process == 0 {
+        return false;
+    }
+    let Some(rect) = window_rect(native_handle_from_hwnd(foreground)) else {
+        return false;
+    };
+    let Some(current_monitor) =
+        monitor_info_from_hmonitor(HMONITOR(monitor.handle.as_raw() as *mut c_void))
+    else {
+        return false;
+    };
+    let style = unsafe { GetWindowLongPtrW(foreground, GWL_STYLE) } as u32;
+    let class_name = window_class_name(foreground);
+    fullscreen_candidate(FullscreenCandidate {
+        rect,
+        monitor_bounds: current_monitor.bounds,
+        class_name: &class_name,
+        own_process: foreground_process == own_process,
+        shell: foreground == unsafe { GetShellWindow() },
+        visible: unsafe { IsWindowVisible(foreground) }.as_bool(),
+        minimized: unsafe { IsIconic(foreground) }.as_bool(),
+        cloaked: is_hwnd_cloaked(foreground),
+        // Auto-hidden taskbars can make work_area == monitor.bounds. A normal
+        // captioned maximized window still should not count as fullscreen.
+        captioned_maximized: (style & WS_MAXIMIZE.0) != 0 && (style & WS_CAPTION.0) == WS_CAPTION.0,
+    })
+}
+
+struct FullscreenCandidate<'a> {
+    rect: PhysicalRect,
+    monitor_bounds: PhysicalRect,
+    class_name: &'a str,
+    own_process: bool,
+    shell: bool,
+    visible: bool,
+    minimized: bool,
+    cloaked: bool,
+    captioned_maximized: bool,
+}
+
+fn fullscreen_candidate(candidate: FullscreenCandidate<'_>) -> bool {
+    if candidate.own_process
+        || candidate.shell
+        || !candidate.visible
+        || candidate.minimized
+        || candidate.cloaked
+        || candidate.captioned_maximized
+        || is_system_window_class(candidate.class_name)
+    {
+        return false;
+    }
+    let rect = candidate.rect;
+    let bounds = candidate.monitor_bounds;
+    // Permit a tiny DWM rounding discrepancy, including on mixed-DPI monitors,
+    // while requiring coverage of all four physical screen edges.
+    const TOLERANCE: i32 = 2;
+    bounds.width() > 0
+        && bounds.height() > 0
+        && rect.width() > 0
+        && rect.height() > 0
+        && rect.left <= bounds.left.saturating_add(TOLERANCE)
+        && rect.top <= bounds.top.saturating_add(TOLERANCE)
+        && rect.right >= bounds.right.saturating_sub(TOLERANCE)
+        && rect.bottom >= bounds.bottom.saturating_sub(TOLERANCE)
+}
+
+#[cfg(test)]
+mod fullscreen_tests {
+    use super::*;
+
+    fn candidate() -> FullscreenCandidate<'static> {
+        FullscreenCandidate {
+            rect: PhysicalRect {
+                left: -1920,
+                top: 1080,
+                right: 0,
+                bottom: 2160,
+            },
+            monitor_bounds: PhysicalRect {
+                left: -1920,
+                top: 1080,
+                right: 0,
+                bottom: 2160,
+            },
+            class_name: "GameWindow",
+            own_process: false,
+            shell: false,
+            visible: true,
+            minimized: false,
+            cloaked: false,
+            captioned_maximized: false,
+        }
+    }
+
+    #[test]
+    fn fullscreen_uses_physical_bounds_and_current_monitor_only() {
+        assert!(fullscreen_candidate(candidate()));
+        let mut maximized = candidate();
+        maximized.rect.bottom -= 40;
+        assert!(!fullscreen_candidate(maximized));
+        let mut other_monitor = candidate();
+        other_monitor.rect = PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(!fullscreen_candidate(other_monitor));
+        let mut rounding = candidate();
+        rounding.rect.left += 2;
+        rounding.rect.bottom -= 2;
+        assert!(fullscreen_candidate(rounding));
+    }
+
+    #[test]
+    fn own_utility_windows_shell_and_suspended_apps_are_excluded() {
+        for flag in 0..6 {
+            let mut excluded = candidate();
+            match flag {
+                0 => excluded.own_process = true,
+                1 => excluded.shell = true,
+                2 => excluded.visible = false,
+                3 => excluded.minimized = true,
+                4 => excluded.cloaked = true,
+                _ => excluded.captioned_maximized = true,
+            }
+            assert!(!fullscreen_candidate(excluded));
+        }
+        for class_name in [
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+        ] {
+            assert!(!fullscreen_candidate(FullscreenCandidate {
+                class_name,
+                ..candidate()
+            }));
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // DPI
 // -----------------------------------------------------------------------------
@@ -858,4 +1043,3 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
 
     context.monitors
 }
-

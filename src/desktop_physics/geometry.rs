@@ -14,6 +14,92 @@ pub(super) struct SurfaceHit {
     pub(super) support: PhysicsSupport,
 }
 
+/// Keep the whole transparent canvas within this monitor's work area. These
+/// bounds constrain autonomous targets, never an immediate position clamp.
+pub(super) fn canvas_walking_bounds(work: PhysicalRect, width: i32) -> Option<(i32, i32)> {
+    let left = work.left.saturating_add(8);
+    let right = work.right.saturating_sub(width).saturating_sub(8);
+    (width > 0 && work.height() > 0 && right > left).then_some((left, right))
+}
+
+pub(super) fn window_top_on_monitor(window: PhysicalRect, work: PhysicalRect) -> bool {
+    window.top >= work.top
+        && window.top < work.bottom
+        && window.left < work.right
+        && window.right > work.left
+}
+
+/// Convert support-foot coordinates to HWND-left coordinates before intersecting
+/// them with monitor bounds. Window-top walking needs a small foot safety margin,
+/// but does not require the entire transparent canvas to fit on the title bar.
+pub(super) fn window_walking_bounds(
+    monitor_bounds: (i32, i32),
+    window: PhysicalRect,
+    feet_offset_x: i32,
+    scale: f64,
+) -> Option<(i32, i32)> {
+    if !scale.is_finite() || scale <= 0.0 || window.width() <= 0 || window.height() <= 0 {
+        return None;
+    }
+    let margin = (16.0 * scale.clamp(0.5, 4.0)).round() as i32;
+    let left = monitor_bounds.0.max(
+        window
+            .left
+            .saturating_add(margin)
+            .saturating_sub(feet_offset_x),
+    );
+    let right = monitor_bounds.1.min(
+        window
+            .right
+            .saturating_sub(margin)
+            .saturating_sub(feet_offset_x),
+    );
+    (right > left).then_some((left, right))
+}
+
+/// External dragging/resizing may leave the current canvas outside safe bounds.
+/// Permit gradual recovery toward them without allowing further outward travel.
+pub(super) fn step_stays_safe_or_returns_to_bounds(
+    current: i32,
+    next: i32,
+    (min, max): (i32, i32),
+) -> bool {
+    if min >= max {
+        return false;
+    }
+    if current < min {
+        next >= current && next <= max
+    } else if current > max {
+        next <= current && next >= min
+    } else {
+        (min..=max).contains(&next)
+    }
+}
+
+pub(super) fn live_window_support_rect(
+    target: NativeWindowHandle,
+    environment: &DesktopEnvironment,
+) -> Option<PhysicalRect> {
+    if !platform::is_window_alive(target)
+        || !platform::window_is_visible(target)
+        || platform::is_window_minimized(target)
+        || platform::is_window_cloaked(target)
+    {
+        return None;
+    }
+    let rect = platform::window_rect(target)?;
+    let monitor = platform::monitor_info(target)?;
+    let top_guard = (24.0 * environment.nera_scale_factor.max(0.5)).round() as i32;
+    // A maximized/fullscreen app has removed its usable top standing surface.
+    if rect.width() <= 0
+        || rect.height() <= 0
+        || rect.top <= monitor.bounds.top.saturating_add(top_guard)
+    {
+        return None;
+    }
+    Some(rect)
+}
+
 pub(super) fn global_feet_anchor(
     local_logical: Option<Vec2>,
     scale_factor: f64,
@@ -117,27 +203,12 @@ pub(super) fn resolve_support_surface(
             target,
             nera_left_offset,
         } => {
-            if !platform::is_window_alive(target)
-                || platform::is_window_minimized(target)
-                || platform::is_window_cloaked(target)
-            {
-                return None;
-            }
-
-            let rect = platform::window_rect(target)?;
-
-            // A maximized/fullscreen app moves its top edge against the monitor
-            // ceiling. Treat that as the old standing surface disappearing,
-            // rather than teleporting Nera upward with the resized window.
-            if let Some(monitor) = platform::monitor_info(target) {
-                let top_guard = (24.0 * environment.nera_scale_factor.max(0.5)).round() as i32;
-
-                if rect.top <= monitor.bounds.top.saturating_add(top_guard) {
-                    return None;
-                }
-            }
-
-            if !x_inside(feet_x, rect) {
+            let rect = live_window_support_rect(target, environment)?;
+            let desired_left = rect.left.saturating_add(nera_left_offset);
+            // Evaluate the feet after following the moving support. Testing the
+            // old world X first makes a fast lateral window drag lose support.
+            let desired_feet_x = feet_x.saturating_add(desired_left.saturating_sub(current_left));
+            if !x_inside(desired_feet_x, rect) {
                 return None;
             }
 
@@ -147,11 +218,11 @@ pub(super) fn resolve_support_surface(
             // keep reporting the (now hidden) top edge as valid support,
             // which is what made Nera look like she was floating in place
             // when the app she stood on disappeared behind another window.
-            if !window_surface_visible(environment, feet_x, rect, target) {
+            if !window_surface_visible(environment, desired_feet_x, rect, target) {
                 return None;
             }
 
-            Some((rect.top, rect.left.saturating_add(nera_left_offset)))
+            Some((rect.top, desired_left))
         }
 
         PhysicsSupport::Taskbar { monitor, edge } => environment
@@ -203,14 +274,7 @@ fn collect_surfaces(feet_x: i32, environment: &DesktopEnvironment) -> Vec<Surfac
     // HWNDs are candidates, but geometry is refreshed here so a window being
     // dragged/resized cannot leave collision 0.2 s behind the visible edge.
     for window in &environment.discovered_windows {
-        if !platform::is_window_alive(window.handle)
-            || platform::is_window_minimized(window.handle)
-            || platform::is_window_cloaked(window.handle)
-        {
-            continue;
-        }
-
-        let Some(window_rect) = platform::window_rect(window.handle) else {
+        let Some(window_rect) = live_window_support_rect(window.handle, environment) else {
             continue;
         };
 
@@ -295,7 +359,7 @@ fn x_inside(x: i32, rect: PhysicalRect) -> bool {
 /// raised above it, changes nothing about a window's rect or minimized/
 /// cloaked flags, so those checks alone cannot detect it. Uses the same
 /// native hit-test approach as the initial sit probe in `sitting.rs`.
-fn window_surface_visible(
+pub(super) fn window_surface_visible(
     environment: &DesktopEnvironment,
     feet_x: i32,
     rect: PhysicalRect,
@@ -344,6 +408,77 @@ mod tests {
             }),
             ..default()
         }
+    }
+
+    #[test]
+    fn canvas_bounds_stay_on_negative_and_offset_monitors() {
+        let bounds = canvas_walking_bounds(rect(-1920, 1080, 0, 2120), 600).unwrap();
+        assert_eq!(bounds, (-1912, -608));
+        assert!(canvas_walking_bounds(rect(-1920, 1080, 0, 2120), 2000).is_none());
+        assert!(canvas_walking_bounds(rect(0, 0, 1920, 1040), 0).is_none());
+    }
+
+    #[test]
+    fn window_bounds_intersect_canvas_and_dpi_scaled_foot_margins() {
+        let monitor = (-1912, -608);
+        let window = rect(-1500, 1200, -700, 1800);
+        let bounds = window_walking_bounds(monitor, window, 300, 1.5).unwrap();
+        assert_eq!(bounds, (-1776, -1024));
+        for left in [bounds.0, bounds.1] {
+            let feet = left + 300;
+            assert!((-1476..=-724).contains(&feet));
+            assert!((monitor.0..=monitor.1).contains(&left));
+        }
+        let clipped =
+            window_walking_bounds(monitor, rect(-2000, 1200, 100, 1800), 300, 1.0).unwrap();
+        assert_eq!(clipped, monitor);
+        assert!(window_walking_bounds(monitor, rect(0, 100, 100, 200), 300, 1.0).is_none());
+        assert!(window_walking_bounds(monitor, window, 300, f64::NAN).is_none());
+        assert!(window_walking_bounds(monitor, rect(-1500, 100, -1490, 200), 300, 1.0).is_none());
+    }
+
+    #[test]
+    fn moving_window_preserves_local_home_and_destination_geometry() {
+        let monitor = (8, 1312);
+        let first = rect(400, 200, 900, 700);
+        let moved = rect(500, 200, 1000, 700);
+        let first_bounds = window_walking_bounds(monitor, first, 300, 1.0).unwrap();
+        let moved_bounds = window_walking_bounds(monitor, moved, 300, 1.0).unwrap();
+        assert_eq!(moved_bounds, (first_bounds.0 + 100, first_bounds.1 + 100));
+        assert_eq!(first_bounds.0 - first.left, moved_bounds.0 - moved.left);
+        assert_eq!(first_bounds.1 - first.left, moved_bounds.1 - moved.left);
+    }
+
+    #[test]
+    fn spanning_window_has_independent_safe_ranges_on_each_monitor() {
+        let left_monitor = rect(-1920, 0, 0, 1040);
+        let right_monitor = rect(0, 0, 1920, 1040);
+        let window = rect(-1800, 300, 1000, 900);
+        for monitor in [left_monitor, right_monitor] {
+            assert!(window_top_on_monitor(window, monitor));
+            let canvas = canvas_walking_bounds(monitor, 600).unwrap();
+            let (min, max) = window_walking_bounds(canvas, window, 300, 1.0).unwrap();
+            assert!(min >= monitor.left && max + 600 <= monitor.right);
+            assert!(min + 300 >= window.left + 16);
+            assert!(max + 300 <= window.right - 16);
+        }
+        // A horizontally overlapping, vertically offset monitor cannot host
+        // walking on a top edge that is actually above its visible screen.
+        assert!(!window_top_on_monitor(window, rect(0, 500, 1920, 1540)));
+        assert!(!window_top_on_monitor(window, rect(1920, 0, 3840, 1040)));
+    }
+
+    #[test]
+    fn resize_recovery_permits_inward_steps_without_edge_teleports() {
+        let bounds = (8, 1312);
+        assert!(step_stays_safe_or_returns_to_bounds(-500, -496, bounds));
+        assert!(!step_stays_safe_or_returns_to_bounds(-500, -504, bounds));
+        assert!(step_stays_safe_or_returns_to_bounds(1500, 1496, bounds));
+        assert!(!step_stays_safe_or_returns_to_bounds(1500, 1504, bounds));
+        assert!(!step_stays_safe_or_returns_to_bounds(10, 7, bounds));
+        assert!(!step_stays_safe_or_returns_to_bounds(1310, 1313, bounds));
+        assert!(!step_stays_safe_or_returns_to_bounds(-500, 1400, bounds));
+        assert!(!step_stays_safe_or_returns_to_bounds(1500, -1, bounds));
     }
 
     #[test]

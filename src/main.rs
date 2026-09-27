@@ -15,19 +15,20 @@ mod animation_manager;
 mod environment;
 mod expression;
 mod interaction;
+mod pet_behavior;
 mod platform;
 mod presentation;
 mod rng;
 mod settings;
-mod walking;
 mod startup_entrance;
+mod walking;
 
 #[cfg(target_os = "windows")]
 mod tray;
 
 use animation::{
-    NeraAnimationPlugin, apply_animation_state, schedule_idle_variation,
-    sync_environment_animation_state, sync_interaction_animation_actions, tick_animation_actions,
+    NeraAnimationPlugin, apply_animation_state, sync_environment_animation_state,
+    sync_interaction_animation_actions, tick_animation_actions,
 };
 use avatar::{
     DeathVisualGrounding, setup_camera, setup_lighting, spawn_nera, sync_look_at_for_animation,
@@ -181,6 +182,7 @@ fn main() {
         .init_resource::<HeadPatGesture>()
         .init_resource::<desktop_physics::DesktopPhysicsState>()
         .init_resource::<walking::WalkingRuntime>()
+        .init_resource::<pet_behavior::PetBehavior>()
         .init_resource::<startup_entrance::StartupEntrance>()
         .init_resource::<DeathVisualGrounding>()
         .add_systems(Startup, (setup_camera, setup_lighting, spawn_nera))
@@ -205,19 +207,12 @@ fn main() {
                 desktop_physics::update_desktop_physics
                     .run_if(presentation::desktop_pet_active)
                     .run_if(startup_entrance::physics_allowed),
-                sync_environment_animation_state,
                 sync_interaction_animation_actions,
-                // Walking consumes current support and interaction decisions.
-                // Run even while blocked so pending motion is cancelled.
-                walking::update_walking.run_if(startup_entrance::autonomous_allowed),
-                // Phase 5.8 idle variation. Runs before the tick so a fidget
-                // requested this frame ages like every other one-shot, and
-                // before `apply_animation_state` so it plays without a frame of
-                // latency. It is the lowest priority layer, so it can never
-                // displace something the systems above just requested.
-                schedule_idle_variation
-                    .run_if(presentation::desktop_pet_active)
-                    .run_if(startup_entrance::autonomous_allowed),
+                // One scheduler consumes current support/interaction facts.
+                // Always run cancellation, including hidden/attention frames.
+                pet_behavior::update_pet_behavior,
+                sync_environment_animation_state,
+                walking::update_walking,
                 tick_animation_actions,
                 // Start the wave after aging existing actions, so its first
                 // frame retains the clip's full playback duration.
@@ -229,7 +224,7 @@ fn main() {
         )
         .add_systems(
             PostUpdate,
-            avatar::apply_walking_pose
+            (avatar::apply_walking_pose, avatar::preserve_seated_hips)
                 .after(bevy::app::AnimationSystems)
                 .after(animation::smooth_walking_cycle)
                 .before(VrmSystemSets::Constraints),

@@ -2,7 +2,7 @@
 //! Scheduling remains in main so cross-subsystem ordering stays explicit.
 mod anchors;
 
-pub(crate) use anchors::{DeathVisualGrounding, update_avatar_anchors};
+pub(crate) use anchors::{DeathVisualGrounding, preserve_seated_hips, update_avatar_anchors};
 
 use crate::{
     animation::{NeraAnimationState, spawn_animation_library},
@@ -182,7 +182,10 @@ pub(crate) fn apply_walking_pose(
     let Ok((entity, mut avatar, hips)) = avatar_query.single_mut() else {
         return;
     };
-    let direction = if animation.visual_state() == crate::animation::VisualState::Walking {
+    let direction = if matches!(
+        animation.visual_state(),
+        crate::animation::VisualState::Idle | crate::animation::VisualState::Walking
+    ) {
         walking.direction()
     } else {
         0.0
@@ -200,7 +203,9 @@ pub(crate) fn apply_walking_pose(
     let (_, rotation) = *original_rotation.get_or_insert((entity, avatar.rotation));
     // VRM's forward is +Z. Positive yaw turns it toward camera-right (+X).
     avatar.rotation = rotation * Quat::from_rotation_y(direction * std::f32::consts::FRAC_PI_2);
-    if let Ok((mut transform, rest)) = bones.get_mut(hips.0) {
+    if animation.visual_state() == crate::animation::VisualState::Walking
+        && let Ok((mut transform, rest)) = bones.get_mut(hips.0)
+    {
         constrain_walking_hips(&mut transform, &rest.0);
     }
 }

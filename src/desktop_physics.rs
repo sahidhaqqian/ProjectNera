@@ -56,6 +56,24 @@ pub(crate) enum PhysicsSupport {
     },
 }
 
+/// Stable surface identity. Desktop and bottom-taskbar support on one monitor
+/// deliberately share an identity, so taskbar changes do not move the home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WalkingSurfaceKey {
+    Monitor(NativeMonitorHandle),
+    Window(NativeWindowHandle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WalkingSurface {
+    pub key: WalkingSurfaceKey,
+    /// Inclusive physical X range for the left edge of Nera's HWND.
+    pub bounds: (i32, i32),
+    /// Store the home/destination relative to this origin to follow a moving
+    /// window (or a monitor whose position changes in Display Settings).
+    pub origin_x: i32,
+}
+
 #[derive(Resource, Debug)]
 pub(crate) struct DesktopPhysicsState {
     /// Positive Y is downward in Win32 desktop coordinates.
@@ -104,10 +122,19 @@ impl DesktopPhysicsState {
         animation: &mut NeraAnimationState,
     ) -> bool {
         let (Some(hwnd), Some(rect), Some(monitor), Some(anchor)) = (
-            environment.nera_hwnd, environment.nera_rect, environment.monitor,
+            environment.nera_hwnd,
+            environment.nera_rect,
+            environment.monitor,
             environment.feet_anchor_logical,
-        ) else { return false };
-        let Some(origin) = startup_drop_origin(rect, monitor.work_area, anchor, environment.nera_scale_factor) else {
+        ) else {
+            return false;
+        };
+        let Some(origin) = startup_drop_origin(
+            rect,
+            monitor.work_area,
+            anchor,
+            environment.nera_scale_factor,
+        ) else {
             return false;
         };
         if platform::move_window(hwnd, origin).is_err() {
@@ -129,15 +156,63 @@ impl DesktopPhysicsState {
         self.startup_monitor = None;
     }
 
-    /// Autonomous movement is restricted to the current monitor's floor.
-    /// Window tops and sitting attachments keep their existing placement owner.
-    pub(crate) fn walking_floor(&self) -> Option<NativeMonitorHandle> {
-        if self.falling {
+    /// Standing support remains owned by physics; sitting attachments never
+    /// become walking surfaces. Refresh native facts before granting movement.
+    pub(crate) fn walking_surface(
+        &self,
+        environment: &DesktopEnvironment,
+    ) -> Option<WalkingSurface> {
+        if self.falling || environment.placement != PlacementState::Free {
             return None;
         }
+        let rect = environment.nera_rect?;
+        // First refreshes this native monitor snapshot every frame. Reuse it
+        // across brain, locomotion, and final-step validation rather than
+        // enumerating the complete monitor topology in every consumer.
+        let monitor = environment.monitor?;
+        let monitor_bounds = canvas_walking_bounds(monitor.work_area, rect.width())?;
         match self.support? {
-            PhysicsSupport::Desktop { monitor }
-            | PhysicsSupport::Taskbar { monitor, edge: TaskbarEdge::Bottom } => Some(monitor),
+            PhysicsSupport::Desktop {
+                monitor: support_monitor,
+            }
+            | PhysicsSupport::Taskbar {
+                monitor: support_monitor,
+                edge: TaskbarEdge::Bottom,
+            } if support_monitor == monitor.handle => Some(WalkingSurface {
+                key: WalkingSurfaceKey::Monitor(monitor.handle),
+                bounds: monitor_bounds,
+                origin_x: monitor.work_area.left,
+            }),
+            PhysicsSupport::Window { target, .. } => {
+                let target_rect = live_window_support_rect(target, environment)?;
+                // A spanning window can have its dominant monitor elsewhere.
+                // Only the part of its top edge on Nera's current monitor is
+                // eligible; horizontal bounds below keep travel on that part.
+                if !window_top_on_monitor(target_rect, monitor.work_area) {
+                    return None;
+                }
+                let feet = global_feet_anchor(
+                    self.support_anchor_logical,
+                    environment.nera_scale_factor,
+                    rect,
+                )?;
+                if feet.x < target_rect.left
+                    || feet.x >= target_rect.right
+                    || !window_surface_visible(environment, feet.x, target_rect, target)
+                {
+                    return None;
+                }
+                Some(WalkingSurface {
+                    key: WalkingSurfaceKey::Window(target),
+                    bounds: window_walking_bounds(
+                        monitor_bounds,
+                        target_rect,
+                        feet.x.saturating_sub(rect.left),
+                        environment.nera_scale_factor,
+                    )?,
+                    origin_x: target_rect.left,
+                })
+            }
             _ => None,
         }
     }
@@ -145,16 +220,43 @@ impl DesktopPhysicsState {
     /// Keep native translation in the physics owner. The behavior controller
     /// supplies a bounded horizontal step without changing the support anchor.
     pub(crate) fn walk_horizontal(
-        &self,
+        &mut self,
         left: i32,
         environment: &mut DesktopEnvironment,
     ) -> bool {
-        if self.walking_floor().is_none() || environment.placement != PlacementState::Free {
+        let Some(surface) = self.walking_surface(environment) else {
             return false;
-        }
+        };
         let (Some(hwnd), Some(rect)) = (environment.nera_hwnd, environment.nera_rect) else {
             return false;
         };
+        if !step_stays_safe_or_returns_to_bounds(rect.left, left, surface.bounds) {
+            return false;
+        }
+        // Probe the future foot position as well as the current one. A higher
+        // window can cover only part of an otherwise valid standing surface.
+        if let WalkingSurfaceKey::Window(target) = surface.key {
+            let Some(target_rect) = live_window_support_rect(target, environment) else {
+                return false;
+            };
+            if target_rect.left != surface.origin_x {
+                return false;
+            }
+            let Some(feet) = global_feet_anchor(
+                self.support_anchor_logical,
+                environment.nera_scale_factor,
+                rect,
+            ) else {
+                return false;
+            };
+            let next_feet_x = feet.x.saturating_add(left.saturating_sub(rect.left));
+            if next_feet_x < target_rect.left
+                || next_feet_x >= target_rect.right
+                || !window_surface_visible(environment, next_feet_x, target_rect, target)
+            {
+                return false;
+            }
+        }
         if left == rect.left {
             return true;
         }
@@ -162,7 +264,18 @@ impl DesktopPhysicsState {
             return false;
         }
         environment.nera_rect = platform::window_rect(hwnd);
-        environment.nera_rect.is_some_and(|updated| updated.left == left)
+        let Some(updated) = environment.nera_rect else {
+            return false;
+        };
+        if let WalkingSurfaceKey::Window(target) = surface.key {
+            // Physics follows this offset on the next frame. Leaving the old
+            // offset here would undo each autonomous step immediately.
+            self.support = Some(PhysicsSupport::Window {
+                target,
+                nera_left_offset: updated.left.saturating_sub(surface.origin_x),
+            });
+        }
+        updated.left == left
     }
 
     /// Refresh the rigid-body standing anchor after a deliberate geometry
@@ -233,7 +346,10 @@ pub(crate) fn update_desktop_physics(
     // a different nearest monitor. Keep the intended landing monitor until
     // touchdown, while refreshing its geometry if the work area changes.
     if let Some(target) = physics.startup_monitor {
-        if let Some(monitor) = platform::enumerate_monitors().into_iter().find(|m| m.handle == target) {
+        if let Some(monitor) = platform::enumerate_monitors()
+            .into_iter()
+            .find(|m| m.handle == target)
+        {
             environment.monitor = Some(monitor);
         } else {
             physics.startup_monitor = None;
@@ -445,12 +561,18 @@ fn startup_drop_origin(
     feet: Vec2,
     scale: f64,
 ) -> Option<PhysicalPoint> {
-    if !feet.is_finite() || !scale.is_finite() || scale <= 0.0 || work.width() <= 0 || work.height() <= 0 {
+    if !feet.is_finite()
+        || !scale.is_finite()
+        || scale <= 0.0
+        || work.width() <= 0
+        || work.height() <= 0
+    {
         return None;
     }
     let max_left = work.right.saturating_sub(rect.width()).max(work.left);
     let left = rect.left.clamp(work.left, max_left);
-    let top = work.top
+    let top = work
+        .top
         .saturating_sub((feet.y * scale as f32).round() as i32)
         .saturating_sub((24.0 * scale).round() as i32);
     Some(PhysicalPoint::new(left, top))
@@ -461,15 +583,59 @@ mod startup_tests {
     use super::*;
 
     #[test]
+    fn falling_and_pending_sitting_never_grant_autonomous_movement() {
+        let mut environment = DesktopEnvironment::default();
+        let mut physics = DesktopPhysicsState {
+            falling: true,
+            support: Some(PhysicsSupport::Desktop {
+                monitor: NativeMonitorHandle::from_raw(7),
+            }),
+            ..default()
+        };
+        assert!(physics.walking_surface(&environment).is_none());
+        assert!(!physics.walk_horizontal(100, &mut environment));
+        physics.falling = false;
+        environment.placement = PlacementState::PendingWindow {
+            target: NativeWindowHandle::from_raw(8),
+            settle_frames: 2,
+        };
+        assert!(physics.walking_surface(&environment).is_none());
+        assert!(!physics.walk_horizontal(100, &mut environment));
+        environment.placement = PlacementState::PendingTaskbar {
+            monitor: NativeMonitorHandle::from_raw(7),
+            edge: TaskbarEdge::Bottom,
+            settle_frames: 2,
+        };
+        assert!(physics.walking_surface(&environment).is_none());
+        assert!(!physics.walk_horizontal(100, &mut environment));
+    }
+
+    #[test]
     fn entrance_starts_above_target_monitor_at_its_dpi_and_preserves_safe_x() {
-        let work = PhysicalRect { left: -1920, top: 1080, right: 0, bottom: 2120 };
-        let rect = PhysicalRect { left: -1700, top: 1200, right: -950, bottom: 2387 };
+        let work = PhysicalRect {
+            left: -1920,
+            top: 1080,
+            right: 0,
+            bottom: 2120,
+        };
+        let rect = PhysicalRect {
+            left: -1700,
+            top: 1200,
+            right: -950,
+            bottom: 2387,
+        };
         let feet = Vec2::new(300.0, 800.0);
         let origin = startup_drop_origin(rect, work, feet, 1.25).unwrap();
         assert_eq!(origin.x, -1700);
         assert_eq!(origin.y + (feet.y * 1.25) as i32, work.top - 30);
-        let offscreen = PhysicalRect { left: -4000, ..rect };
-        assert_eq!(startup_drop_origin(offscreen, work, feet, 1.25).unwrap().x, work.left);
+        let offscreen = PhysicalRect {
+            left: -4000,
+            ..rect
+        };
+        assert_eq!(
+            startup_drop_origin(offscreen, work, feet, 1.25).unwrap().x,
+            work.left
+        );
         assert!(startup_drop_origin(rect, work, Vec2::NAN, 1.25).is_none());
     }
 }

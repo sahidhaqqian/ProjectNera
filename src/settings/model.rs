@@ -198,6 +198,32 @@ impl AlarmConfig {
     }
 }
 
+/// Behavior cadence independent of how primitive settings are persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActivityLevel {
+    Calm,
+    Normal,
+    Active,
+}
+
+impl ActivityLevel {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Calm => "Calm",
+            Self::Normal => "Normal",
+            Self::Active => "Active",
+        }
+    }
+
+    pub(crate) fn walk_interval_secs(self) -> (f32, f32) {
+        match self {
+            Self::Calm => (60.0, 180.0),
+            Self::Normal => (30.0, 90.0),
+            Self::Active => (15.0, 45.0),
+        }
+    }
+}
+
 /// Settings that already have a real runtime consumer.
 ///
 /// Keep unfinished controls out of this resource: a setting should only be
@@ -223,6 +249,12 @@ pub(crate) struct NeraSettings {
     /// Allows Nera to walk around the desktop while otherwise idle.
     /// Disabled by default, including profiles created before walking existed.
     pub(crate) walking_enabled: bool,
+    /// 0 = Calm, 1 = Normal, 2 = Active. Unknown values use Normal.
+    pub(crate) activity_level: u8,
+    /// Maximum distance from the last user placement, in logical pixels (DPI-scaled).
+    pub(crate) roaming_radius_px: u16,
+    /// Pause autonomous movement while a foreground app covers its monitor.
+    pub(crate) pause_roaming_fullscreen: bool,
 
     /// Master switch for gaze behavior driven by the global mouse cursor.
     pub(crate) follow_mouse: bool,
@@ -314,6 +346,9 @@ impl Default for NeraSettings {
             character_size: 100,
             ground_offset: 0,
             walking_enabled: false,
+            activity_level: 1,
+            roaming_radius_px: 400,
+            pause_roaming_fullscreen: true,
             follow_mouse: true,
             follow_eyes: true,
             follow_head: false,
@@ -344,6 +379,26 @@ impl Default for NeraSettings {
 }
 
 impl NeraSettings {
+    pub(crate) fn activity_level(&self) -> ActivityLevel {
+        match self.activity_level {
+            0 => ActivityLevel::Calm,
+            2 => ActivityLevel::Active,
+            _ => ActivityLevel::Normal,
+        }
+    }
+
+    pub(crate) fn roaming_radius_px(&self) -> f32 {
+        self.roaming_radius_px.clamp(300, 600) as f32
+    }
+
+    pub(super) fn cycle_activity_level(&mut self) {
+        self.activity_level = match self.activity_level() {
+            ActivityLevel::Calm => 1,
+            ActivityLevel::Normal => 2,
+            ActivityLevel::Active => 0,
+        };
+    }
+
     pub(crate) fn toggle_always_on_top(&mut self) {
         self.always_on_top = !self.always_on_top;
     }
@@ -724,12 +779,59 @@ mod walking_settings_tests {
         assert_eq!(settings.character_size, 125);
         assert!(!settings.follow_mouse);
         assert!(!settings.walking_enabled);
+        assert_eq!(settings.activity_level(), ActivityLevel::Normal);
+        assert_eq!(settings.roaming_radius_px(), 400.0);
+        assert!(settings.pause_roaming_fullscreen);
 
         let mut saved = bevy::reflect::structs::DynamicStruct::default();
         saved.insert("walking_enabled", true);
         settings.apply(&saved);
         assert!(settings.walking_enabled);
         assert_eq!(settings.character_size, 125);
+    }
+}
+
+#[cfg(test)]
+mod roaming_settings_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_roaming_settings_use_safe_runtime_values() {
+        let mut settings = NeraSettings::default();
+        settings.activity_level = u8::MAX;
+        settings.roaming_radius_px = 0;
+        assert_eq!(settings.activity_level(), ActivityLevel::Normal);
+        assert_eq!(settings.roaming_radius_px(), 300.0);
+        settings.roaming_radius_px = u16::MAX;
+        assert_eq!(settings.roaming_radius_px(), 600.0);
+    }
+
+    #[test]
+    fn activity_choices_follow_requested_cadence() {
+        let mut settings = NeraSettings::default();
+        assert_eq!(settings.activity_level().walk_interval_secs(), (30.0, 90.0));
+        settings.cycle_activity_level();
+        assert_eq!(settings.activity_level().walk_interval_secs(), (15.0, 45.0));
+        settings.cycle_activity_level();
+        assert_eq!(
+            settings.activity_level().walk_interval_secs(),
+            (60.0, 180.0)
+        );
+        settings.cycle_activity_level();
+        assert_eq!(settings.activity_level(), ActivityLevel::Normal);
+    }
+
+    #[test]
+    fn saved_roaming_preferences_are_reflectable() {
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("activity_level", 2_u8);
+        saved.insert("roaming_radius_px", 550_u16);
+        saved.insert("pause_roaming_fullscreen", false);
+        let mut settings = NeraSettings::default();
+        settings.apply(&saved);
+        assert_eq!(settings.activity_level(), ActivityLevel::Active);
+        assert_eq!(settings.roaming_radius_px(), 550.0);
+        assert!(!settings.pause_roaming_fullscreen);
     }
 }
 

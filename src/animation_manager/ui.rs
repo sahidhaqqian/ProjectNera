@@ -311,7 +311,7 @@ pub(super) fn rebuild_ui(
                         });
 
                     if state.tab == GalleryTab::Base {
-                        label(panel, "Nera's core animations — preview or copy into Combine. Editing is locked.", 13.0, MUTED);
+                        label(panel, "Nera's core animations — click a preview to replay. Editing is locked.", 13.0, MUTED);
                     }
 
                     panel
@@ -500,6 +500,7 @@ fn spawn_card(
     state: &ManagerState,
 ) {
     let key = entry.key.clone();
+    let is_base = super::base::is_base_animation(&key);
     parent
         .spawn((
             Node {
@@ -559,15 +560,17 @@ fn spawn_card(
                             MUTED,
                         );
                     });
-                button(
-                    footer,
-                    "...",
-                    ManagerAction::OpenMenu(key.clone()),
-                    px(40),
-                    state,
-                );
+                if !is_base {
+                    button(
+                        footer,
+                        "...",
+                        ManagerAction::OpenMenu(key.clone()),
+                        px(40),
+                        state,
+                    );
+                }
             });
-            if state.menu_key.as_deref() == Some(&key) {
+            if !is_base && state.menu_key.as_deref() == Some(&key) {
                 card.spawn((
                     Node {
                         position_type: PositionType::Absolute,
@@ -592,18 +595,6 @@ fn spawn_card(
                         percent(100),
                         state,
                     );
-                    if super::base::is_base_animation(&key) {
-                        label(menu, "Nera core - locked", 12.0, MUTED);
-                        if let Some(index) = super::base::base_order(&key) {
-                            label(
-                                menu,
-                                super::base::BASE_ANIMATIONS[index].purpose,
-                                12.0,
-                                MUTED,
-                            );
-                        }
-                        return;
-                    }
                     button(
                         menu,
                         "Rename",

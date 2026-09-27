@@ -1,126 +1,172 @@
-**Phase 7 — Autonomous Desktop Pet**
+# Phase 7 — Autonomous Desktop Pet
 
-Status: roadmap dengan implementasi awal berjalan opsional. Checkbox **Aktifkan
-jalan** (default mati, tersimpan) memakai `animasi_basic/Walking.vrma` untuk jalan
-singkat di lantai monitor saat ini. Kontrol radius/tingkat aktivitas, rutinitas
-lanjutan, dan berjalan di window belum diimplementasikan. Uji visual Windows dan
-profiling pemakaian panjang tetap diperlukan; tahap-tahap di bawah adalah target
-penyelesaian, bukan klaim semuanya sudah selesai.
+Status: fondasi behavior, movement, dan kontrol pengguna sudah diimplementasikan
+memakai aset yang tersedia. `cargo check` berhasil;
+`cargo test`: **206 passed, 0 failed, 5 ignored** (tes native/aset lokal opt-in existing).
+Binary debug terbaru selesai dikompilasi dan di-link. `cargo build` gagal menimpa
+`nera.exe` yang masih berjalan; hasil compiler disalin dan diverifikasi sebagai
+`target/debug/nera-updated.exe`. Tutup Nera lama sebelum membuka build tersebut.
+Uji visual Windows dan profiling pemakaian panjang belum
+dijalankan; implementasi kode bukan klaim seluruh kriteria desktop sudah terbukti.
 
-Tujuannya: Nera bisa memilih aktivitas ringan, berjalan sebentar, berhenti, dan
-beristirahat sendiri, sambil tetap mudah dikendalikan dan tidak mengganggu pekerjaan.
-Contoh hasil akhirnya: setelah diam beberapa saat Nera berjalan pelan, berhenti
-sebelum tepi layar, melihat sekitar, lalu istirahat. Saat pengguna menyeretnya,
-gerakan otomatis langsung berhenti; posisi hasil drag menjadi titik aktivitas baru.
+Tujuannya: Nera memilih aktivitas ringan, berjalan sebentar, berhenti, dan
+beristirahat sendiri, sambil tetap mudah dikendalikan. **Allow Roaming default
+mati**, termasuk profil lama. Mengaktifkannya mengizinkan jalan otomatis saat
+berdiri; posisi duduk/berdiri mengikuti penempatan pengguna dan support fisik.
+Interaksi dan variasi idle tetap tersedia ketika roaming
+dimatikan.
 
-**Fondasi yang sudah tersedia**
+## Implementasi saat ini
 
-Click-through, drag, headpat, reaksi klik, duduk pada window/taskbar, gravitasi,
-landing, gaze, alarm, settings, dan pemulihan posisi sudah ada. Empat idle variation
-sudah berjalan otomatis ketika Nera idle. Animation Manager sudah memiliki
-bookmark, Combine, dan proteksi 17 file aktif di `animasi_basic`, termasuk Walking.
-
-Controller awal sudah menangani jeda, tujuan horizontal, dan pembatalan jalan.
-Pemilih aktivitas mandiri yang lebih luas belum ada.
-Follow Mouse sekarang mengatur pandangan, bukan membuat Nera berjalan mengikuti
-mouse. Physics saat ini terutama menangani gerak vertikal.
-
-**Urutan pengerjaan**
-
-| Tahap | Hasil yang bisa dicoba | Kriteria selesai |
+| Tahap | Implementasi | Batas dan verifikasi berikutnya |
 |---|---|---|
-| 7.0 — Baseline dan aset | Catatan RAM/CPU release, daftar klip untuk berjalan/berputar/istirahat, serta aturan interupsi | Kandidat diuji pada rig Nera; loop, arah hadap, gerakan root dan kaki diperiksa; masalah lama yang relevan direproduksi ulang sebelum dijadikan blocker |
-| 7.1 — Controller perilaku | Nera memilih Idle, Walk, Pause, atau Rest berdasarkan kondisi dan cooldown | Satu keputusan aktif; drag, reaksi pengguna, jatuh, menu, alarm, dan animasi pilihan pengguna bisa menginterupsi; tidak ada intent lama yang tiba-tiba melanjutkan |
-| 7.2 — Berjalan di permukaan aman | Jalan kiri/kanan di lantai desktop pada monitor saat ini, dengan radius terbatas | Gerakan HWND cocok dengan animasi; tidak bergeser saat idle, keluar layar, atau bergerak dua kali akibat root motion; berhenti/berputar sebelum batas aman |
-| 7.3 — Kontrol pengguna | Stay Here, Allow Roaming, Pause, tingkat aktivitas, dan radius jelajah | Kontrol tersimpan; drag menetapkan titik jelajah baru; membuka menu menghentikan gerak; Hide dan sleep/resume tidak menghasilkan loncatan atau antrean aktivitas |
-| 7.4 — Rutinitas tenang | Siklus eksplorasi singkat, melihat sekitar, istirahat, dan variasi ketika duduk | Tidak mengulang aksi yang sama berturut-turut; klip berdiri tidak menarik Nera dari kursi; tidur/bangun hanya ditambahkan setelah klip dan transisinya lolos verifikasi |
-| 7.5 — Permukaan window | Berjalan terbatas di tepi window yang sedang menopang Nera | Offset attachment ikut diperbarui; resize, minimize, close, dan pergantian DPI tidak membuat Nera tersentak, tertinggal, atau mempertahankan support yang sudah hilang |
-| 7.6 — Uji pemakaian panjang | Versi Phase 7 siap dipakai sehari-hari | Lulus pengujian interupsi, multi-monitor, pemulihan posisi, dan pemakaian 60 menit; tidak ada pertumbuhan memori terus-menerus setelah warm-up |
+| 7.0 — Behavior Controller | PetBehavior memilih StayIdle, variasi idle sesuai pose, atau Walk; satu pemilik keputusan menggantikan scheduler idle/jalan terpisah | Controller hanya membaca placement; tidak mendudukkan Nera atau melepas attachment duduk |
+| 7.1 — Home Anchor + Radius | Drag menetapkan home baru; radius 300–600 logical px, default 400, dikonversi menurut DPI monitor | Home/support/geometry divalidasi kembali; uji drag dan mixed-DPI native masih diperlukan |
+| 7.2 — Activity + Anti-Repetition | Calm/Normal/Active menentukan cooldown jalan; tiga pilihan terakhir memengaruhi pemilihan berbobot | Cooldown menghitung waktu eligible, bukan janji jalan pada detik tertentu |
+| 7.3 — Smooth Walk / Stop / Turn | Tujuan target_x, LookAround sebelum setiap perjalanan, variasi jarak/kecepatan, jeda hadap 200–400 ms, percepatan dan pengereman | Kualitas gait, arah hadap, dan kemungkinan foot sliding perlu dilihat pada rig Nera |
+| 7.4 — Edge Awareness | Batas support/monitor/home dipotong menjadi interval aman; setelah mencapai batas, jeda lalu tujuan kembali ke dalam | Perubahan support atau gangguan membatalkan tujuan lama; tidak memaksa perjalanan lanjut |
+| 7.5 — Stay Here + Fullscreen | Submenu Roaming menyediakan Allow Roaming/Stay Here; Pause in Fullscreen default aktif | DND menjeda otonomi; tidak menyembunyikan Nera atau mematikan alarm |
+| 7.6 — Window-top Roaming | Berjalan di atas window yang sudah menopang Nera dalam keadaan berdiri; target dan offset support mengikuti window | Bukan berjalan sambil duduk, naik ke window secara otomatis, atau melompat antarwindow |
+| 7.7 — Multi-monitor Robustness | Tetap pada monitor saat ini; perpindahan manual, perubahan DPI/ukuran/support membatalkan atau memperbarui home dan intent | Verifikasi visual monitor nyata, koordinat negatif, resize/minimize/close, dan mixed-DPI belum dijalankan |
+| 7.8 — Optional Personality | Klip lokal tambahan sudah terintegrasi untuk idle berdiri, idle duduk, dan dodge duduk | Intent opsional lain tetap fallback ke pose dasar |
 
-MVP pertama berhenti pada **7.0–7.3**: berjalan mandiri yang aman dan bisa dimatikan
-lebih dahulu. Rutinitas kaya dan jelajah tepi window menyusul setelah MVP stabil.
-Perpindahan monitor otomatis, lompatan antarwindow, mood persisten, makanan,
-minigame, serta chat/AI berada di backlog lanjutan.
+Walking memakai assets/animations/animasi_basic/Walking.vrma. Setiap perjalanan
+menunggu LookAround selesai sebelum jeda hadap dan gerak. Idle berdiri memakai
+LookAround, Relax, Sleepy, Blush, Catwalk_Idle_Twist_R, Bored, dan Angry_Gesture.
+Idle duduk memakai Sitting_2, Sitting_4, dan Sitting_Rubbing_Arm. Hit kepala/dada
+saat duduk memicu Dodge_While_Sitting tanpa melepas attachment atau menghitung
+combo death berdiri. Tujuh klip tambahan dipindahkan dari Bookmarks ke
+animasi_basic; menu titik tiga klip dasar disembunyikan, preview tetap tersedia.
+Physics, interaksi, alarm, dan prioritas animasi tetap berada pada sistem existing.
+Tidak diperlukan hunting VRMA baru untuk fondasi ini.
 
-**Aturan perilaku dan desktop**
+## Kontrol pengguna dan cadence
 
-- Aktivitas otomatis hanya berjalan ketika kondisi placement, physics, dan
-  animation mengizinkan. Prioritas existing tetap dipertahankan; otonomi menjadi
-  aktivitas berprioritas rendah, bukan controller animasi kedua.
-- Jeda keputusan awal 2–5 Hz; interpolasi gerak tetap mengikuti frame. Angka ini
-  adalah titik awal tuning, bukan janji performa.
-- Sediakan cooldown, durasi maksimum aktivitas, dan penghindaran pengulangan.
-  Setelah interupsi, hitung ulang kondisi; jangan melanjutkan tujuan lama secara buta.
-- MVP terbatas pada monitor saat ini. Gunakan batas work area dan ukuran avatar,
-  bukan angka lebar layar tetap. Berhenti ketika pengguna mulai berinteraksi agar
-  Nera mudah diklik atau diseret.
-- Berikan opsi jeda ketika aplikasi fullscreen aktif. Jeda roaming tidak boleh
-  diam-diam mematikan alarm. Jangan merebut fokus keyboard atau menggerakkan
-  window aplikasi milik pengguna.
-- Saat tersembunyi atau sistem suspend, hentikan scheduler. Resume melakukan
-  validasi monitor/support dan reset cooldown; waktu offline tidak dibayar dengan
-  rentetan aktivitas.
-- Follow Mouse tetap berarti gaze. Gerakan menuju kursor, jika ditambahkan nanti,
-  memakai kontrol terpisah yang jelas.
+- **Allow Roaming:** sakelar tersimpan, default mati; tersedia pada Settings dan
+  submenu Roaming di radial menu.
+- **Stay Here:** mematikan Allow Roaming dan menyimpan pilihan. Nera tetap aktif
+  untuk interaksi, gaze, alarm, dan variasi idle. Pergantian preferensi roaming
+  tidak mengubah posisi duduk/berdiri.
+- **Activity:** Calm memakai cooldown jalan 60–180 detik, Normal 30–90 detik,
+  Active 15–45 detik. Normal adalah default.
+- **Roaming Distance:** slider 300–600 logical px dari home, default 400.
+  Koordinat HWND tetap physical; radius dikalikan scale factor monitor.
+- **Pause in Fullscreen:** default aktif; deteksi foreground fullscreen pada
+  monitor tempat Nera berada disampling berkala, tanpa merebut fokus aplikasi.
 
-**Pembagian tanggung jawab implementasi**
+Rentang Activity adalah cooldown selama kondisi eligible, bukan interval
+wall-clock yang wajib dipenuhi. Sesudah cooldown habis, controller masih dapat
+memilih idle atau variasi. Interaksi dan pause memulai ulang jeda yang aman.
+Jarak perjalanan diacak dari kisaran dasar 120–500 px dan disesuaikan DPI/ukuran
+karakter, kemudian dibatasi home dan permukaan. Jeda keputusan normal sesudah
+perjalanan berada pada rentang 8–30 detik. Tepi memiliki jeda singkat sebelum
+perjalanan balik ke dalam.
+Interupsi juga membatalkan hasil perjalanan yang belum diproses, sehingga hasil
+Edge lama tidak memicu perjalanan balik sesudah pause atau drag.
 
-Usulan modul `pet_behavior` menyimpan tujuan, cooldown, dan pilihan aktivitas.
-Modul itu hanya mengirim intent; ia tidak memanggil Win32 untuk memindahkan window.
+## Aturan behavior dan desktop
 
-Pergerakan harus memiliki satu pemilik per frame: drag, attention, attachment,
-physics, atau locomotion. Jalur locomotion diintegrasikan dengan placement/physics
-yang ada. Khusus berjalan pada window, offset support harus ikut berubah supaya
-mekanisme follow tidak menarik Nera kembali ke posisi lama.
+- Satu controller memilih aktivitas otonom berprioritas rendah. Animation state
+  tetap menentukan pose yang benar-benar menang; ekspresi mengikuti pose itu.
+- Autonomi berhenti saat drag, hover/press, reaksi pengguna, jatuh, alarm Attention,
+  menu, Settings/Alarm Settings, Animation Manager terbuka, pet tersembunyi, atau
+  fullscreen pause aktif. Intent lama dibatalkan; tidak ada perjalanan tertunda
+  yang langsung melanjutkan setelah interupsi.
+- Fullscreen/DND menjeda otonomi dan menghapus fidget otonom yang sedang berjalan.
+  Alarm tetap dijadwalkan dan boleh masuk Attention sesuai perilaku existing.
+- Selama Animation Manager terbuka, pet tidak roaming; pause ini tidak bergantung
+  pada lokasi pointer di dalam manager.
+- Gerak otomatis tetap pada monitor saat ini. Drag ke monitor lain menetapkan
+  home di monitor baru setelah support valid. Perpindahan monitor otomatis tidak
+  diimplementasikan.
+- Jalan memerlukan standing support dan PlacementState::Free. Duduk memakai
+  attachment Seat existing dari penempatan pengguna. Pemilihan Sit otomatis dan
+  timer berdiri 12–30 detik dihapus. Nera tetap duduk sampai diseret atau support
+  tidak lagi valid. Menu klik kanan tidak memainkan Praying ketika sedang duduk.
+- Window-top walking memeriksa support dan calon posisi kaki, termasuk visibility
+  dan occlusion. Gerak horizontal memperbarui offset support agar follower physics
+  tidak menarik Nera kembali. Support hilang atau berubah ditangani oleh validasi
+  physics; aplikasi milik pengguna tidak dipindahkan.
+- Jeda frame besar/suspend membatalkan motion. Resume menghitung ulang kondisi dan
+  cooldown; waktu offline tidak dibayar dengan rentetan aktivitas atau loncatan.
+- Follow Mouse tetap berarti gaze, bukan gerakan menuju kursor.
 
-[Animation state](C:/Users/sahid/Documents/ai/src/animation/state.rs) tetap menjadi
-otoritas pose. [Desktop physics](C:/Users/sahid/Documents/ai/src/desktop_physics.rs)
-dan [sitting](C:/Users/sahid/Documents/ai/src/environment/sitting.rs) tetap memiliki
-support/attachment. [Presentation](C:/Users/sahid/Documents/ai/src/presentation.rs)
-tetap menguasai posisi saat alarm Attention. Settings menyimpan preferensi dan
-posisi secara tertunda, bukan menulis ke disk pada setiap langkah berjalan.
+## Kepemilikan implementasi
 
-Scheduler idle lama perlu disatukan dengan pemilih aktivitas baru agar dua timer
-tidak saling memulai animasi. Ekspresi tetap mengikuti pose yang benar-benar menang.
+[pet_behavior.rs](src/pet_behavior.rs) memiliki home, riwayat, pemilihan berbobot,
+cooldown, dan gate interupsi/fullscreen. Ia meminta animasi atau perjalanan melalui
+sistem existing. DesktopEnvironment diakses read-only; behavior tidak mengubah
+placement atau memindahkan HWND langsung.
 
-**Kebutuhan animasi dan proteksi**
+[walking.rs](src/walking.rs) memiliki WalkIntent, tujuan X relatif terhadap support,
+turn delay, kecepatan/subpixel X, percepatan/pengereman, dan hasil
+Arrived/Edge/Interrupted. Modul ini mengeksekusi intent; tidak memiliki timer untuk
+memilih perjalanan sendiri.
 
-- Minimal: walk loop yang cocok dengan rig, arah hadap yang benar, dan transisi
-  berhenti yang layak. Kandidat `Walk_Loop`, `Walk_Formal_Loop`, dan klip Walking
-  sudah ada dalam koleksi, tetapi nama file belum membuktikan kecocokan.
-- Putuskan cara menangani root motion sebelum menentukan kecepatan HWND agar
-  karakter tidak meluncur atau bergerak dua kali.
-- Klip tidur/bangun berbeda dari fidget `Sleepy`; jangan menganggap fidget itu
-  sebagai siklus tidur yang lengkap.
-- Hanya klip yang benar-benar dipasang pada perilaku aktif yang masuk
-  `animasi_basic` dan katalog protection. `Sitting_Exit` tetap stok selama belum
-  ada pemicu aktif yang memakainya. Jangan memasukkan seluruh koleksi sebagai aset dasar.
-- Klip gagal dimuat harus menonaktifkan aktivitas terkait dan kembali ke idle;
-  scheduler tidak boleh macet menunggu satu aset.
+[desktop_physics.rs](src/desktop_physics.rs) menyediakan interval standing support
+dan menerapkan langkah native horizontal melalui walk_horizontal, termasuk
+pembaruan offset window. Gravity dan support tetap di physics; sitting attachment
+tetap dimiliki [sitting.rs](src/environment/sitting.rs).
+[Animation state](src/animation/state.rs) tetap otoritas prioritas pose.
+[Presentation](src/presentation.rs) menguasai HWND/camera selama alarm Attention.
 
-**Performa dan verifikasi**
+main.rs mengurutkan physics dan sinkronisasi interaksi sebelum behavior, lalu
+sinkronisasi pose environment, walking, timer animasi, dan playback. Pose mengikuti
+attachment environment, bukan keputusan duduk/berdiri dari behavior.
+Behavior tetap dipanggil ketika konteks
+terblokir agar pembatalan berjalan. Scheduler idle independen lama sudah dihapus.
+Settings menyimpan preferensi melalui model yang kompatibel dan save tertunda;
+gerak per-frame tidak menulis preferensi roaming ke disk.
 
-Gunakan kumpulan klip perilaku yang kecil dan terukur. Cache playback desktop saat
-ini menyimpan klip yang pernah dimainkan; ukur dan tentukan kebijakan batasnya
-sebelum menghubungkan scheduler dengan banyak animasi koleksi. Pelepasan cache
-harus menjaga konsistensi graph VRM, bukan sekadar menghapus entity secara acak.
+## Aset dan perluasan personality
 
-Catat private bytes/RAM, CPU, dan frame time pada build release untuk proses pet,
-proses Animation Manager, serta total keduanya. Target idle **100–300 MB** tetap
-merupakan sasaran optimasi yang perlu dibuktikan lewat profiling, bukan jaminan
-hasil Phase 7. Kriteria minimum adalah tidak ada pertumbuhan terus-menerus pada
-beban yang sudah stabil dan tidak ada kebocoran siklus buka/tutup manager.
+Kosakata optional mencakup Stretch, Yawn, LookAround, SitFidget, Turn, StandUp,
+dan SitDown. Saat ini hanya **LookAround** memiliki pemetaan capability ke idle
+clip existing. Intent lain belum menjadi rutinitas aktif dan tidak mencari atau
+mengimpor file baru secara otomatis. Permintaan tanpa capability kembali aman
+tanpa mengambil alih pose atau menunggu aset selamanya.
 
-Pengujian wajib mencakup:
+Klip walking/variasi idle harus siap dimuat sebelum behavior terkait menjadi
+pilihan. Kandidat yang tidak siap dilewati dan StayIdle tetap menjadi fallback.
+Sleepy adalah fidget, bukan siklus tidur/bangun lengkap.
 
-1. Idle → walk → pause → idle, dengan seed acak tetap untuk tes keputusan.
-2. Drag, headpat, menu, pilihan animasi, dan alarm ketika Nera sedang berjalan.
-3. Batas layar, DPI 100/125/150%, monitor dengan koordinat negatif, dan perubahan ukuran avatar.
-4. Support bergerak/hilang, Hide/Show, suspend/resume, serta Reset Position.
-5. Klip hilang/rusak dan animasi yang belum siap: fallback tetap responsif.
-6. Pemakaian 60 menit dan 20 siklus buka/tutup manager, termasuk memilih beberapa
-   animasi desktop; bandingkan dengan baseline pada kondisi render yang sama.
+Koleksi aktif di animasi_basic tetap diproteksi. Hanya klip yang benar-benar
+diintegrasikan boleh ditambahkan sebagai aset dasar; Sitting_Exit dan kandidat
+lain tidak dianggap aktif hanya karena file tersedia. Sebelum menambah klip,
+periksa kompatibilitas rig, loop, root motion, arah hadap, dan transisi pada Nera.
 
-Tes otomatis memeriksa keputusan, interupsi, dan geometri. Perilaku HWND,
-click-through, DPI, arah hadap, dan kenyamanan gerakan tetap memerlukan uji visual
-Windows. Pengujian visual dijalankan pengguna; perubahan awal tidak menjalankan Nera.
+## Verifikasi yang tersisa
+
+Tes otomatis memeriksa keputusan berbasis seed, anti-repetition, cooldown,
+settings lama/batas nilai, interupsi, geometri tujuan/support, dan motion tanpa
+overshoot. Hasil terintegrasi: `cargo check` berhasil, binary debug tersedia seperti
+catatan di atas, dan
+`cargo test` **206 passed, 0 failed, 5 ignored**.
+Tes tersebut tidak membuktikan kualitas gerak dan perilaku HWND nyata.
+
+Pengujian visual dijalankan pengguna; pekerjaan implementasi ini **tidak
+menjalankan Nera**. Checklist native berikut masih perlu dilakukan:
+
+1. Allow Roaming on/off, Stay Here, Activity, radius, reset default, dan persistensi
+   sesudah restart; memastikan roaming tetap mati pada profil lama.
+2. Idle → LookAround selesai → hadap → jalan → berhenti; batas home/layar, jeda lalu balik ke dalam,
+   variasi jarak, dan kenyamanan gait tanpa foot sliding atau root-motion ganda.
+3. Drag, headpat, menu, animasi pilihan, alarm, fullscreen, Settings, dan manager
+   ketika berjalan; pastikan alarm tetap aktif selama DND.
+4. Window support bergerak/resize/minimize/close/cloak/occlusion, taskbar, perubahan
+   ukuran avatar, serta duduk/berdiri tanpa konflik penempatan.
+5. DPI 100/125/150%, monitor berkoordinat negatif, drag antar-monitor, Hide/Show,
+   suspend/resume, dan Reset Position. Belum ada klaim lulus multi-monitor nyata.
+6. Aset hilang/rusak/tidak siap: fallback responsif dan pose lain tidak tertahan.
+   Periksa variasi duduk, dodge saat kepala/dada diklik, dan kontak duduk tetap
+   stabil; menu titik tiga hanya muncul pada animasi non-dasar.
+7. Pemakaian 60 menit dan 20 siklus buka/tutup manager, termasuk memilih beberapa
+   animasi desktop; bandingkan RAM, CPU, dan frame time dengan baseline release.
+
+Cache playback menyimpan klip yang pernah dimainkan. Sebelum memperluas koleksi
+otomatis, ukur private bytes/RAM pet, manager, serta total keduanya, dan periksa
+stabilitas setelah warm-up. Target idle **100–300 MB** adalah sasaran profiling,
+bukan jaminan hasil Phase 7. Pelepasan cache perlu menjaga konsistensi graph VRM.
+
+Rutinitas tidur/bangun lengkap, perpindahan monitor otomatis, lompatan antarwindow,
+mood persisten, makanan, minigame, dan chat/AI tetap backlog.

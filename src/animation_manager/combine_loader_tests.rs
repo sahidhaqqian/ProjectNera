@@ -99,6 +99,33 @@ fn load_clip(app: &mut App, path: String) -> AnimationClip {
     }
 }
 
+#[test]
+fn promoted_basic_gestures_load_with_real_durations_without_rendering() {
+    // These fixtures now ship with Nera rather than depending on the ignored library.
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/animations/animasi_basic");
+    let library = TemporaryLibrary::new();
+    let mut app = loader_app(&library);
+    for (file, expected_secs) in [
+        ("Dodge_While_Sitting.vrma", 3.1667_f32),
+        ("Sitting_2.vrma", 2.0833),
+        ("Sitting_4.vrma", 8.625),
+        ("Sitting_Rubbing_Arm.vrma", 7.9583),
+        ("Catwalk_Idle_Twist_R.vrma", 3.3333),
+        ("Bored.vrma", 10.6667),
+        ("Angry_Gesture.vrma", 1.9583),
+        ("LookAround.vrma", 3.9333),
+    ] {
+        fs::copy(source.join(file), library.0.join(file)).unwrap();
+        let clip = load_clip(&mut app, file.to_owned());
+        assert!(!clip.curves().is_empty(), "{file}");
+        assert!(
+            (clip.duration() - expected_secs).abs() < 0.01,
+            "{file}: {}",
+            clip.duration()
+        );
+    }
+}
+
 fn assert_curves_evaluate_across_joins(app: &mut App, clip: &AnimationClip) {
     assert!(
         !clip.curves().is_empty(),

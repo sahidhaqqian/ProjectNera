@@ -13,7 +13,7 @@ mod shadow;
 mod startup;
 mod ui;
 
-pub(crate) use model::{AlarmConfig, NeraSettings};
+pub(crate) use model::{ActivityLevel, AlarmConfig, NeraSettings};
 pub(crate) use runtime::{save_settings_before_exit, save_settings_deferred};
 pub(crate) use ui::{
     OpenSettingsWindow, ReturnToActionMenu, SettingsInputGate, nera_input_available,
@@ -47,12 +47,14 @@ impl Plugin for NeraSettingsPlugin {
                     flush_position_save,
                     open_settings_window,
                     handle_settings_buttons,
+                    handle_roaming_radius_slider,
                     drag_settings_window,
                     scroll_settings_window,
                     close_settings_after_mouse_release,
                     update_settings_labels,
                     update_character_settings_labels,
                     update_audio_settings_labels,
+                    update_roaming_settings_labels,
                     apply_always_on_top,
                     apply_character_size.before(crate::startup_entrance::prepare_startup_entrance),
                     apply_audio_settings,

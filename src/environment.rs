@@ -9,6 +9,8 @@ pub use taskbar::{
 };
 
 pub use sitting::{AvatarAnchor, PlacementState};
+#[cfg(test)]
+pub(crate) use sitting::{TaskbarAttachment, WindowAttachment};
 
 use bevy::{
     prelude::*,

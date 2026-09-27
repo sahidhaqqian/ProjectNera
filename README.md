@@ -2,7 +2,7 @@
 
 Project Nera is a 3D desktop pet for Windows built with Rust and Bevy. It renders a VRM avatar in a transparent native window and combines avatar interaction, VRMA animation, desktop-aware movement, utility windows, alarms, and Win32 integration.
 
-> Application version: **0.1.0** · Current milestone: **Phase 5.9 — Refactor / Cleanup / Robustness complete**
+> Application version: **0.1.0** · Current milestone: **Phase 7 — Autonomous behavior and roaming implementation; native visual validation pending**
 
 ## Overview
 
@@ -44,8 +44,15 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Once per visible startup: drop from above the monitor, finish landing, pause
   briefly to notice the user, then greet with a happy, one-shot `161_Waving.vrma`.
   User interactions can interrupt the entrance; Start Hidden skips it.
-- Head/chest hit reactions, head-stroke reaction, and a three-hit death combo.
-- Random idle micro-actions: Look Around, Relax, Sleepy, and Blush.
+- Standing head/chest hit reactions and a three-hit death combo; seated hits
+  play Dodge While Sitting without detaching. Head-stroke reactions remain available.
+- Standing idle variations: Look Around, Relax, Sleepy, Blush, Catwalk Idle Twist R,
+  Bored, and Angry Gesture. Seated variations: Sitting 2, Sitting 4, and Sitting Rubbing Arm.
+- One behavior controller selects idle, pose-matched idle variations, and bounded
+  walks, with recent-action history to reduce repetition. Sitting/standing changes
+  belong to user placement and physical support; the controller has no auto-stand timer.
+- Destination-based walking after a complete Look Around, with a short direction-intent pause, acceleration,
+  braking, and an inward return after reaching a roaming boundary.
 - Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.
 - Facial expression crossfades derived from the resolved body-animation state.
 - Cursor-driven eye/head gaze with animation-aware temporary ownership.
@@ -54,16 +61,20 @@ The application uses Bevy resources, components, messages, and systems for behav
 ### Utilities
 
 - Native Windows radial action menu opened by right-clicking Nera.
-- Animation Manager gallery, quick alarms, custom alarm editor, and Settings access from the menu.
+- The menu's Praying pose runs only while standing; opening it while seated keeps Nera seated.
+- Animation Manager gallery, quick alarms, custom alarm editor, Settings, and a
+  Roaming submenu with **Allow Roaming** and **Stay Here**.
 - Animation Manager with live per-card VRM previews, search, persistent bookmarks, and physical VRMA import/rename/delete.
+- Protected basic animations retain previews and hide their card action menus.
 - Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
 - Persistent one-time and weekly alarms, with enable/disable, edit, and delete controls for up to 12 entries.
 - Alarm attention mode with a reframed upper-body presentation, looping sound, intro/loop animation, dismiss, and five-minute snooze.
 - Persistent Settings window with controls for:
   - always on top, Start with Windows, Start Hidden, and remembered position;
   - character size and ground offset;
-  - **Aktifkan jalan** checkbox (Yes/No, off by default): short automatic walks
-    along the current monitor's desktop floor, using `animasi_basic/Walking.vrma`;
+  - **Allow Roaming** (off by default), **Activity** (Calm / Normal / Active),
+    **Roaming Distance** (300–600 logical px; default 400), and **Pause in Fullscreen**
+    (on by default);
   - mouse, eye, and upper-body gaze behavior;
   - shadow type, opacity, softness, and scene brightness;
   - master volume, mute, and FPS limit;
@@ -71,12 +82,31 @@ The application uses Bevy resources, components, messages, and systems for behav
 - System tray commands for Show, Hide, Reset Position, Always On Top, and Exit.
 - Saved settings, position recovery, deferred persistence during editing, and synchronous save on controlled exit paths.
 
-The radial menu currently shows **Chat**, **Productivity**, and **Games** as disabled placeholders. They are not implemented features.
+The radial menu currently shows **Chat** and **Games** as disabled placeholders.
+They are not implemented features.
 
-Walking starts after about six idle seconds once Settings and the radial menu
-are closed. Nera pauses between walks and yields to hovering, clicking, dragging,
-sitting, falls, selected animations, and alarms. Uncheck **Aktifkan jalan** to
-stop; the choice is saved. This first version does not walk along window tops.
+Roaming stays near the latest user placement and on its current monitor. Dragging
+Nera establishes a new home; the radius scales with monitor DPI. Activity sets a
+random walking cooldown: Calm **60–180 s**, Normal **30–90 s**, Active **15–45 s**.
+These are eligible-time ranges, not deadlines: interactions, unavailable support,
+other activities, and pauses can delay the next walk. Walk distance, speed, and
+the subsequent idle interval vary.
+
+Nera can walk on a supported desktop/taskbar floor or a visible window top where
+she is already standing. Window-top movement updates the standing support offset;
+it does not walk while seated or jump between windows. Dragging, hovering, falls,
+alarms, selected animations, menu/Settings, and an open Animation Manager interrupt
+autonomy. **Stay Here** turns roaming off while keeping Nera's interactions and
+idle behavior available. Fullscreen pause keeps autonomy idle on the pet's monitor
+without disabling alarms or hiding Nera. Support and monitor changes are
+revalidated before another journey.
+Seated idle variations work with roaming enabled or disabled and return to the
+ordinary seated loop. Nera remains seated until dragged or the support becomes
+unavailable; roaming never makes her sit down or stand up by itself.
+
+Phase 7 uses the existing assets. Optional personality intent names are prepared;
+only LookAround currently maps to an existing capability. Other optional intents
+leave the base pose unchanged until a clip is explicitly integrated.
 The protected `assets/animations/animasi_basic/` folder is included in Git; the
 rest of the local animation collection remains ignored.
 
@@ -183,7 +213,7 @@ ProjectNera/
 ├── assets/
 │   ├── animations/
 │   │   ├── Falling.vrma
-│   │   ├── animasi_basic/                 # 17 active, protected Nera animations
+│   │   ├── animasi_basic/                 # 24 active, protected Nera animations
 │   │   ├── Clawatar_animations/
 │   │   ├── FreeMotionPack1_converted_21_vrma/
 │   │   ├── UAL1_converted_43_vrma/
@@ -218,6 +248,8 @@ ProjectNera/
 │   ├── desktop_physics.rs
 │   ├── desktop_physics/
 │   │   └── geometry.rs
+│   ├── pet_behavior.rs
+│   ├── walking.rs
 │   ├── expression.rs
 │   ├── presentation.rs
 │   ├── alarm.rs
@@ -257,6 +289,10 @@ Major ownership boundaries:
 - `animation.rs` + `animation/` — request scheduling, animation state and priorities, clip library, and playback.
 - `environment.rs` + `environment/` — native desktop and external-window state, taskbar data, and sitting attachments.
 - `desktop_physics*` — gravity, falling/landing, standing support, and pure support geometry.
+- `pet_behavior.rs` — autonomous decisions, recent behavior history, home/radius,
+  activity cooldowns, and interruption/fullscreen gates.
+- `walking.rs` — destinations, turn delay, velocity, braking, and journey outcomes;
+  native translation remains in desktop physics.
 - `presentation.rs` — attention-mode ownership of the main window and camera.
 - `alarm*`, `action_menu.rs`, and `animation_manager*` — alarms and Windows utility surfaces.
 - `settings/` — persistent model/defaults, runtime application, settings UI, startup integration, and shadows.
@@ -264,7 +300,12 @@ Major ownership boundaries:
 
 ## Architecture
 
-Phase 5.9 separated the main architectural hotspots into subsystem-focused modules. The follow-up consolidation keeps each behavior's closely related code together: pointer messages and capture in `interaction.rs`, desktop-window discovery and tracking in `environment.rs`, avatar spawning and gaze in `avatar.rs`, idle scheduling in `animation/systems.rs`, and clip registration plus playback in `animation/playback.rs`. `main.rs` remains focused on bootstrap and cross-subsystem ordering.
+Phase 5.9 separated the main architectural hotspots into subsystem-focused modules.
+Phase 7 centralizes autonomous idle variations and walking decisions in
+`pet_behavior.rs`; `walking.rs` executes destinations through desktop physics.
+Pointer messages remain in `interaction.rs`, desktop discovery in `environment.rs`,
+and clip registration/playback in `animation/playback.rs`. `main.rs` defines their
+cross-subsystem ordering.
 
 A simplified runtime flow is:
 
@@ -274,6 +315,8 @@ Windows / Bevy input and desktop facts
        Interaction + Environment
                  ↓
        Placement / Physics / Alarm
+                 ↓
+       Behavior → Walking → Physics movement
                  ↓
         Animation state resolution
                  ↓
@@ -292,6 +335,18 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before making cross-subsystem changes. I
 - the practical “Where do I change X?” lookup table.
 
 ## Current Development Status
+
+Phase 7 behavior, roaming controls, home bounds, motion smoothing, fullscreen
+pause, and standing window-top movement are implemented using the existing clips.
+Validation: `cargo check` passes; `cargo test` reports **206 passed,
+0 failed, 5 ignored** (existing opt-in native/local-asset tests). The latest debug
+binary compiled and linked, but `cargo build` could not replace the running
+`target/debug/nera.exe`. Its compiled output is available as `target/debug/nera-updated.exe`;
+close the existing pet before launching that build. Native Windows visual
+testing has not been run and remains user-led; this implementation work does not
+launch Nera. Real multi-monitor, mixed-DPI, direction/gait, and extended-use checks
+remain necessary. See [PHASE_7_PLAN.md](PHASE_7_PLAN.md) for the implementation
+boundary and remaining validation.
 
 Phase 5.9 completed the architecture-focused refactor without intentionally changing application behavior.
 

@@ -91,7 +91,12 @@ impl Plugin for AnimationManagerHostPlugin {
         app.init_resource::<ManagerProcess>()
             .init_resource::<AnimationManagerInputGate>()
             .add_message::<OpenAnimationManager>()
-            .add_systems(Update, (poll_manager, open_manager).chain());
+            .add_systems(
+                Update,
+                (poll_manager, open_manager)
+                    .chain()
+                    .before(crate::pet_behavior::update_pet_behavior),
+            );
         #[cfg(debug_assertions)]
         if std::env::var_os("NERA_GALLERY_HOST_SMOKE_TEST").is_some() {
             app.add_systems(Update, host_smoke_test.after(open_manager));
@@ -102,6 +107,7 @@ impl Plugin for AnimationManagerHostPlugin {
 fn open_manager(
     mut requests: MessageReader<OpenAnimationManager>,
     mut process: ResMut<ManagerProcess>,
+    mut gate: ResMut<AnimationManagerInputGate>,
 ) {
     if requests.read().next().is_none() {
         return;
@@ -118,10 +124,12 @@ fn open_manager(
     if let Err(error) = result {
         error!("Could not open Animation Manager: {error}");
     }
+    gate.window_open = process.child.is_some();
 }
 
 fn poll_manager(
     mut process: ResMut<ManagerProcess>,
+    mut gate: ResMut<AnimationManagerInputGate>,
     mut play: MessageWriter<crate::animation::PlayLibraryAnimation>,
     mut back: MessageWriter<crate::settings::ReturnToActionMenu>,
 ) {
@@ -146,6 +154,7 @@ fn poll_manager(
         // the next launch so the final Back/Play event cannot race process exit.
         process.child = None;
     }
+    gate.window_open = process.child.is_some();
 }
 
 #[derive(Resource)]

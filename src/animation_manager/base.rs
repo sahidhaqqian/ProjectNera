@@ -5,7 +5,6 @@
 pub(super) struct BaseAnimation {
     pub key: &'static str,
     pub label: &'static str,
-    pub purpose: &'static str,
 }
 
 /// Display order for the dedicated "Animasi Dasar" section. This includes the
@@ -14,87 +13,98 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
     BaseAnimation {
         key: "animasi_basic/idle.vrma",
         label: "Base idle",
-        purpose: "Nera's standing idle loop",
     },
     BaseAnimation {
         key: "animasi_basic/Walking.vrma",
         label: "Walking",
-        purpose: "Automatic desktop walking loop",
     },
     BaseAnimation {
         key: "animasi_basic/Sitting_Enter.vrma",
         label: "Sit down",
-        purpose: "Transition into sitting",
     },
     BaseAnimation {
         key: "animasi_basic/Sitting_Idle_Loop.vrma",
         label: "Sitting idle",
-        purpose: "Sitting loop",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Sitting_2.vrma",
+        label: "Sitting idle: variation 2",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Sitting_4.vrma",
+        label: "Sitting idle: variation 4",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Sitting_Rubbing_Arm.vrma",
+        label: "Sitting idle: rub arm",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Dodge_While_Sitting.vrma",
+        label: "Sitting hit reaction",
     },
     BaseAnimation {
         key: "animasi_basic/Floating.vrma",
         label: "Dragging / falling",
-        purpose: "Loop used while dragging and falling",
     },
     BaseAnimation {
         key: "animasi_basic/Falling_To_Landing.vrma",
         label: "Landing",
-        purpose: "Landing after a fall",
     },
     BaseAnimation {
         key: "animasi_basic/Hit_Head.vrma",
         label: "Head click",
-        purpose: "Reaction to clicking Nera's head",
     },
     BaseAnimation {
         key: "animasi_basic/Hit_Chest.vrma",
         label: "Chest click",
-        purpose: "Reaction to clicking Nera's chest",
     },
     BaseAnimation {
         key: "animasi_basic/ShakeHeadNo1.vrma",
         label: "Headpat",
-        purpose: "Reaction to stroking Nera's head",
     },
     BaseAnimation {
         key: "animasi_basic/Death01.vrma",
         label: "Damage reaction",
-        purpose: "Reaction to repeated hits",
     },
     BaseAnimation {
         key: "animasi_basic/Praying.vrma",
         label: "Radial menu pose",
-        purpose: "Loop while the radial menu is open",
     },
     BaseAnimation {
         key: "animasi_basic/LookAround.vrma",
         label: "Idle: look around",
-        purpose: "Automatic idle variation",
     },
     BaseAnimation {
         key: "animasi_basic/Relax.vrma",
         label: "Idle: relax",
-        purpose: "Automatic idle variation",
     },
     BaseAnimation {
         key: "animasi_basic/Sleepy.vrma",
         label: "Idle: sleepy",
-        purpose: "Automatic idle variation",
     },
     BaseAnimation {
         key: "animasi_basic/Blush.vrma",
         label: "Idle: blush",
-        purpose: "Automatic idle variation",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Catwalk_Idle_Twist_R.vrma",
+        label: "Idle: catwalk twist",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Bored.vrma",
+        label: "Idle: bored",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Angry_Gesture.vrma",
+        label: "Idle: angry gesture",
     },
     BaseAnimation {
         key: "animasi_basic/jump_happy.vrma",
         label: "Alarm intro",
-        purpose: "One-time jump when an alarm starts",
     },
     BaseAnimation {
         key: "animasi_basic/161_Waving.vrma",
         label: "Greeting / alarm wave",
-        purpose: "One-time startup greeting and loop after the alarm intro",
     },
 ];
 
@@ -159,10 +169,10 @@ mod tests {
 
     #[test]
     fn base_keys_are_unique() {
-        assert_eq!(BASE_ANIMATIONS.len(), 17);
+        assert_eq!(BASE_ANIMATIONS.len(), 24);
         for (index, entry) in BASE_ANIMATIONS.iter().enumerate() {
             assert_eq!(base_order(entry.key), Some(index));
-            assert!(!entry.purpose.is_empty());
+            assert!(!entry.label.is_empty());
         }
         assert!(!is_base_animation("Imported/idle.vrma"));
         assert!(!is_base_animation("animasi_basic/Sitting_Exit.vrma"));
