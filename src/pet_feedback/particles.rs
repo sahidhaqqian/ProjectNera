@@ -20,7 +20,7 @@ pub(crate) const MAX_PARTICLES: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub(crate) enum PetFxKind {
-    HeadPatSparkle,
+    Heart,
     LandingPuff,
     AngryMark,
     SleepZ,
@@ -29,7 +29,7 @@ pub(crate) enum PetFxKind {
 impl PetFxKind {
     fn count(self) -> usize {
         match self {
-            Self::HeadPatSparkle => 3,
+            Self::Heart => 3,
             Self::LandingPuff | Self::CloudPuff => 4,
             _ => 1,
         }
@@ -122,15 +122,35 @@ fn glyph_mesh(rectangles: &[(Vec2, Vec2, f32)]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_indices(Indices::U32(indices))
 }
+/// One shared flat heart, with 32 outline vertices and no texture allocation.
+fn heart_mesh() -> Mesh {
+    const SEGMENTS: u32 = 32;
+    let mut positions = vec![[0.0, -0.04, 0.0]];
+    let mut indices = Vec::with_capacity(SEGMENTS as usize * 3);
+    for i in 0..SEGMENTS {
+        let t = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let x = 16.0 * t.sin().powi(3) / 32.0;
+        let y = (13.0 * t.cos() - 5.0 * (2.0 * t).cos() - 2.0 * (3.0 * t).cos() - (4.0 * t).cos())
+            / 32.0;
+        positions.push([x, y, 0.0]);
+        indices.extend([0, i + 1, (i + 1) % SEGMENTS + 1]);
+    }
+    let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
 fn create_fx_assets(
     mut assets: ResMut<FxAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let sparkle = glyph_mesh(&[
-        (Vec2::ZERO, Vec2::new(0.12, 0.5), 0.0),
-        (Vec2::ZERO, Vec2::new(0.5, 0.12), 0.0),
-    ]);
+    let heart = heart_mesh();
     let z = glyph_mesh(&[
         (Vec2::new(0.0, 0.35), Vec2::new(0.40, 0.08), 0.0),
         (Vec2::ZERO, Vec2::new(0.48, 0.08), 0.72),
@@ -143,7 +163,7 @@ fn create_fx_assets(
         (Vec2::new(0.25, -0.25), Vec2::new(0.065, 0.22), 0.0),
     ]);
     for (mesh, color) in [
-        (sparkle, Color::srgb(1.0, 0.79, 0.22)),
+        (heart, Color::srgb(1.0, 0.28, 0.48)),
         (
             Mesh::from(Circle::new(0.5)),
             Color::srgba(0.78, 0.88, 0.94, 0.55),
@@ -254,7 +274,7 @@ pub(crate) fn update_particles(
             let spread = (index as f32 - (admitted - 1) as f32 * 0.5) * 15.0;
             let offset = match request.kind {
                 PetFxKind::AngryMark | PetFxKind::SleepZ => Vec2::new(32.0, -22.0),
-                PetFxKind::HeadPatSparkle => Vec2::new(spread, -12.0 - (index % 2) as f32 * 10.0),
+                PetFxKind::Heart => Vec2::new(spread, -12.0 - (index % 2) as f32 * 10.0),
                 _ => Vec2::new(spread, 0.0),
             };
             let position = origin + offset * scale;
@@ -350,7 +370,7 @@ mod tests {
     #[test]
     fn every_effect_expires_even_after_a_long_frame() {
         for kind in [
-            PetFxKind::HeadPatSparkle,
+            PetFxKind::Heart,
             PetFxKind::LandingPuff,
             PetFxKind::AngryMark,
             PetFxKind::SleepZ,
@@ -372,11 +392,7 @@ mod tests {
         let mut cooldown = FxCooldown::default();
         let mut count = 0;
         for i in 0..10_000 {
-            count += cooldown.admit(
-                PetFxKind::HeadPatSparkle,
-                Duration::from_millis(i * 250),
-                count,
-            );
+            count += cooldown.admit(PetFxKind::Heart, Duration::from_millis(i * 250), count);
             assert!(count <= MAX_PARTICLES);
         }
         assert_eq!(count, MAX_PARTICLES);
@@ -385,11 +401,11 @@ mod tests {
             0
         );
         assert_eq!(
-            cooldown.admit(PetFxKind::HeadPatSparkle, Duration::from_secs(3000), 0),
+            cooldown.admit(PetFxKind::Heart, Duration::from_secs(3000), 0),
             3
         );
         assert_eq!(
-            cooldown.admit(PetFxKind::HeadPatSparkle, Duration::from_secs(3000), 3),
+            cooldown.admit(PetFxKind::Heart, Duration::from_secs(3000), 3),
             0
         );
     }

@@ -1,10 +1,15 @@
 use crate::expression::NeraExpressionPreset;
-use bevy::{prelude::*, ui::UiTargetCamera};
+use bevy::{
+    input_focus::{FocusCause, InputFocus},
+    prelude::*,
+    text::EditableText,
+    ui::UiTargetCamera,
+};
 
 use super::{
-    CaretBlink, CombineListScroll, Dialog, GalleryScroll, GalleryScrollbarThumb,
-    GalleryScrollbarTrack, GalleryTab, ManagerAction, ManagerCamera, ManagerDragRegion,
-    ManagerOwned, ManagerRoot, ManagerState, ManagerWindow, PreviewSlot, TextCaret, TextFocus,
+    CombineListScroll, Dialog, GalleryScroll, GalleryScrollbarThumb, GalleryScrollbarTrack,
+    GalleryTab, ManagerAction, ManagerCamera, ManagerDragRegion, ManagerOwned, ManagerRoot,
+    ManagerState, ManagerTextField, ManagerWindow, PreviewSlot, TextFocus,
 };
 
 pub(super) const ROW_HEIGHT: f32 = 360.0;
@@ -160,34 +165,83 @@ pub(super) fn label(
     ));
 }
 
-fn caret(parent: &mut ChildSpawnerCommands, visible: bool) {
-    parent.spawn((
-        TextCaret,
-        Text::new("|"),
-        TextFont {
-            font_size: FontSize::Px(14.0),
-            ..default()
-        },
-        TextColor(PRIMARY),
-        if visible {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        },
+#[derive(Component)]
+pub(super) struct TextFieldPlaceholder(Entity);
+
+fn text_field(
+    parent: &mut ChildSpawnerCommands,
+    field: TextFocus,
+    state: &ManagerState,
+    input_focus: &mut InputFocus,
+    size: f32,
+    placeholder: &str,
+) {
+    let value = match field {
+        TextFocus::Search => &state.search,
+        TextFocus::Rename => &state.rename_value,
+        TextFocus::CombineName => &state.combine_name,
+        TextFocus::None => return,
+    };
+    let editor = state
+        .editor_snapshot
+        .as_ref()
+        .filter(|(owner, editor)| *owner == field && editor.value().to_string() == *value)
+        .map(|(_, editor)| editor.clone())
+        .unwrap_or_else(|| EditableText::new(value));
+    let mut field_entity = parent.spawn((
+        ManagerTextField(field),
+        crate::utility_window::text_input::single_line(editor, size, PRIMARY),
     ));
+    if state.combine_job.is_some() {
+        field_entity.insert(bevy::picking::Pickable::IGNORE);
+    }
+    let entity = field_entity.id();
+    if state.focus == field && state.combine_job.is_none() {
+        input_focus.set(entity, FocusCause::Navigated);
+    }
+    if !placeholder.is_empty() {
+        parent.spawn((
+            TextFieldPlaceholder(entity),
+            bevy::picking::Pickable::IGNORE,
+            Text::new(placeholder),
+            TextFont {
+                font_size: FontSize::Px(size),
+                ..default()
+            },
+            TextColor(MUTED),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            if value.is_empty() && state.focus != field {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
+        ));
+    }
 }
 
-pub(super) fn blink_text_caret(
-    time: Res<Time>,
-    mut blink: ResMut<CaretBlink>,
-    mut carets: Query<&mut Visibility, With<TextCaret>>,
+pub(super) fn sync_text_field_style(
+    focus: Res<InputFocus>,
+    fields: Query<(Entity, &EditableText, &ChildOf), With<ManagerTextField>>,
+    mut outlines: Query<&mut Outline>,
+    mut placeholders: Query<(&TextFieldPlaceholder, &mut Visibility)>,
 ) {
-    blink.timer.tick(time.delta());
-    if blink.timer.just_finished() {
-        blink.visible = !blink.visible;
+    for (entity, _, parent) in &fields {
+        if let Ok(mut outline) = outlines.get_mut(parent.parent()) {
+            outline.color = if focus.get() == Some(entity) {
+                BLUE
+            } else {
+                OUTLINE
+            };
+        }
     }
-    for mut visibility in &mut carets {
-        *visibility = if blink.visible {
+    for (placeholder, mut visibility) in &mut placeholders {
+        let empty = fields
+            .get(placeholder.0)
+            .is_ok_and(|(_, editor, _)| editor.value().to_string().is_empty());
+        *visibility = if empty && focus.get() != Some(placeholder.0) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -336,6 +390,7 @@ pub(super) fn rebuild_ui(
     windows: Query<Entity, With<ManagerWindow>>,
     cameras: Query<Entity, With<ManagerCamera>>,
     roots: Query<Entity, With<ManagerRoot>>,
+    mut input_focus: ResMut<InputFocus>,
 ) {
     if !state.dirty {
         return;
@@ -346,6 +401,7 @@ pub(super) fn rebuild_ui(
     for root in &roots {
         commands.entity(root).despawn();
     }
+    input_focus.clear();
     let entries = state.filtered();
     commands
         .spawn((
@@ -471,8 +527,6 @@ pub(super) fn rebuild_ui(
                     } else {
                     panel
                         .spawn((
-                            Button,
-                            ManagerAction::Search,
                             Node {
                                 width: percent(100),
                                 height: px(44),
@@ -493,15 +547,7 @@ pub(super) fn rebuild_ui(
                             ),
                         ))
                         .with_children(|search| {
-                            let focused = state.focus == TextFocus::Search;
-                            if state.search.is_empty() && !focused {
-                                label(search, "Search animations...", 14.0, MUTED);
-                            } else {
-                                label(search, state.search.clone(), 14.0, PRIMARY);
-                                if focused {
-                                    caret(search, true);
-                                }
-                            }
+                            text_field(search, TextFocus::Search, &state, &mut input_focus, 14.0, "Search animations...");
                         });
 
                     panel
@@ -650,7 +696,7 @@ pub(super) fn rebuild_ui(
                             ); }
                         });
                     if let Some(dialog) = &state.dialog {
-                        spawn_dialog(panel, dialog, &state);
+                        spawn_dialog(panel, dialog, &state, &mut input_focus);
                     }
                 });
         });
@@ -790,7 +836,11 @@ fn spawn_card(
         });
 }
 
-fn spawn_combine_editor(modal: &mut ChildSpawnerCommands, state: &ManagerState) {
+fn spawn_combine_editor(
+    modal: &mut ChildSpawnerCommands,
+    state: &ManagerState,
+    input_focus: &mut InputFocus,
+) {
     label(modal, "Combine animations", 24.0, PRIMARY);
     label(
         modal,
@@ -918,8 +968,6 @@ fn spawn_combine_editor(modal: &mut ChildSpawnerCommands, state: &ManagerState) 
     }
     modal
         .spawn((
-            Button,
-            ManagerAction::FocusCombineName,
             Node {
                 width: percent(100),
                 height: px(46),
@@ -941,14 +989,14 @@ fn spawn_combine_editor(modal: &mut ChildSpawnerCommands, state: &ManagerState) 
             ),
         ))
         .with_children(|field| {
-            if state.combine_name.is_empty() && state.focus != TextFocus::CombineName {
-                label(field, "New animation name", 15.0, MUTED);
-            } else {
-                label(field, &state.combine_name, 15.0, PRIMARY);
-            }
-            if state.focus == TextFocus::CombineName {
-                caret(field, true);
-            }
+            text_field(
+                field,
+                TextFocus::CombineName,
+                state,
+                input_focus,
+                15.0,
+                "New animation name",
+            );
             if !state.combine_name.to_ascii_lowercase().ends_with(".vrma") {
                 label(field, ".vrma", 15.0, MUTED);
             }
@@ -979,7 +1027,12 @@ fn spawn_combine_editor(modal: &mut ChildSpawnerCommands, state: &ManagerState) 
         });
 }
 
-fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &ManagerState) {
+fn spawn_dialog(
+    parent: &mut ChildSpawnerCommands,
+    dialog: &Dialog,
+    state: &ManagerState,
+    input_focus: &mut InputFocus,
+) {
     parent
         .spawn((
             Node {
@@ -1024,14 +1077,12 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                         label(modal, error.clone(), 13.0, Color::srgb(1.0, 0.48, 0.53));
                     }
                     match dialog {
-                        Dialog::Combine => spawn_combine_editor(modal, state),
+                        Dialog::Combine => spawn_combine_editor(modal, state, input_focus),
                         Dialog::Rename(key) => {
                             label(modal, "Rename animation", 22.0, PRIMARY);
                             label(modal, key.rsplit('/').next().unwrap_or(key), 13.0, MUTED);
                             modal
                                 .spawn((
-                                    Button,
-                                    ManagerAction::FocusRename,
                                     Node {
                                         width: percent(100),
                                         height: px(46),
@@ -1061,10 +1112,7 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                                     } else {
                                         ".vrma"
                                     };
-                                    label(field, state.rename_value.clone(), 14.0, PRIMARY);
-                                    if state.focus == TextFocus::Rename {
-                                        caret(field, true);
-                                    }
+                                    text_field(field, TextFocus::Rename, state, input_focus, 14.0, "");
                                     label(field, suffix, 14.0, MUTED);
                                 });
                             modal

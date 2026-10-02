@@ -312,3 +312,61 @@ fn character_cleanup_destroys_cloud_and_clears_seated_and_physics_state() {
         BasePose::Idle
     );
 }
+
+#[test]
+fn rest_releases_gaze_on_dismiss_drag_interruption_replacement_and_ride() {
+    use crate::avatar::{LookAtTarget, sync_look_at_for_animation};
+    use bevy_vrm1::{prelude::LookAt, vrm::body_tracking::BodyTracking};
+    for exit in 0..5 {
+        for follow_head in [false, true] {
+            let mut app = app();
+            app.world_mut().resource_mut::<NeraSettings>().follow_eyes = true;
+            app.world_mut().resource_mut::<NeraSettings>().follow_head = follow_head;
+            app.add_systems(Update, sync_look_at_for_animation.after(update_cloud));
+            app.world_mut().spawn(LookAtTarget);
+            let avatar = app
+                .world_mut()
+                .query_filtered::<Entity, With<NeraAvatar>>()
+                .single(app.world())
+                .unwrap();
+            app.world_mut()
+                .write_message(CloudCommand::Summon(CloudMode::Rest));
+            app.update();
+            assert!(app.world().get::<LookAt>(avatar).is_none());
+            assert!(app.world().get::<BodyTracking>(avatar).is_none());
+            match exit {
+                0 => {
+                    app.world_mut().write_message(CloudCommand::Dismiss);
+                }
+                1 => {
+                    app.world_mut().resource_mut::<CloudRuntime>().begin_drag();
+                }
+                2 => {
+                    app.world_mut()
+                        .query_filtered::<&mut Window, With<PrimaryWindow>>()
+                        .single_mut(app.world_mut())
+                        .unwrap()
+                        .visible = false;
+                }
+                3 => {
+                    clear_for_character_change(app.world_mut());
+                }
+                _ => {
+                    app.world_mut()
+                        .write_message(CloudCommand::Summon(CloudMode::Ride));
+                }
+            }
+            app.update();
+            assert!(app.world().get::<LookAt>(avatar).is_some(), "exit {exit}");
+            assert_eq!(
+                app.world().get::<BodyTracking>(avatar).is_some(),
+                follow_head
+            );
+            assert!(app.world().resource::<NeraSettings>().follow_eyes);
+            assert_eq!(
+                app.world().resource::<NeraSettings>().follow_head,
+                follow_head
+            );
+        }
+    }
+}

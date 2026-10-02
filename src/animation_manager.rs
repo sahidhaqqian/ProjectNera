@@ -12,6 +12,8 @@ mod memory_audit;
 mod preview;
 pub(crate) mod process;
 mod registry;
+#[cfg(test)]
+mod text_input_tests;
 pub(crate) mod thumbnails;
 mod ui;
 
@@ -28,9 +30,12 @@ use bevy::{
         keyboard::{Key, KeyboardInput},
         mouse::{MouseScrollUnit, MouseWheel},
     },
+    input_focus::InputFocus,
     prelude::*,
+    text::EditableText,
     window::{
-        WindowCloseRequested, WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints,
+        PrimaryWindow, WindowCloseRequested, WindowLevel, WindowPosition, WindowRef,
+        WindowResizeConstraints,
     },
 };
 use registry::AnimationRegistry;
@@ -48,28 +53,6 @@ pub(crate) struct AnimationManagerInputGate {
     /// manager, the exposed desktop pet can become hittable and draggable even
     /// while the utility window stays open.
     pub pointer_over_window: bool,
-}
-
-#[derive(Resource)]
-struct CaretBlink {
-    timer: Timer,
-    visible: bool,
-}
-
-impl Default for CaretBlink {
-    fn default() -> Self {
-        Self {
-            timer: Timer::from_seconds(0.52, TimerMode::Repeating),
-            visible: true,
-        }
-    }
-}
-
-impl CaretBlink {
-    fn reset_visible(&mut self) {
-        self.visible = true;
-        self.timer.reset();
-    }
 }
 
 #[derive(Component)]
@@ -93,7 +76,7 @@ struct GalleryScrollbarTrack;
 #[derive(Resource, Default)]
 struct ScrollbarDrag(Option<f32>);
 #[derive(Component)]
-struct TextCaret;
+struct ManagerTextField(TextFocus);
 #[derive(Component, Clone)]
 struct PreviewSlot {
     key: String,
@@ -149,12 +132,10 @@ enum ManagerAction {
     ConfirmRemoveCharacter,
     Expression(crate::expression::NeraExpressionPreset),
     Intensity(u8),
-    Search,
     Import,
     Reset,
     OpenMenu(String),
     Rename(String),
-    FocusRename,
     Delete(String),
     Bookmark(String),
     ConfirmRename,
@@ -166,7 +147,6 @@ enum ManagerAction {
     RemoveCombine(usize),
     MoveCombine(usize, bool),
     TrimCombine(usize, bool, bool),
-    FocusCombineName,
     ConfirmCombine,
 }
 
@@ -183,6 +163,9 @@ struct ManagerState {
     intensity: u8,
     search: String,
     focus: TextFocus,
+    /// Cursor/selection are owned by Bevy's editor. This transient snapshot only
+    /// transfers them when the existing gallery rebuild replaces the UI entity.
+    editor_snapshot: Option<(TextFocus, EditableText)>,
     menu_key: Option<String>,
     dialog: Option<Dialog>,
     rename_value: String,
@@ -229,6 +212,7 @@ impl ManagerState {
             intensity: 100,
             search: String::new(),
             focus: TextFocus::None,
+            editor_snapshot: None,
             menu_key: None,
             dialog: None,
             rename_value: String::new(),
@@ -280,7 +264,7 @@ impl Plugin for AnimationManagerPlugin {
         crate::expression::face::install(app);
         app.insert_resource(ManagerState::new())
             .init_resource::<AnimationManagerInputGate>()
-            .init_resource::<CaretBlink>()
+            .init_resource::<InputFocus>()
             .init_resource::<ScrollbarDrag>()
             .init_resource::<preview::PreviewRuntime>()
             .add_message::<OpenAnimationManager>()
@@ -288,16 +272,20 @@ impl Plugin for AnimationManagerPlugin {
             .add_message::<crate::character::roster::RosterRequest>()
             .add_systems(PreUpdate, sync_manager_pointer_gate)
             .add_systems(
+                PreUpdate,
+                clear_unfocused_text_focus.before(bevy::input_focus::InputFocusSystems::Dispatch),
+            )
+            .add_systems(
                 Update,
                 (
                     open_window,
                     handle_native_close,
-                    handle_keyboard,
-                    handle_scroll_keys,
+                    (sync_text_fields, handle_scroll_keys).chain(),
                     handle_actions,
                     poll_combine_result,
+                    capture_text_editor,
                     ui::rebuild_ui,
-                    ui::blink_text_caret,
+                    ui::sync_text_field_style,
                     drag_window,
                     scroll_gallery,
                     scroll_combine_list,
@@ -321,6 +309,12 @@ impl Plugin for AnimationManagerPlugin {
                 PostUpdate,
                 preview::frame_expression_heads.after(bevy::transform::TransformSystems::Propagate),
             )
+            .add_systems(
+                PostUpdate,
+                (sync_text_fields, handle_keyboard)
+                    .chain()
+                    .after(bevy::text::apply_text_edits),
+            )
             .add_systems(Last, preview::retire_model_previews);
     }
 }
@@ -330,6 +324,7 @@ fn open_window(
     mut state: ResMut<ManagerState>,
     mut gate: ResMut<AnimationManagerInputGate>,
     existing: Query<&Window, With<ManagerWindow>>,
+    primary: Query<Entity, With<PrimaryWindow>>,
     mut commands: Commands,
 ) {
     if open.read().next().is_none() {
@@ -349,6 +344,7 @@ fn open_window(
     state.menu_key = None;
     state.dialog = None;
     state.focus = TextFocus::None;
+    state.editor_snapshot = None;
     state.dirty = true;
     state.close_requested = false;
     state.return_to_menu = false;
@@ -367,6 +363,11 @@ fn open_window(
             manager_window_descriptor(),
         ))
         .id();
+    // The gallery runs in its own worker and creates no default window. Native
+    // Bevy text-input dispatch/IME need that worker's real window as primary.
+    if primary.is_empty() {
+        commands.entity(window).insert(PrimaryWindow);
+    }
     commands.spawn((
         Name::new("Nera Animation Manager Camera"),
         ManagerOwned,
@@ -405,11 +406,75 @@ fn manager_window_descriptor() -> Window {
     }
 }
 
+fn sync_text_fields(
+    focus: Res<InputFocus>,
+    fields: Query<(Entity, &ManagerTextField, &EditableText)>,
+    mut state: ResMut<ManagerState>,
+) {
+    for (entity, field, editor) in &fields {
+        let value = editor.value().to_string();
+        let target = match field.0 {
+            TextFocus::Search => &mut state.search,
+            TextFocus::Rename => &mut state.rename_value,
+            TextFocus::CombineName => &mut state.combine_name,
+            TextFocus::None => continue,
+        };
+        if *target != value {
+            *target = value;
+            if field.0 == TextFocus::Search {
+                state.scroll_y = 0.0;
+            }
+            state.dirty = true;
+        }
+        if focus.get() == Some(entity) && state.focus != field.0 {
+            state.focus = field.0;
+        }
+    }
+}
+
+fn capture_text_editor(
+    fields: Query<(&ManagerTextField, &EditableText)>,
+    mut state: ResMut<ManagerState>,
+) {
+    if !state.dirty {
+        return;
+    }
+    for (field, editor) in &fields {
+        if state.focus == field.0 {
+            let value = match field.0 {
+                TextFocus::Search => &state.search,
+                TextFocus::Rename => &state.rename_value,
+                TextFocus::CombineName => &state.combine_name,
+                TextFocus::None => continue,
+            };
+            // Programmatic replacement (new rename/import/combine) must start
+            // a fresh editor instead of restoring a previous field's buffer.
+            if editor.value().to_string() == *value {
+                state.editor_snapshot = Some((field.0, editor.clone()));
+            }
+        }
+    }
+}
+
+fn clear_unfocused_text_focus(
+    windows: Query<&Window, With<ManagerWindow>>,
+    fields: Query<(), With<ManagerTextField>>,
+    mut focus: ResMut<InputFocus>,
+    mut state: ResMut<ManagerState>,
+) {
+    if focus.get().is_some_and(|entity| fields.contains(entity))
+        && (state.combine_job.is_some() || !windows.iter().any(|window| window.focused))
+    {
+        focus.clear();
+        state.focus = TextFocus::None;
+    }
+}
+
 fn handle_keyboard(
     mut keys: MessageReader<KeyboardInput>,
     windows: Query<Entity, With<ManagerWindow>>,
     mut state: ResMut<ManagerState>,
-    mut caret: ResMut<CaretBlink>,
+    mut input_focus: ResMut<InputFocus>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -424,6 +489,8 @@ fn handle_keyboard(
         }
         if event.logical_key == Key::Escape {
             state.focus = TextFocus::None;
+            state.editor_snapshot = None;
+            input_focus.clear();
             state.dialog = None;
             state.menu_key = None;
             state.dirty = true;
@@ -433,7 +500,6 @@ fn handle_keyboard(
         if focus == TextFocus::None {
             continue;
         }
-        caret.reset_visible();
         if event.logical_key == Key::Enter {
             if focus == TextFocus::Rename {
                 state.apply_rename();
@@ -441,24 +507,11 @@ fn handle_keyboard(
                 state.focus = TextFocus::None;
                 state.dirty = true;
             }
+            input_focus.clear();
             continue;
         }
-        let target = match focus {
-            TextFocus::Search => &mut state.search,
-            TextFocus::CombineName => &mut state.combine_name,
-            _ => &mut state.rename_value,
-        };
-        if event.logical_key == Key::Backspace {
-            target.pop();
-        } else if let Some(text) = &event.text {
-            if !text.chars().any(char::is_control) {
-                target.push_str(text);
-            }
-        }
-        if focus == TextFocus::Search {
-            state.scroll_y = 0.0;
-        }
-        state.dirty = true;
+        // EditableTextInputPlugin owns editing, grapheme-aware navigation,
+        // selection and pointer placement. Do not append/pop this String here.
     }
 }
 
@@ -552,6 +605,9 @@ impl ManagerState {
             Ok(_) => self.combine_job = Some(result),
             Err(error) => self.error = Some(error.to_string()),
         }
+        if self.combine_job.is_some() {
+            self.focus = TextFocus::None;
+        }
         self.dirty = true;
     }
 
@@ -613,7 +669,6 @@ fn poll_combine_result(mut state: ResMut<ManagerState>) {
 
 fn handle_actions(
     mut state: ResMut<ManagerState>,
-    mut caret: ResMut<CaretBlink>,
     mut actions: Query<(&Interaction, &ManagerAction, &mut BackgroundColor), Changed<Interaction>>,
     mut previews: ResMut<preview::PreviewRuntime>,
     mut commands: Commands,
@@ -765,11 +820,6 @@ fn handle_actions(
                 );
                 state.dirty = true;
             }
-            ManagerAction::Search => {
-                state.focus = TextFocus::Search;
-                caret.reset_visible();
-                state.dirty = true;
-            }
             ManagerAction::Import => {
                 let Some(owner) = windows.single().ok().and_then(UtilityWindow::native_handle)
                 else {
@@ -819,13 +869,8 @@ fn handle_actions(
                     .into_owned();
                 state.dialog = Some(Dialog::Rename(key.clone()));
                 state.focus = TextFocus::Rename;
-                caret.reset_visible();
+                state.editor_snapshot = None;
                 state.menu_key = None;
-                state.dirty = true;
-            }
-            ManagerAction::FocusRename => {
-                state.focus = TextFocus::Rename;
-                caret.reset_visible();
                 state.dirty = true;
             }
             ManagerAction::Delete(key) => {
@@ -895,11 +940,6 @@ fn handle_actions(
                 state.dialog = Some(Dialog::Combine);
                 state.focus = TextFocus::None;
                 state.menu_key = None;
-                state.dirty = true;
-            }
-            ManagerAction::FocusCombineName => {
-                state.focus = TextFocus::CombineName;
-                caret.reset_visible();
                 state.dirty = true;
             }
             ManagerAction::RemoveCombine(index) => {
@@ -1153,6 +1193,9 @@ fn cleanup_closed_window(
     mut previews: ResMut<preview::PreviewRuntime>,
     mut images: ResMut<Assets<Image>>,
     owned: Query<Entity, With<ManagerOwned>>,
+    fields: Query<Entity, With<ManagerTextField>>,
+    mut focus: ResMut<InputFocus>,
+    mut state: ResMut<ManagerState>,
     mut commands: Commands,
 ) {
     if !windows.is_empty() || (!gate.window_open && owned.is_empty() && previews.is_empty()) {
@@ -1161,6 +1204,11 @@ fn cleanup_closed_window(
     for entity in &owned {
         commands.entity(entity).despawn();
     }
+    if focus.get().is_some_and(|entity| fields.contains(entity)) {
+        focus.clear();
+    }
+    state.focus = TextFocus::None;
+    state.editor_snapshot = None;
     previews.clear(&mut commands, &mut images);
     gate.window_open = false;
     gate.pointer_over_window = false;
@@ -1280,7 +1328,7 @@ mod tests {
     fn action_test_app() -> App {
         let mut app = App::new();
         app.insert_resource(ManagerState::for_test())
-            .init_resource::<CaretBlink>()
+            .init_resource::<InputFocus>()
             .init_resource::<preview::PreviewRuntime>()
             .init_resource::<Assets<Image>>()
             .add_message::<crate::animation::PlayLibraryAnimation>()

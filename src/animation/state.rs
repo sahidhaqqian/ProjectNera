@@ -498,6 +498,11 @@ impl NeraAnimationState {
         info!("Nera reaction -> {:?} duration={:?}", action, duration);
     }
 
+    #[cfg(test)]
+    pub(crate) fn request_action_for_test(&mut self, action: TemporaryAction, duration: Duration) {
+        self.request_one_shot(action, duration);
+    }
+
     pub(super) fn reset_damage_combo(&mut self) {
         self.damage_hit_count = 0;
         self.damage_combo_remaining = None;

@@ -1139,6 +1139,7 @@ mod tests {
         let (send, receive) = mpsc::channel();
         let mut app = App::new();
         app.insert_resource(super::super::ManagerState::for_test())
+            .init_resource::<bevy::input_focus::InputFocus>()
             .insert_resource(Controls(Mutex::new(receive)))
             .init_resource::<super::super::preview::PreviewRuntime>()
             .init_resource::<Assets<Image>>()

@@ -79,7 +79,7 @@ src/
 
 - **Purpose:** Create the camera/light/VRM avatar and translate its live pose
   into gaze and desktop-support information.
-- **Owns:** `NeraAvatar`, `LookAtTarget`, `DeathVisualGrounding`, avatar spawning,
+- **Owns:** `NeraAvatar`, `LookAtTarget`, `AvatarVisualGrounding`, avatar spawning,
   gaze target updates, animation-aware gaze control, and skeleton projection.
 - **Reads/depends on:** Assets and VRM components; `NeraSettings` for scale/gaze;
   `NeraAnimationState`; `DesktopPetInteraction`; `DesktopPhysicsState`; and
@@ -237,8 +237,10 @@ actually active library clip entity, never a pending selection. `AutomaticFace`
 crossfades the outgoing and incoming detailed recipes over 180 ms, replacing
 aggregate facial emotions but preserving natural blink. Gallery clips use the
 same table; unknown custom clips keep their own facial animation. Headpat loads
-`animations/animasi_basic/ShakeHeadNo1.vrma` and independently selects Joy at 100%.
-HeadPat SFX/sparkles are event driven; Blush remains an embarrassed idle clip.
+`animations/animasi_basic/ShakeHeadNo1.vrma` through the existing controller.
+Headpat selects Timid at 100% and emits three short-lived `PetFxKind::Heart`
+particles plus the existing HeadPat SFX through the semantic feedback bridge.
+Blush remains an embarrassed idle clip.
 A manual preview takes precedence and
 survives gallery animation playback; only a release action or closing its owner
 ends it. Preview rigs cache their last selection and resend it only when that
@@ -273,7 +275,11 @@ Character-card UI is paced at 15 FPS by the worker's existing Framepace plugin,
 not the desktop settings FPS owner. Browsing/selection creates zero VRM rigs/cameras.
 Import registers and highlights; only explicit Use Character emits Assign to runtime.
 `character/library/previews.rs` owns one serial background preparation job in the
-main process. Imports and existing entries acquire full idle caches without loading
+main process. Its native child-process wait runs on one named OS thread, with
+completion polled before joining. Bevy's single-threaded IoTaskPool must not own
+this blocking wait: it eagerly executes the future on the caller and would freeze
+the desktop event loop during cold character thumbnail generation. Imports and
+existing entries acquire full idle caches without loading
 rigs in the browsing worker. `animation_manager/generation.rs` uses the established
 renderer for one model in a hidden disposable worker, recording whole idle cycles
 covering at least 30 seconds. The supplied 9.9167-second idle records four cycles,
@@ -383,14 +389,25 @@ gesture. Limb clicks reset the damage combo and never add damage.
 
 `alarm/sounds.rs` provides stable persisted sound IDs, source paths, and one-shot
 preview messages. `AlarmConfig.sound` is saved as an optional eleventh field in
-the existing `v1` alarm book; old ten-field entries load as Classic. Unknown IDs
-are normalized. `NeraSettings.alarm_sound` selects the quick-alarm default.
+the existing `v1` alarm book; old ten-field entries load as Classic. Sound IDs
+are now `u16`: built-ins retain IDs 0–4, imports use monotonically allocated IDs,
+and `u16::MAX` selects Random. `NeraSettings.alarm_sound` selects the quick-alarm default.
 `AlarmDisplayInfo.sound` travels with each queued reminder and snooze, so another
 alarm cannot replace its sound. Ringing uses one marked audio player and restarts
 completed sounds with at least a three-second start interval. Presentation exit
 still owns ringing teardown. Ogg/Vorbis and WAV decoders are enabled alongside
 MP3. The four new assets are CC0; source provenance and the upstream Kenney
 license are retained in `assets/sound/`.
+
+`alarm/sounds/library.rs` owns the content-addressed MP3/OGG/WAV catalog under
+the existing AppData namespace. It validates audio through the same Rodio
+decoder used by Bevy, caps imports at 32 files / 8 MiB / five minutes each,
+and caches at most two imported source handles. Random resolves once at trigger;
+ring repeats retain that exact handle. Missing/corrupt imports fall back quietly.
+Deleting an import clears persisted alarm references and editor drafts; built-ins
+are protected. Preview commands replace the single editor-owned player, and editor
+closure never despawns a ringing player. The radial Alarm entry opens this editor
+directly; the seven existing quick presets now live in its list view.
 
 ### `src/environment.rs` and `src/environment/` — desktop snapshot and attached placement
 
@@ -459,11 +476,13 @@ Entering attention deliberately resets active pointer capture and suspends the
 sitting animation/placement state. The saved placement and anchor are restored
 when attention exits.
 
-Attention measures animated upper-body joints with crown/headwear padding and
-fits perspective distance at their nearest depth, rather than assuming z=0.
-This avoids cutting off the head during forward JumpHappy motion while keeping
-the original locked center and monotonic zoom-out behavior. Desktop camera
-framing is unchanged. `--alarm-framing-audit` captures 3/9/29-second native
+Attention measures the neutral rest rig and arm reach once on entry, then uses
+one orthographic portrait projection and fixed camera through JumpHappy -> Wave.
+Authored depth movement cannot change apparent character size. Presentation
+snapshots/restores the exact camera projection and transform; it never changes
+the avatar's canonical scale. An initialized replacement rig is reframed once
+without replacing the original desktop snapshot; pose changes never reframe.
+`--alarm-framing-audit` captures 3/9/29-second native
 portraits and verifies presentation/utility cleanup after dismissal; see
 `ALARM_MEMORY_AUDIT.md` for measurements and remaining renderer retention.
 
@@ -512,6 +531,12 @@ Windows-only companion modules:
   files (16 MiB per file); cached clips remain usable and the UI explains that new
   selections require a restart when full. These limits do not measure resident RAM.
   Desktop animation state and clip ownership remain in `animation`.
+  Search, rename and combine-name editors use the reusable
+  `utility_window/text_input.rs` styling and Bevy's `EditableText`/`InputFocus`.
+  Bevy owns grapheme editing, caret, selection and mouse placement. `ManagerState`
+  owns committed strings and transfers one transient editor snapshot across UI
+  rebuilds. Navigation/selection alone do not rebuild the gallery. Closing,
+  blurring or locking an editor releases focus; raw desktop shortcuts respect it.
 
 ### `src/settings/` — persistent configuration and runtime application
 
@@ -876,6 +901,11 @@ requires a new ordering constraint.
 - Cloud seat-pose preservation runs after animation sampling/seated hips,
   before procedural limb offsets and VRM constraints. It is inactive without a
   cloud attachment; reactions cannot interrupt initial seat calibration.
+- `AvatarVisualGrounding` restores its temporary root Y in PreUpdate and applies
+  grounded foot/body contact after VRM constraint propagation, before gaze.
+  The subsequent VRM propagation renders the correction in the same frame.
+  Grounded clips reuse the rigid support anchor; seated, cloud, falling, jumping,
+  Attention, and unclassified imported clips retain their own placement/motion.
 - Interaction logging is a debug consumer in `PostUpdate`; it does not own state.
 
 ### `Last`
@@ -912,12 +942,22 @@ Drag still moves the same HWND through `interaction.rs`. At Pressed -> Dragging,
 Rest immediately releases attachment and starts the visual disappearance. Ride
 stays attached: Last reads the dragged seat point and updates the logical mount
 position. Its release cannot launch throw momentum or acquire a native seat.
+Ride clamps its complete projected avatar/cloud bounds to the current native
+monitor work area, including fully appeared cloud size and both bob extremes.
+Dragging refreshes the existing monitor fact after the HWND move so crossing
+monitors does not reuse the prior taskbar geometry. Oversized custom mounts
+are centered to maximize usable visibility when fitting is impossible.
 While either cloud owns placement, physics cancels stale freefall/throws and
 does not search for support; behavior cancels roaming/fidgets. Normal support
 animation sync yields to the cloud-selected base pose. Seat/hips sampling and
 shadow visibility recognize the cloud owner. `CloudRuntime::rest_pose()` owns
 the two Rest variations: Lying and Seated. New Rest attachments alternate without
 repeating; repeated summons and elapsed time never change an active selection.
+Rest also suppresses both LookAt and BodyTracking directly from CloudRuntime's
+active attachment, including loading/fallback poses. The existing gaze owner
+restores current user preferences as soon as that attachment ends; no saved
+second gaze toggle survives dismissal, drag, interruption, or replacement.
+
 The selected pose is not another placement owner. Lying Rest lazily retargets the promoted
 `animasi_basic/Sleeping_Idle.vrma`, selects it as the base looping clip without
 adding it to random taskbar/window sitting choices, and falls back to Sitting4
@@ -991,7 +1031,7 @@ Cooldowns are fixed-size arrays; DESPAWN playback and a five-second safety expir
 bound voice entities. Audio features/dependencies are unchanged.
 
 Particles are unlit, shadow-free shared meshes with desktop-space motion, not
-emitters or a general simulation. Three headpat sparkles, four landing/cloud
+emitters or a general simulation. Three headpat hearts, four landing/cloud
 puffs, one anger mark, or one Z are debounced at 250 ms, share a hard 32-entity
 budget, shrink during 0.75-1.8 second real-time lifetimes, and despawn on expiry,
 hide, Attention, or character replacement. No filesystem polling or per-frame

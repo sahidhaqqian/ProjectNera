@@ -32,6 +32,12 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # Already transitive through Bevy; stable streamed character fingerprints.
 blake3 = "1"
+# Use Bevy's existing decoder to reject invalid alarm imports before playback.
+rodio = { version = "0.22.2", default-features = false }
+
+[dev-dependencies]
+# The native editor already uses this crate; initialize its headless test buffer.
+bevy_clipboard = { version = "0.19", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6.2"

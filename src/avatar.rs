@@ -2,8 +2,13 @@
 //! Scheduling remains in main so cross-subsystem ordering stays explicit.
 mod anchors;
 
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) use anchors::assert_smoke_ground_contact;
 pub(crate) use anchors::seat_contact_world;
-pub(crate) use anchors::{DeathVisualGrounding, preserve_seated_hips, update_avatar_anchors};
+pub(crate) use anchors::{
+    AvatarVisualGrounding, preserve_grounded_pose, preserve_seated_hips, restore_visual_grounding,
+    update_avatar_anchors,
+};
 
 use crate::{
     animation::{NeraAnimationState, spawn_animation_library},
@@ -109,6 +114,7 @@ pub(crate) fn update_look_at_target(
     time: Res<Time>,
     settings: Res<NeraSettings>,
     character: Res<ActiveCharacter>,
+    cloud: Res<crate::cloud::CloudRuntime>,
     environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
@@ -125,7 +131,7 @@ pub(crate) fn update_look_at_target(
     // eases the target back here instead of snapping the gaze in one frame.
     let neutral = Vec3::new(0.0, 0.5, 2.0);
 
-    let desired = if settings.follow_mouse {
+    let desired = if settings.follow_mouse && cloud.mode() != Some(crate::cloud::CloudMode::Rest) {
         cursor_position_in_nera_window(&environment)
             .map(|cursor_pos| {
                 let intensity = f32::from(settings.follow_intensity.clamp(25, 100)) / 100.0;
@@ -164,6 +170,7 @@ fn horizontal_gaze_x(cursor_x: f32, window_width: f32, intensity: f32, legacy: b
 pub(crate) fn sync_look_at_for_animation(
     animation: Res<NeraAnimationState>,
     settings: Res<NeraSettings>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     target_query: Query<Entity, With<LookAtTarget>>,
     avatar_query: Query<(Entity, Option<&LookAt>, Option<&BodyTracking>), With<NeraAvatar>>,
     mut commands: Commands,
@@ -179,7 +186,10 @@ pub(crate) fn sync_look_at_for_animation(
     // The master Follow Mouse switch changes the target between cursor and
     // neutral. Keep LookAt attached (when Eyes is enabled) so switching the
     // master off can visibly ease back to neutral instead of freezing mid-gaze.
-    let allow_look_at = settings.follow_eyes && !animation.suppresses_look_at();
+    // Rest owns the entire head pose, including its loading/fallback seated loop.
+    // Derive suppression from the attachment owner; user preferences remain intact.
+    let resting = cloud.is_some_and(|cloud| cloud.mode() == Some(crate::cloud::CloudMode::Rest));
+    let allow_look_at = settings.follow_eyes && !animation.suppresses_look_at() && !resting;
     let allow_body_tracking = allow_look_at && settings.follow_head;
 
     if allow_look_at {

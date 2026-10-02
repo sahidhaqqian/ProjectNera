@@ -40,7 +40,7 @@ use animation::{
     sync_interaction_animation_actions, tick_animation_actions,
 };
 use avatar::{
-    DeathVisualGrounding, setup_camera, setup_lighting, spawn_nera, sync_look_at_for_animation,
+    AvatarVisualGrounding, setup_camera, setup_lighting, spawn_nera, sync_look_at_for_animation,
     update_avatar_anchors, update_look_at_target,
 };
 
@@ -237,7 +237,8 @@ fn main() {
         .init_resource::<walking::WalkingRuntime>()
         .init_resource::<pet_behavior::PetBehavior>()
         .init_resource::<startup_entrance::StartupEntrance>()
-        .init_resource::<DeathVisualGrounding>()
+        .init_resource::<AvatarVisualGrounding>()
+        .add_systems(PreUpdate, avatar::restore_visual_grounding)
         .add_systems(Startup, (setup_camera, setup_lighting, spawn_nera))
         .add_systems(
             Update,
@@ -282,6 +283,13 @@ fn main() {
                 .after(bevy::app::AnimationSystems)
                 .after(animation::smooth_walking_cycle)
                 .before(VrmSystemSets::Constraints),
+        )
+        .add_systems(
+            PostUpdate,
+            avatar::preserve_grounded_pose
+                .after(VrmSystemSets::PropagateAfterConstraints)
+                .after(bevy::camera::CameraUpdateSystems)
+                .before(VrmSystemSets::GazeControl),
         )
         .add_systems(
             PostUpdate,

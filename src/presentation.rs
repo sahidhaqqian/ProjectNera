@@ -20,11 +20,12 @@
 //! Ctrl+Alt+P is only a Phase-5.55 debug toggle and can be removed later.
 
 use bevy::{
+    camera::ScalingMode,
     prelude::*,
     window::{CursorOptions, PrimaryWindow, WindowLevel, WindowPosition},
 };
 
-use bevy_vrm1::prelude::VrmBone;
+use bevy_vrm1::prelude::{Initialized, RestGlobalTransform, VrmBone};
 
 use crate::{
     animation::NeraAnimationState,
@@ -79,6 +80,7 @@ struct PresentationSnapshot {
     window_level: WindowLevel,
     cursor_hit_test: bool,
     camera_transform: Transform,
+    camera_projection: Projection,
 
     // Desktop-pet world state is suspended during Attention and restored
     // exactly when the presentation closes.
@@ -95,17 +97,12 @@ pub(crate) struct PresentationState {
     /// 0..1 entrance animation progress for Attention Mode.
     attention_enter_progress: f32,
 
-    /// Film-camera style framing lock. Animation bones may move inside the
-    /// frame, but the camera does not chase Wave/Jump hand motion.
-    attention_locked_center: Option<Vec2>,
-
-    /// Once Attention starts, the transparent canvas never shrinks during the
-    /// same session. This avoids HWND resize jitter during looping animation.
-    attention_locked_window_width: u32,
-
-    /// Camera may back up if an extreme pose genuinely needs more room, but it
-    /// never zooms back in until Attention ends.
-    attention_peak_camera_z: f32,
+    /// One canonical portrait for the whole sequence; live clip bounds cannot
+    /// shrink the model or move its camera at a Jump -> Wave transition.
+    attention_layout: Option<AttentionLayout>,
+    /// Replacing an initialized rig may reframe once, without replacing the
+    /// normal-presentation snapshot or following its subsequent animated poses.
+    attention_avatar: Option<Entity>,
 }
 
 impl PresentationState {
@@ -173,7 +170,11 @@ impl Plugin for PresentationPlugin {
             .add_message::<PresentationExited>()
             .add_systems(
                 Update,
-                (debug_toggle_attention, handle_presentation_commands)
+                (
+                    debug_toggle_attention
+                        .run_if(crate::utility_window::text_input::keyboard_shortcuts_available),
+                    handle_presentation_commands,
+                )
                     .chain()
                     .before(crate::cloud::update_cloud)
                     .before(crate::startup_entrance::prepare_startup_entrance),
@@ -231,6 +232,22 @@ fn reset_pointer_state(
     head_pat.reset_stroke();
 }
 
+type PortraitAvatars<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Transform,
+        Option<&'static RestGlobalTransform>,
+        Has<Initialized>,
+        Has<crate::character::CharacterReveal>,
+    ),
+    (
+        With<crate::avatar::NeraAvatar>,
+        Without<crate::avatar::NeraMainCamera>,
+    ),
+>;
+
 fn handle_presentation_commands(
     mut requests: MessageReader<PresentationCommand>,
     mut entered: MessageWriter<PresentationEntered>,
@@ -242,8 +259,9 @@ fn handle_presentation_commands(
     mut hovered: ResMut<HoveredBodyPart>,
     mut head_pat: ResMut<HeadPatGesture>,
     mut window_query: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
-    mut camera_query: Query<(&Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
-    bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    mut camera_query: Query<(&mut Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
+    bone_query: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
+    avatar_query: PortraitAvatars,
 ) {
     for request in requests.read() {
         match *request {
@@ -259,7 +277,7 @@ fn handle_presentation_commands(
                     continue;
                 };
 
-                let Ok((projection, mut camera_transform)) = camera_query.single_mut() else {
+                let Ok((mut projection, mut camera_transform)) = camera_query.single_mut() else {
                     warn!("Presentation: Nera camera unavailable");
                     continue;
                 };
@@ -282,6 +300,7 @@ fn handle_presentation_commands(
                     window_level: window.window_level,
                     cursor_hit_test: cursor.hit_test,
                     camera_transform: camera_transform.clone(),
+                    camera_projection: projection.clone(),
                     placement: environment.placement,
                     attached_anchor: environment.attached_anchor,
                     hidden_for_target_suspend: environment.hidden_for_target_suspend,
@@ -306,33 +325,42 @@ fn handle_presentation_commands(
                 state.mode = PresentationMode::Attention(kind);
                 state.attention_enter_progress = 0.0;
 
-                let layout = compute_attention_layout(
+                let bounds = canonical_upper_body_bounds(&bone_query, &avatar_query);
+                let layout = compute_attention_layout_for_bounds(
                     monitor.bounds,
                     rect.width().max(1) as u32,
                     rect.height().max(1) as u32,
-                    projection,
-                    &bone_query,
+                    &projection,
+                    bounds,
                     None,
                 );
 
-                state.attention_locked_center = Some(Vec2::new(layout.camera_x, layout.camera_y));
-
-                // Preallocate a wide, stable transparent canvas for the whole
-                // alarm presentation. This removes repeated HWND resizes when
-                // Wave moves its hands left/right.
-                state.attention_locked_window_width = (monitor.bounds.width().max(1) as f32
+                let stable_width = (monitor.bounds.width().max(1) as f32
                     * ATTENTION_MAX_WINDOW_WIDTH_RATIO)
                     .round() as u32;
-
-                state.attention_locked_window_width =
-                    state.attention_locked_window_width.max(layout.window_width);
-
-                state.attention_peak_camera_z = layout.camera_z;
+                let layout = AttentionLayout {
+                    window_width: stable_width.max(layout.window_width),
+                    ..layout
+                };
+                // Parallel projection removes the scale change caused by
+                // different authored hips depths, without touching avatar scale.
+                *projection = Projection::Orthographic(OrthographicProjection {
+                    scaling_mode: ScalingMode::FixedVertical {
+                        viewport_height: layout.viewport_height,
+                    },
+                    ..OrthographicProjection::default_3d()
+                });
+                state.attention_layout = Some(layout);
+                state.attention_avatar = avatar_query.single().ok().and_then(
+                    |(entity, _, _, initialized, preparing)| {
+                        (initialized && !preparing).then_some(entity)
+                    },
+                );
 
                 apply_attention_window(
                     &mut window,
                     monitor.bounds,
-                    state.attention_locked_window_width,
+                    layout.window_width,
                     layout.window_height,
                     0.0,
                 );
@@ -342,7 +370,7 @@ fn handle_presentation_commands(
                     layout.camera_y,
                     layout.look_at_x,
                     layout.look_at_y,
-                    state.attention_peak_camera_z,
+                    layout.camera_z,
                 );
 
                 info!(
@@ -369,24 +397,23 @@ fn handle_presentation_commands(
                 let Some(snapshot) = state.snapshot.take() else {
                     warn!("Presentation: attention mode had no restore snapshot");
                     state.mode = PresentationMode::DesktopPet;
-                    state.attention_locked_center = None;
-                    state.attention_locked_window_width = 0;
-                    state.attention_peak_camera_z = 0.0;
+                    state.attention_layout = None;
+                    state.attention_avatar = None;
                     continue;
                 };
 
-                let Ok((mut window, mut cursor)) = window_query.single_mut() else {
+                if let Ok((mut window, mut cursor)) = window_query.single_mut() {
+                    restore_desktop_window(&mut window, &mut cursor, &snapshot);
+                } else {
                     warn!("Presentation: primary Nera window unavailable during restore");
-                    continue;
-                };
+                }
 
-                let Ok((_projection, mut camera_transform)) = camera_query.single_mut() else {
+                if let Ok((mut projection, mut camera_transform)) = camera_query.single_mut() {
+                    *camera_transform = snapshot.camera_transform;
+                    *projection = snapshot.camera_projection;
+                } else {
                     warn!("Presentation: Nera camera unavailable during restore");
-                    continue;
-                };
-
-                restore_desktop_window(&mut window, &mut cursor, &snapshot);
-                *camera_transform = snapshot.camera_transform;
+                }
 
                 // Restore the exact desktop attachment that existed before
                 // Attention. If it was sitting, return directly to SittingLoop
@@ -407,9 +434,8 @@ fn handle_presentation_commands(
 
                 state.mode = PresentationMode::DesktopPet;
                 state.attention_enter_progress = 0.0;
-                state.attention_locked_center = None;
-                state.attention_locked_window_width = 0;
-                state.attention_peak_camera_z = 0.0;
+                state.attention_layout = None;
+                state.attention_avatar = None;
 
                 info!(
                     "Presentation -> DesktopPet | restored={}x{} @ {},{}",
@@ -434,6 +460,7 @@ struct AttentionLayout {
     window_width: u32,
     window_height: u32,
     camera_z: f32,
+    viewport_height: f32,
     camera_x: f32,
     camera_y: f32,
     look_at_x: f32,
@@ -584,6 +611,64 @@ fn upper_body_world_metrics<'a>(
     })
 }
 
+/// The rest rig supplies a canonical portrait even when Attention interrupts
+/// sitting, a hit, or a crouched frame. Extend the measured shoulder/arm chains
+/// to their upward reach so a raised hand never asks for a new camera scale.
+fn canonical_upper_body_bounds(
+    bones: &Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
+    avatar: &PortraitAvatars,
+) -> UpperBodyBounds {
+    let rest_to_world = avatar.single().ok().map(|(_, root, rest, _, _)| {
+        root.compute_affine()
+            * rest.map_or(bevy::math::Affine3A::IDENTITY, |rest| {
+                rest.0.affine().inverse()
+            })
+    });
+    let positions: Vec<_> = bones
+        .iter()
+        .map(|(bone, rest)| {
+            let point = rest_to_world.map_or(rest.0.translation(), |mapping| {
+                mapping.transform_point3(rest.0.translation())
+            });
+            (bone.clone(), GlobalTransform::from_translation(point))
+        })
+        .collect();
+    let mut bounds = upper_body_world_metrics(positions.iter().map(|(b, t)| (b, t))).unwrap_or(
+        UpperBodyBounds {
+            min_x: -0.45,
+            max_x: 0.45,
+            bottom_y: 0.55,
+            top_y: 1.55,
+            front_z: 0.0,
+        },
+    );
+    let point = |name: &str| {
+        positions
+            .iter()
+            .find_map(|(bone, transform)| (bone.as_str() == name).then(|| transform.translation()))
+    };
+    let torso_span = point("head")
+        .zip(point("hips"))
+        .map_or(MIN_UPPER_BODY_WORLD_HEIGHT, |(h, p)| (h.y - p.y).abs())
+        .max(MIN_UPPER_BODY_WORLD_HEIGHT);
+    for chain in [
+        ["leftUpperArm", "leftLowerArm", "leftHand"],
+        ["rightUpperArm", "rightLowerArm", "rightHand"],
+    ] {
+        if let (Some(upper), Some(lower), Some(hand)) =
+            (point(chain[0]), point(chain[1]), point(chain[2]))
+        {
+            let reach = upper.distance(lower) + lower.distance(hand);
+            bounds.top_y = bounds
+                .top_y
+                .max(upper.y + reach + torso_span * UPPER_BODY_TOP_MARGIN_RATIO);
+            bounds.min_x = bounds.min_x.min(upper.x - reach);
+            bounds.max_x = bounds.max_x.max(upper.x + reach);
+        }
+    }
+    bounds
+}
+
 /// Perspective camera distance for a target portrait height:
 ///
 /// projected_fraction
@@ -594,12 +679,38 @@ fn upper_body_world_metrics<'a>(
 /// distance
 ///     = world_height
 ///       / (2 * projected_fraction * tan(fov_y / 2))
+#[cfg(test)]
 fn compute_attention_layout(
     monitor_bounds: crate::platform::PhysicalRect,
     original_width: u32,
     original_height: u32,
     projection: &Projection,
     bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    locked_center: Option<Vec2>,
+) -> AttentionLayout {
+    let bounds = upper_body_world_metrics(bone_query).unwrap_or(UpperBodyBounds {
+        min_x: -0.45,
+        max_x: 0.45,
+        bottom_y: 0.55,
+        top_y: 1.55,
+        front_z: 0.0,
+    });
+    compute_attention_layout_for_bounds(
+        monitor_bounds,
+        original_width,
+        original_height,
+        projection,
+        bounds,
+        locked_center,
+    )
+}
+
+fn compute_attention_layout_for_bounds(
+    monitor_bounds: crate::platform::PhysicalRect,
+    original_width: u32,
+    original_height: u32,
+    projection: &Projection,
+    bounds: UpperBodyBounds,
     locked_center: Option<Vec2>,
 ) -> AttentionLayout {
     let monitor_width = monitor_bounds.width().max(1) as f32;
@@ -621,14 +732,6 @@ fn compute_attention_layout(
     let window_width = (window_height as f32 * original_aspect)
         .round()
         .clamp(minimum_window_width, monitor_width) as u32;
-
-    let bounds = upper_body_world_metrics(bone_query).unwrap_or(UpperBodyBounds {
-        min_x: -0.45,
-        max_x: 0.45,
-        bottom_y: 0.55,
-        top_y: 1.55,
-        front_z: 0.0,
-    });
 
     let vertical_fov = match projection {
         Projection::Perspective(perspective) => perspective.fov,
@@ -693,6 +796,10 @@ fn compute_attention_layout(
         window_width: widened_window_width,
         window_height,
         camera_z,
+        viewport_height: (2.0 * vertical_half_extent / ATTENTION_UPPER_BODY_VIEW_FRACTION).max(
+            2.0 * horizontal_half_extent
+                / (ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION * final_aspect),
+        ),
         camera_x: center.x,
         camera_y: center.y,
         look_at_x: center.x,
@@ -775,8 +882,9 @@ fn maintain_attention_presentation(
     mut state: ResMut<PresentationState>,
     environment: Res<DesktopEnvironment>,
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
-    mut camera_query: Query<(&Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
-    bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    mut camera_query: Query<(&mut Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
+    bone_query: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
+    avatar_query: PortraitAvatars,
 ) {
     if !state.is_attention() {
         return;
@@ -786,12 +894,49 @@ fn maintain_attention_presentation(
         return;
     };
 
-    let Some(snapshot) = state.snapshot.as_ref() else {
+    if let Ok((entity, _, _, true, false)) = avatar_query.single()
+        && state.attention_avatar != Some(entity)
+        && let Some(snapshot) = state.snapshot.as_ref()
+    {
+        let bounds = canonical_upper_body_bounds(&bone_query, &avatar_query);
+        let layout = compute_attention_layout_for_bounds(
+            monitor.bounds,
+            snapshot.window_width,
+            snapshot.window_height,
+            &snapshot.camera_projection,
+            bounds,
+            None,
+        );
+        let layout = AttentionLayout {
+            window_width: layout.window_width.max(
+                (monitor.bounds.width().max(1) as f32 * ATTENTION_MAX_WINDOW_WIDTH_RATIO).round()
+                    as u32,
+            ),
+            ..layout
+        };
+        if let Ok((mut projection, mut camera)) = camera_query.single_mut() {
+            *projection = Projection::Orthographic(OrthographicProjection {
+                scaling_mode: ScalingMode::FixedVertical {
+                    viewport_height: layout.viewport_height,
+                },
+                ..OrthographicProjection::default_3d()
+            });
+            apply_attention_camera(
+                &mut camera,
+                layout.camera_x,
+                layout.camera_y,
+                layout.look_at_x,
+                layout.look_at_y,
+                layout.camera_z,
+            );
+            state.attention_layout = Some(layout);
+            state.attention_avatar = Some(entity);
+        }
+    }
+
+    let Some(layout) = state.attention_layout else {
         return;
     };
-
-    let original_width = snapshot.window_width;
-    let original_height = snapshot.window_height;
 
     state.attention_enter_progress = (state.attention_enter_progress
         + time.delta_secs() / ATTENTION_ENTER_SECONDS)
@@ -799,48 +944,15 @@ fn maintain_attention_presentation(
 
     let enter_progress = state.attention_enter_progress;
 
-    let Ok((projection, mut camera_transform)) = camera_query.single_mut() else {
-        return;
-    };
-
-    let layout = compute_attention_layout(
-        monitor.bounds,
-        original_width,
-        original_height,
-        projection,
-        &bone_query,
-        state.attention_locked_center,
-    );
-
-    // Never shrink the attention canvas or zoom back in during the same
-    // presentation. Animation loops therefore cannot create resize/zoom
-    // oscillation.
-    state.attention_locked_window_width =
-        state.attention_locked_window_width.max(layout.window_width);
-
-    state.attention_peak_camera_z = state.attention_peak_camera_z.max(layout.camera_z);
-
-    let stable_width = state.attention_locked_window_width;
-    let stable_camera_z = state.attention_peak_camera_z;
-
     if let Ok(mut window) = window_query.single_mut() {
         apply_attention_window(
             &mut window,
             monitor.bounds,
-            stable_width,
+            layout.window_width,
             layout.window_height,
             enter_progress,
         );
     }
-
-    apply_attention_camera(
-        &mut camera_transform,
-        layout.camera_x,
-        layout.camera_y,
-        layout.look_at_x,
-        layout.look_at_y,
-        stable_camera_z,
-    );
 }
 
 // -----------------------------------------------------------------------------
@@ -865,6 +977,319 @@ pub(crate) fn desktop_pet_active(state: Res<PresentationState>) -> bool {
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    fn presentation_app() -> (
+        App,
+        Entity,
+        Entity,
+        Entity,
+        Transform,
+        PerspectiveProjection,
+    ) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<PresentationState>()
+            .init_resource::<NeraAnimationState>()
+            .init_resource::<DesktopPetInteraction>()
+            .init_resource::<HoveredBodyPart>()
+            .init_resource::<HeadPatGesture>()
+            .add_message::<PresentationCommand>()
+            .add_message::<PresentationEntered>()
+            .add_message::<PresentationExited>()
+            .add_systems(Update, handle_presentation_commands)
+            .add_systems(Last, maintain_attention_presentation);
+        let rect = crate::platform::PhysicalRect {
+            left: 40,
+            top: 60,
+            right: 640,
+            bottom: 1010,
+        };
+        let monitor = crate::platform::PhysicalRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        app.insert_resource(DesktopEnvironment {
+            nera_rect: Some(rect),
+            monitor: Some(crate::platform::MonitorInfo {
+                handle: crate::platform::NativeMonitorHandle::from_raw(1),
+                bounds: monitor,
+                work_area: monitor,
+                is_primary: true,
+            }),
+            ..default()
+        });
+        let mut window = Window::default();
+        window.resolution.set_physical_resolution(600, 950);
+        let window = app
+            .world_mut()
+            .spawn((
+                PrimaryWindow,
+                window,
+                CursorOptions {
+                    hit_test: false,
+                    ..default()
+                },
+            ))
+            .id();
+        let camera_transform = Transform::from_xyz(0.03, 0.8, 4.5);
+        let perspective = PerspectiveProjection {
+            fov: 0.7,
+            near: 0.05,
+            far: 75.0,
+            ..default()
+        };
+        let camera = app
+            .world_mut()
+            .spawn((
+                crate::avatar::NeraMainCamera,
+                camera_transform,
+                Projection::Perspective(perspective.clone()),
+            ))
+            .id();
+        let root = Transform::from_xyz(0.0, -0.85, 0.0).with_scale(Vec3::splat(1.2));
+        let avatar = app
+            .world_mut()
+            .spawn((
+                crate::avatar::NeraAvatar,
+                Initialized,
+                root,
+                RestGlobalTransform(GlobalTransform::from(root)),
+            ))
+            .id();
+        for (name, position) in [
+            ("hips", Vec3::new(0.0, 0.0, 0.0)),
+            ("head", Vec3::new(0.0, 0.45, 0.0)),
+            ("leftUpperArm", Vec3::new(-0.15, 0.35, 0.0)),
+            ("leftLowerArm", Vec3::new(-0.4, 0.35, 0.0)),
+            ("leftHand", Vec3::new(-0.65, 0.35, 0.0)),
+        ] {
+            let pose = GlobalTransform::from_translation(position);
+            app.world_mut().spawn((
+                VrmBone::from(name),
+                pose,
+                RestGlobalTransform(pose),
+                NeraLiveBone,
+            ));
+        }
+        (app, window, camera, avatar, camera_transform, perspective)
+    }
+
+    #[test]
+    fn alarm_sequence_keeps_one_projection_and_camera_then_restores_exact_desktop_state() {
+        let (mut app, window, camera, avatar, original_camera, original_projection) =
+            presentation_app();
+        let root = *app.world().get::<Transform>(avatar).unwrap();
+        app.world_mut()
+            .write_message(PresentationCommand::EnterAttention(AttentionKind::Alarm));
+        app.update();
+        let canonical_camera = *app.world().get::<Transform>(camera).unwrap();
+        let canonical_height = match app.world().get::<Projection>(camera).unwrap() {
+            Projection::Orthographic(orthographic) => match orthographic.scaling_mode {
+                ScalingMode::FixedVertical { viewport_height } => viewport_height,
+                _ => panic!("Expected a canonical portrait projection"),
+            },
+            _ => panic!("Attention must ignore animated depth for apparent scale"),
+        };
+        for (action, offset) in [
+            (
+                crate::animation::TemporaryAction::AlarmJump,
+                Vec3::new(0.1, 0.3, 0.8),
+            ),
+            (
+                crate::animation::TemporaryAction::AlarmWave,
+                Vec3::new(-0.2, 0.8, -0.3),
+            ),
+        ] {
+            app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .request_action_for_test(action, std::time::Duration::from_secs(5));
+            for mut pose in app
+                .world_mut()
+                .query_filtered::<&mut GlobalTransform, With<NeraLiveBone>>()
+                .iter_mut(app.world_mut())
+            {
+                *pose = GlobalTransform::from_translation(pose.translation() + offset);
+            }
+            // A repeated Enter must retain the first normal-state snapshot.
+            app.world_mut()
+                .write_message(PresentationCommand::EnterAttention(AttentionKind::Alarm));
+            app.update();
+            assert_eq!(
+                *app.world().get::<Transform>(camera).unwrap(),
+                canonical_camera
+            );
+            let Projection::Orthographic(orthographic) =
+                app.world().get::<Projection>(camera).unwrap()
+            else {
+                panic!()
+            };
+            assert!(
+                matches!(orthographic.scaling_mode, ScalingMode::FixedVertical { viewport_height } if viewport_height == canonical_height)
+            );
+            assert_eq!(*app.world().get::<Transform>(avatar).unwrap(), root);
+        }
+        app.world_mut()
+            .write_message(PresentationCommand::ExitAttention);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Transform>(camera).unwrap(),
+            original_camera
+        );
+        let Projection::Perspective(restored) = app.world().get::<Projection>(camera).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(restored.fov, original_projection.fov);
+        assert_eq!(restored.near, original_projection.near);
+        assert_eq!(restored.far, original_projection.far);
+        assert_eq!(*app.world().get::<Transform>(avatar).unwrap(), root);
+        let restored_window = app.world().get::<Window>(window).unwrap();
+        assert_eq!(
+            restored_window.position,
+            WindowPosition::At(IVec2::new(40, 60))
+        );
+        assert_eq!(restored_window.resolution.physical_width(), 600);
+        assert_eq!(restored_window.resolution.physical_height(), 950);
+        assert!(!app.world().get::<CursorOptions>(window).unwrap().hit_test);
+        assert!(app.world().resource::<PresentationState>().is_desktop_pet());
+        assert!(
+            app.world()
+                .resource::<PresentationState>()
+                .snapshot
+                .is_none()
+        );
+        assert!(
+            app.world()
+                .resource::<PresentationState>()
+                .attention_layout
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_camera_on_exit_still_releases_presentation_ownership() {
+        let (mut app, _, camera, _, _, _) = presentation_app();
+        app.world_mut()
+            .write_message(PresentationCommand::EnterAttention(AttentionKind::Alarm));
+        app.update();
+        app.world_mut().despawn(camera);
+        app.world_mut()
+            .write_message(PresentationCommand::ExitAttention);
+        app.update();
+        assert!(app.world().resource::<PresentationState>().is_desktop_pet());
+        assert!(
+            app.world()
+                .resource::<PresentationState>()
+                .snapshot
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<DesktopEnvironment>().placement,
+            PlacementState::Free
+        );
+    }
+
+    #[test]
+    fn replacement_reframes_once_for_the_new_rig_without_losing_the_normal_snapshot() {
+        let (mut app, _, camera, avatar, original_camera, original_projection) = presentation_app();
+        app.world_mut()
+            .write_message(PresentationCommand::EnterAttention(AttentionKind::Alarm));
+        app.update();
+        let original_height = app
+            .world()
+            .resource::<PresentationState>()
+            .attention_layout
+            .unwrap()
+            .viewport_height;
+        let root = *app.world().get::<Transform>(avatar).unwrap();
+        app.world_mut().despawn(avatar);
+        let old_bones: Vec<_> = app
+            .world_mut()
+            .query_filtered::<Entity, With<NeraLiveBone>>()
+            .iter(app.world())
+            .collect();
+        for entity in old_bones {
+            app.world_mut().despawn(entity);
+        }
+        let replacement = app
+            .world_mut()
+            .spawn((
+                crate::avatar::NeraAvatar,
+                root,
+                RestGlobalTransform(GlobalTransform::from(root)),
+            ))
+            .id();
+        for (name, point) in [
+            ("hips", Vec3::ZERO),
+            ("head", Vec3::new(0.0, 0.9, 0.0)),
+            ("leftUpperArm", Vec3::new(-0.3, 0.7, 0.0)),
+            ("leftLowerArm", Vec3::new(-0.8, 0.7, 0.0)),
+            ("leftHand", Vec3::new(-1.3, 0.7, 0.0)),
+        ] {
+            let pose = GlobalTransform::from_translation(point);
+            app.world_mut().spawn((
+                VrmBone::from(name),
+                NeraLiveBone,
+                pose,
+                RestGlobalTransform(pose),
+            ));
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<PresentationState>()
+                .attention_layout
+                .unwrap()
+                .viewport_height,
+            original_height
+        );
+        app.world_mut().entity_mut(replacement).insert(Initialized);
+        app.update();
+        let state = app.world().resource::<PresentationState>();
+        assert_eq!(state.attention_avatar, Some(replacement));
+        let new_height = state.attention_layout.unwrap().viewport_height;
+        assert!((new_height - original_height * 2.0).abs() < 0.001);
+        let new_camera = *app.world().get::<Transform>(camera).unwrap();
+        for mut bone in app
+            .world_mut()
+            .query_filtered::<&mut GlobalTransform, With<NeraLiveBone>>()
+            .iter_mut(app.world_mut())
+        {
+            *bone = GlobalTransform::from_translation(bone.translation() + Vec3::Y);
+        }
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<PresentationState>()
+                .attention_layout
+                .unwrap()
+                .viewport_height,
+            new_height
+        );
+        assert_eq!(*app.world().get::<Transform>(camera).unwrap(), new_camera);
+        app.world_mut()
+            .write_message(PresentationCommand::ExitAttention);
+        app.update();
+        assert_eq!(
+            *app.world().get::<Transform>(camera).unwrap(),
+            original_camera
+        );
+        let Projection::Perspective(restored) = app.world().get::<Projection>(camera).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(restored.fov, original_projection.fov);
+        assert_eq!(restored.near, original_projection.near);
+        assert_eq!(*app.world().get::<Transform>(replacement).unwrap(), root);
+        assert!(
+            app.world()
+                .resource::<PresentationState>()
+                .attention_avatar
+                .is_none()
+        );
+    }
 
     fn portrait_layout(offset: Vec3, raised_hand: bool, center: Option<Vec2>) -> AttentionLayout {
         let mut world = World::new();

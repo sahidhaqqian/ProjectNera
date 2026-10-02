@@ -50,7 +50,7 @@ pub(crate) struct AlarmDisplayInfo {
     pub(crate) label: String,
     pub(crate) hour: u8,
     pub(crate) minute: u8,
-    pub(crate) sound: u8,
+    pub(crate) sound: u16,
 }
 
 impl Default for AlarmDisplayInfo {
@@ -235,6 +235,7 @@ impl Plugin for AlarmPlugin {
         app.init_resource::<AlarmState>()
             .init_resource::<CustomAlarmRuntime>()
             .init_resource::<AlarmDisplayInfo>()
+            .init_resource::<sounds::AlarmSoundLibrary>()
             .add_message::<AlarmControlCommand>()
             .add_message::<sounds::PreviewAlarmSound>()
             .add_systems(Update, (sounds::preview_sound, repeat_alarm_sound))
@@ -245,7 +246,6 @@ impl Plugin for AlarmPlugin {
                     consume_alarm_menu_commands,
                     consume_alarm_control_commands,
                     tick_custom_alarm_schedule,
-                    abort_ringing_if_attention_never_started,
                 )
                     .chain(),
             )
@@ -253,14 +253,19 @@ impl Plugin for AlarmPlugin {
             // alarm must not reuse Attention while the old panel is closing.
             .add_systems(
                 PostUpdate,
-                (cleanup_after_presentation_exit, tick_alarm_deadline).chain(),
+                (
+                    cleanup_after_presentation_exit,
+                    abort_ringing_if_attention_never_started,
+                    tick_alarm_deadline,
+                )
+                    .chain(),
             );
     }
 }
 
 fn load_alarm_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(AlarmAssets {
-        sounds: std::array::from_fn(|index| asset_server.load(sounds::path(index as u8))),
+        sounds: std::array::from_fn(|index| asset_server.load(sounds::path(index as u16))),
     });
 
     info!("Nera alarm audio requested | {}", ALARM_SOUND_PATH,);
@@ -280,6 +285,15 @@ pub(crate) fn memory_audit_counts(world: &mut World) -> (usize, usize, usize) {
             .map(|(_, audio)| audio.bytes.len())
             .sum(),
     )
+}
+
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) fn memory_audit_ring_source(world: &mut World) -> Option<AssetId<AudioSource>> {
+    world
+        .query_filtered::<&AudioPlayer, With<AlarmAudioPlayback>>()
+        .iter(world)
+        .next()
+        .map(|player| player.0.id())
 }
 
 fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {
@@ -537,6 +551,8 @@ fn tick_custom_alarm_schedule() {}
 fn tick_alarm_deadline(
     mut commands: Commands,
     assets: Res<AlarmAssets>,
+    mut library: ResMut<sounds::AlarmSoundLibrary>,
+    mut audio: ResMut<Assets<AudioSource>>,
     mut state: ResMut<AlarmState>,
     mut presentation: MessageWriter<PresentationCommand>,
     mut animation: MessageWriter<AlarmAnimationCommand>,
@@ -583,12 +599,11 @@ fn tick_alarm_deadline(
         );
     }
 
+    let sound = library.resolve(display.sound, &assets.sounds, &mut audio);
     commands.spawn((
         Name::new("Nera Alarm Audio"),
         AlarmAudioPlayback,
-        AudioPlayer::new(
-            assets.sounds[usize::from(display.sound).min(assets.sounds.len() - 1)].clone(),
-        ),
+        AudioPlayer::new(sound),
         PlaybackSettings::ONCE,
         AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
     ));
@@ -605,21 +620,19 @@ fn tick_alarm_deadline(
 
 fn repeat_alarm_sound(
     mut commands: Commands,
-    assets: Res<AlarmAssets>,
     state: Res<AlarmState>,
-    display: Res<AlarmDisplayInfo>,
-    players: Query<(Entity, &AudioSink, &AlarmRepeatAfter), With<AlarmAudioPlayback>>,
+    players: Query<(Entity, &AudioSink, &AudioPlayer, &AlarmRepeatAfter), With<AlarmAudioPlayback>>,
 ) {
     if !state.is_ringing() {
         return;
     }
-    for (entity, sink, repeat) in &players {
+    for (entity, sink, player, repeat) in &players {
         if sink.empty() && Instant::now() >= repeat.0 {
             commands.entity(entity).despawn();
             commands.spawn((
                 AlarmAudioPlayback,
                 AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
-                AudioPlayer::new(assets.sounds[usize::from(display.sound).min(4)].clone()),
+                AudioPlayer::new(player.0.clone()),
                 PlaybackSettings::ONCE,
             ));
         }
@@ -897,6 +910,8 @@ mod tests {
     fn alarm_runtime_app() -> App {
         let mut app = App::new();
         app.init_resource::<AlarmState>()
+            .init_resource::<sounds::AlarmSoundLibrary>()
+            .init_resource::<Assets<AudioSource>>()
             .init_resource::<AlarmDisplayInfo>()
             .init_resource::<PresentationState>()
             .insert_resource(AlarmAssets {
@@ -909,7 +924,12 @@ mod tests {
             .add_systems(Update, consume_alarm_control_commands)
             .add_systems(
                 PostUpdate,
-                (cleanup_after_presentation_exit, tick_alarm_deadline).chain(),
+                (
+                    cleanup_after_presentation_exit,
+                    abort_ringing_if_attention_never_started,
+                    tick_alarm_deadline,
+                )
+                    .chain(),
             );
         #[cfg(target_os = "windows")]
         app.init_resource::<crate::alarm_dismiss::AlarmDismissRuntime>();

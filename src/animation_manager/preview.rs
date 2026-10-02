@@ -1638,6 +1638,8 @@ mod tests {
         app.init_resource::<Assets<Image>>()
             .init_resource::<PreviewRuntime>()
             .init_resource::<AnimationManagerInputGate>()
+            .init_resource::<bevy::input_focus::InputFocus>()
+            .insert_resource(ManagerState::for_test())
             .add_systems(PreUpdate, sync_manager_pointer_gate)
             .add_systems(Update, cleanup_closed_window);
         for _ in 0..3 {
@@ -1729,7 +1731,7 @@ mod tests {
             16,
         )))
         .init_resource::<PreviewRuntime>()
-        .init_resource::<super::super::CaretBlink>()
+        .init_resource::<bevy::input_focus::InputFocus>()
         .insert_resource(ManagerState::new())
         .add_systems(
             Update,

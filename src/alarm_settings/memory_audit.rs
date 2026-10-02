@@ -9,6 +9,8 @@ struct Audit {
     next: f64,
     screenshots: bool,
     framing_only: bool,
+    imported_sound: Option<u16>,
+    ring_source: Option<AssetId<bevy::audio::AudioSource>>,
 }
 
 pub(super) fn install(app: &mut App) {
@@ -176,6 +178,30 @@ fn advance(world: &mut World) {
                 if audit.screenshots && audit.cycle == 2 {
                     screenshot(world, "Nera Alarms", "nera-alarm-memory-date.png");
                 }
+                if audit.cycle == 0 {
+                    // This audit owns an isolated catalog; never import/delete
+                    // from a user's real alarm sound library.
+                    let directory = std::env::temp_dir().join(format!("nera-alarm-sound-audit-{}", std::process::id()));
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let original = crate::nera_asset_file("sound/digital.wav");
+                    let renamed = directory.join("alarm-copy.wav");
+                    std::fs::copy(&original, &renamed).unwrap();
+                    let mut library = AlarmSoundLibrary::load(directory.join("library"));
+                    let (id, _) = library.import(&original).unwrap();
+                    assert_eq!(library.import(&renamed).unwrap(), (id, true));
+                    assert_eq!(library.entries().len(), 1);
+                    assert!(!library.remove(crate::alarm::sounds::DEFAULT_SOUND).unwrap());
+                    world.insert_resource(library);
+                    audit.imported_sound = Some(id);
+                    action(world, AlarmSettingsAction::SelectSound(id));
+                    action(world, AlarmSettingsAction::Save);
+                    assert!(world.resource::<NeraSettings>().alarm_configs().iter().any(|alarm| alarm.sound == id));
+                    action(world, AlarmSettingsAction::OpenSoundLibrary);
+                    action(world, AlarmSettingsAction::PreviewSound(id));
+                    audit.phase = 20;
+                    audit.next = now + 1.0;
+                    return;
+                }
                 // Close while a long sound preview is still playing/loading.
                 world.write_message(crate::alarm::sounds::PreviewAlarmSound(0));
                 if audit.cycle == 1 {
@@ -221,6 +247,55 @@ fn advance(world: &mut World) {
                     audit.phase = 1;
                     audit.next = now + 3.0;
                 }
+            }
+            20 => {
+                assert_eq!(crate::alarm::memory_audit_counts(world).1, 1);
+                if audit.screenshots { screenshot(world, "Nera Alarms", "nera-alarm-sound-library.png"); }
+                action(world, AlarmSettingsAction::PreviewSound(0));
+                audit.phase = 21;
+                audit.next = now + 0.5;
+            }
+            21 => {
+                assert_eq!(crate::alarm::memory_audit_counts(world).1, 1);
+                action(world, AlarmSettingsAction::StopPreview);
+                audit.phase = 22;
+                audit.next = now + 0.5;
+            }
+            22 => {
+                assert_eq!(crate::alarm::memory_audit_counts(world).1, 0);
+                let id = audit.imported_sound.unwrap();
+                action(world, AlarmSettingsAction::DeleteSound(id));
+                assert!(world.resource::<NeraSettings>().alarm_configs().iter().all(|alarm| alarm.sound != id));
+                assert!(world.resource::<AlarmSoundLibrary>().entries().is_empty());
+                action(world, AlarmSettingsAction::SelectSound(crate::alarm::sounds::RANDOM_SOUND));
+                world.write_message(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TestNow));
+                audit.phase = 23;
+                audit.next = now + 3.0;
+            }
+            23 => {
+                assert_eq!(crate::alarm::memory_audit_counts(world).0, 1);
+                audit.ring_source = crate::alarm::memory_audit_ring_source(world);
+                assert!(audit.ring_source.is_some());
+                action(world, AlarmSettingsAction::PreviewSound(0));
+                audit.phase = 24;
+                audit.next = now + 1.0;
+            }
+            24 => {
+                let (ring, preview, _) = crate::alarm::memory_audit_counts(world);
+                assert_eq!((ring, preview), (1, 1));
+                assert_eq!(crate::alarm::memory_audit_ring_source(world), audit.ring_source);
+                action(world, AlarmSettingsAction::Close);
+                audit.phase = 25;
+                audit.next = now + 1.0;
+            }
+            25 => {
+                let (ring, preview, _) = crate::alarm::memory_audit_counts(world);
+                assert_eq!((ring, preview), (1, 0));
+                assert_eq!(crate::alarm::memory_audit_ring_source(world), audit.ring_source);
+                eprintln!("ALARM_SOUND_LIBRARY_AUDIT_PASS import_dedup_select_delete_random_preview_close_ring_isolation=true");
+                world.write_message(crate::presentation::PresentationCommand::ExitAttention);
+                audit.phase = 5;
+                audit.next = now + 6.0;
             }
             6 => {
                 capture_portrait(world, 9);

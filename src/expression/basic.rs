@@ -18,7 +18,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         "Floating.vrma" => (Face::Surprised, 0.7),
         "Falling_To_Landing.vrma" => (Face::Surprised, 0.5),
         "Hit_Chest.vrma" | "Angry_Gesture.vrma" => (Face::Angry, 0.9),
-        "ShakeHeadNo1.vrma" => (Face::Joy, 1.0),
+        "ShakeHeadNo1.vrma" => (Face::Timid, 1.0),
         "Death01.vrma" => (Face::Sad, 0.9),
         "Praying.vrma" => (Face::Timid, 0.4),
         "LookAround.vrma" => (Face::Surprised, 0.35),
@@ -111,7 +111,7 @@ mod tests {
     fn requested_pairs_and_unknown_clip_ownership() {
         assert_eq!(
             for_visual(VisualState::HeadStroke, None),
-            Some((Face::Joy, 1.0))
+            Some((Face::Timid, 1.0))
         );
         assert_eq!(
             for_visual(VisualState::IdleMicro(IdleMicroAction::Blush), None),

@@ -132,6 +132,56 @@ mod tests {
     }
 
     #[test]
+    fn gpu_only_upload_retains_compact_bounds_for_live_skinned_poses() {
+        use bevy::{
+            ecs::system::RunSystemOnce,
+            mesh::{
+                PrimitiveTopology, VertexAttributeValues,
+                skinning::{
+                    SkinnedMesh, SkinnedMeshInverseBindposes, entity_aabb_from_skinned_mesh_bounds,
+                },
+            },
+        };
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_JOINT_INDEX,
+            VertexAttributeValues::Uint16x4(vec![[0, 0, 0, 0]; 2]),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, vec![[1.0, 0.0, 0.0, 0.0]; 2]);
+        mesh.generate_skinned_mesh_bounds().unwrap();
+        let compact = mesh.skinned_mesh_bounds().unwrap().clone();
+        let _gpu_mesh = mesh.take_gpu_data().unwrap();
+        assert!(mesh.try_attribute(Mesh::ATTRIBUTE_POSITION).is_err());
+        assert_eq!(mesh.skinned_mesh_bounds(), Some(&compact));
+
+        // The retained metadata still projects the current bones, rather than
+        // the standing bind pose, after vertex data has left the main world.
+        let mut world = World::new();
+        let joint = world
+            .spawn(GlobalTransform::from_translation(Vec3::new(0.0, -3.0, 0.0)))
+            .id();
+        let skin = SkinnedMesh {
+            joints: vec![joint],
+            ..default()
+        };
+        let inverse = SkinnedMeshInverseBindposes::from(vec![Mat4::IDENTITY]);
+        let bounds = world
+            .run_system_once(move |joints: Query<&GlobalTransform>| {
+                entity_aabb_from_skinned_mesh_bounds(&joints, &mesh, &skin, &inverse, None).unwrap()
+            })
+            .unwrap();
+        assert_eq!(Vec3::from(bounds.min), Vec3::new(0.0, -4.0, 0.0));
+        assert_eq!(Vec3::from(bounds.max), Vec3::new(0.0, -2.0, 0.0));
+    }
+
+    #[test]
     #[ignore = "loads local VRM and initializes the native GPU"]
     fn avatar_geometry_survives_gpu_only_upload_and_respawn() {
         use bevy::{

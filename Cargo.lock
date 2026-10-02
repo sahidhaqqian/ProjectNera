@@ -3263,11 +3263,13 @@ name = "nera"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_clipboard",
  "bevy_framepace",
  "bevy_vrm1",
  "blake3",
  "image",
  "raw-window-handle",
+ "rodio",
  "serde",
  "serde_json",
  "windows 0.62.2",

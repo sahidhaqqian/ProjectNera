@@ -10,6 +10,7 @@ use bevy::{
 use crate::platform::{self, NativeWindowHandle};
 
 pub(crate) mod font_cache;
+pub(crate) mod text_input;
 
 #[derive(Component)]
 #[require(CursorIcon)]

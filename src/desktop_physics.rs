@@ -122,6 +122,11 @@ impl Default for DesktopPhysicsState {
 }
 
 impl DesktopPhysicsState {
+    /// Read the rigid contact plane without letting the visual pose recalibrate it.
+    pub(crate) fn support_anchor_logical(&self) -> Option<Vec2> {
+        self.support_anchor_logical
+    }
+
     pub(crate) fn begin_startup_drop(
         &mut self,
         environment: &mut DesktopEnvironment,

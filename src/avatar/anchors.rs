@@ -1,4 +1,4 @@
-//! Project the live avatar skeleton into desktop support anchors and ground Death poses.
+//! Project the live pose into desktop anchors and preserve its selected support plane.
 use std::time::Duration;
 
 use super::NeraAvatar;
@@ -38,20 +38,25 @@ const DEATH_MAX_ROOT_DROP_WORLD: f32 = 1.50;
 /// This can happen when Death is triggered while sitting/attached and the
 /// standing-feet cache has never been established for the current placement.
 const DEATH_FALLBACK_FLOOR_RATIO: f32 = 0.88;
-#[derive(Resource, Debug)]
-pub(crate) struct DeathVisualGrounding {
-    active: bool,
-    base_root_y: f32,
-    floor_y_logical: Option<f32>,
+#[derive(Resource, Debug, Default)]
+pub(crate) struct AvatarVisualGrounding {
+    owner: Option<Entity>,
+    death_floor_y_logical: Option<f32>,
+    /// A reversible pose correction, never a native placement or scale owner.
+    raw_root_y: Option<(Entity, f32)>,
+    support_geometry: Option<(Entity, f32, f32)>,
 }
 
-impl Default for DeathVisualGrounding {
-    fn default() -> Self {
-        Self {
-            active: false,
-            base_root_y: 0.0,
-            floor_y_logical: None,
-        }
+/// Restore before pose evaluation and character replacement. Otherwise the next
+/// sample (or replacement rig) would inherit yesterday's visual correction.
+pub(crate) fn restore_visual_grounding(
+    mut grounding: ResMut<AvatarVisualGrounding>,
+    mut avatars: Query<&mut Transform, With<NeraAvatar>>,
+) {
+    if let Some((entity, y)) = grounding.raw_root_y.take()
+        && let Ok(mut transform) = avatars.get_mut(entity)
+    {
+        transform.translation.y = y;
     }
 }
 
@@ -86,18 +91,9 @@ pub(crate) struct StandingAnchorSampling {
 
 impl StandingAnchorSampling {
     fn ready(&mut self, visual: VisualState, turning: bool, delta: Duration) -> bool {
-        if turning
-            || seated_fidget_or_dodge(visual)
-            || matches!(
-                visual,
-                VisualState::Walking
-                    | VisualState::SittingEnter
-                    | VisualState::SittingLoop
-                    | VisualState::SittingExit
-                    | VisualState::Death
-                    | VisualState::LibraryAnimation(_)
-            )
-        {
+        // Only settled neutral standing may calibrate collision geometry.
+        // Imported hips motion/reactions must not silently move the floor.
+        if turning || visual != VisualState::Idle {
             self.settle_remaining = STANDING_ANCHOR_SETTLE;
             return false;
         }
@@ -106,6 +102,179 @@ impl StandingAnchorSampling {
             .settle_remaining
             .saturating_sub(delta.min(Duration::from_millis(50)));
         self.settle_remaining.is_zero()
+    }
+}
+
+/// Solve the required root movement at the actual contact depth. A screen-space
+/// pixel/world ratio at the avatar origin is inaccurate for forward-moving VRMA
+/// hips and feet in a perspective camera.
+fn contact_y_correction(
+    camera: &Camera,
+    view: &GlobalTransform,
+    contact: Vec3,
+    target_y: f32,
+) -> Option<f32> {
+    let viewport = camera.world_to_viewport(view, contact).ok()?;
+    let ray = camera
+        .viewport_to_world(view, Vec2::new(viewport.x, target_y))
+        .ok()?;
+    if ray.direction.z.abs() < 0.0001 {
+        return None;
+    }
+    let distance = (contact.z - ray.origin.z) / ray.direction.z;
+    let correction = ray.get_point(distance).y - contact.y;
+    (distance.is_finite() && distance >= 0.0 && correction.is_finite()).then_some(correction)
+}
+
+/// Opt-in native smoke assertion: measure the fully propagated rendered pose,
+/// not the corrective root transform or an unevaluated test skeleton.
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) fn assert_smoke_ground_contact(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(
+            |physics: Res<desktop_physics::DesktopPhysicsState>,
+             environment: Res<DesktopEnvironment>,
+             settings: Res<NeraSettings>,
+             camera: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
+             bones: Query<(&VrmBone, &GlobalTransform), With<crate::interaction::NeraLiveBone>>| {
+                assert!(!physics.falling && physics.support.is_some());
+                let (camera, view) = camera.single().unwrap();
+                let foot_y = bones
+                    .iter()
+                    .filter(|(bone, _)| matches!(bone.as_str(), "leftFoot" | "rightFoot"))
+                    .filter_map(|(_, pose)| camera.world_to_viewport(view, pose.translation()).ok())
+                    .map(|point| point.y)
+                    .max_by(f32::total_cmp)
+                    .unwrap();
+                let anchor = physics
+                    .support_anchor_logical()
+                    .or(environment.feet_anchor_logical)
+                    .unwrap();
+                let target = anchor.y
+                    - FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale()
+                    - settings.ground_offset_logical();
+                assert!(
+                    (foot_y - target).abs() < 2.0,
+                    "rendered grounded foot escaped support: foot={foot_y} target={target}"
+                );
+            },
+        )
+        .unwrap();
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn preserve_grounded_pose(
+    animation: Res<NeraAnimationState>,
+    owners: AnchorOwners,
+    settings: Res<NeraSettings>,
+    physics: Res<desktop_physics::DesktopPhysicsState>,
+    environment: Res<DesktopEnvironment>,
+    interaction: Res<DesktopPetInteraction>,
+    presentation: Res<crate::presentation::PresentationState>,
+    mut grounding: ResMut<AvatarVisualGrounding>,
+    camera: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
+    mut avatars: Query<
+        (
+            Entity,
+            &mut Transform,
+            &HipsBoneEntity,
+            Has<crate::character::CharacterReveal>,
+        ),
+        With<NeraAvatar>,
+    >,
+    bones: Query<(&VrmBone, &GlobalTransform), With<crate::interaction::NeraLiveBone>>,
+) {
+    use crate::animation::{GroundingPolicy, grounding_policy};
+    let Ok((entity, mut root, hips, preparing_character)) = avatars.single_mut() else {
+        *grounding = AvatarVisualGrounding::default();
+        return;
+    };
+    if grounding.owner != Some(entity) {
+        *grounding = AvatarVisualGrounding {
+            owner: Some(entity),
+            ..default()
+        };
+    }
+    let visual = animation.visual_state();
+    let path = match visual {
+        VisualState::LibraryAnimation(clip) => {
+            owners.library.as_ref().and_then(|l| l.path_for(clip))
+        }
+        _ => None,
+    };
+    let policy = grounding_policy(visual, path);
+    if preparing_character
+        || presentation.is_attention()
+        || environment.placement != PlacementState::Free
+        || owners
+            .cloud
+            .as_ref()
+            .is_some_and(|cloud| cloud.owns_placement())
+        || interaction.state == InteractionState::Dragging
+        || interaction.drag_offset.is_some()
+        || physics.falling
+        || policy == GroundingPolicy::Authored
+        || (policy == GroundingPolicy::Grounded && animation.base_pose() != BasePose::Idle)
+    {
+        grounding.death_floor_y_logical = None;
+        return;
+    }
+    let Ok((camera, view)) = camera.single() else {
+        return;
+    };
+    let character_scale = settings.character_scale();
+    let target_y = if policy == GroundingPolicy::BodyContact {
+        if grounding.death_floor_y_logical.is_none() {
+            grounding.death_floor_y_logical = environment
+                .feet_anchor_logical
+                .map(|a| a.y)
+                .or_else(|| death_fallback_floor_y_logical(&environment));
+        }
+        let Some(floor) = grounding.death_floor_y_logical else {
+            return;
+        };
+        floor - DEATH_CONTACT_MARGIN_LOGICAL * character_scale
+    } else {
+        grounding.death_floor_y_logical = None;
+        // Resizing/replacing a rig must first calibrate neutral standing; it
+        // cannot reuse the previous character's scale/contact geometry.
+        if grounding.support_geometry != Some(support_anchor_geometry(&settings, hips.0)) {
+            return;
+        }
+        let Some(anchor) = physics
+            .support_anchor_logical()
+            .or(environment.feet_anchor_logical)
+        else {
+            return;
+        };
+        anchor.y - FOOT_SOLE_OFFSET_LOGICAL * character_scale - settings.ground_offset_logical()
+    };
+    let contact = bones
+        .iter()
+        .filter(|(bone, _)| {
+            policy == GroundingPolicy::BodyContact
+                || matches!(bone.as_str(), "leftFoot" | "rightFoot")
+        })
+        .filter_map(|(_, pose)| {
+            let world = pose.translation();
+            camera
+                .world_to_viewport(view, world)
+                .ok()
+                .map(|p| (p.y, world))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((_, contact)) = contact else { return };
+    let Some(mut correction) = contact_y_correction(camera, view, contact, target_y) else {
+        return;
+    };
+    if policy == GroundingPolicy::BodyContact {
+        // Preserve Death's existing downward-only bounded body contact policy.
+        correction = correction.clamp(-DEATH_MAX_ROOT_DROP_WORLD * character_scale.max(0.25), 0.0);
+    }
+    if correction.abs() > 0.0001 {
+        grounding.raw_root_y = Some((entity, root.translation.y));
+        root.translation.y += correction;
     }
 }
 
@@ -225,16 +394,13 @@ pub(crate) fn update_avatar_anchors(
     walking: Res<crate::walking::WalkingRuntime>,
     settings: Res<NeraSettings>,
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
-    mut grounding: ResMut<DeathVisualGrounding>,
+    mut grounding: ResMut<AvatarVisualGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
-    mut applied_support_geometry: Local<Option<(Entity, f32, f32)>>,
     mut standing_sample: Local<StandingAnchorSampling>,
     mut seat_sample: Local<SeatAnchorSampling>,
     camera_query: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
     mut avatar_query: Query<
         (
-            &mut Transform,
-            &GlobalTransform,
             Option<&HipsBoneEntity>,
             Has<crate::character::CharacterReveal>,
         ),
@@ -243,10 +409,7 @@ pub(crate) fn update_avatar_anchors(
     children_query: Query<&Children>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
-    let library = owners.library;
     let cloud = owners.cloud;
-    let death_pose = animation.death_active()
-        || matches!(animation.visual_state(), VisualState::LibraryAnimation(entity) if library.as_ref().and_then(|library| library.path_for(entity)).is_some_and(|path| path == "animations/animasi_basic/Death01.vrma"));
     let standing_sample_ready =
         standing_sample.ready(animation.visual_state(), walking.active(), time.delta());
     let seat_sample_ready = seat_sample.ready(
@@ -262,9 +425,7 @@ pub(crate) fn update_avatar_anchors(
         return;
     };
 
-    let Ok((mut avatar_transform, avatar_global, hips_bone_entity, preparing_character)) =
-        avatar_query.single_mut()
-    else {
+    let Ok((hips_bone_entity, preparing_character)) = avatar_query.single_mut() else {
         return;
     };
     // Preserve the previous contact points while a replacement rig is hidden
@@ -291,7 +452,6 @@ pub(crate) fn update_avatar_anchors(
         FOOT_SOLE_OFFSET_LOGICAL * character_scale + settings.ground_offset_logical();
 
     let mut feet = Vec::with_capacity(2);
-    let mut death_support_points = Vec::with_capacity(64);
     let mut seat = None;
 
     let mut bone_stack = vec![hips_bone_entity.0];
@@ -308,12 +468,6 @@ pub(crate) fn update_avatar_anchors(
         };
 
         let world = transform.translation();
-
-        if death_pose {
-            if let Ok(viewport) = camera.world_to_viewport(camera_transform, world) {
-                death_support_points.push(viewport);
-            }
-        }
 
         match bone.as_str() {
             "leftFoot" | "rightFoot" => {
@@ -371,98 +525,10 @@ pub(crate) fn update_avatar_anchors(
         // that refresh pending through loading, sitting and airborne poses,
         // then apply it once a standing sample can safely own the support.
         let geometry = support_anchor_geometry(&settings, hips_bone_entity.0);
-        if *applied_support_geometry != Some(geometry) && !physics.falling {
+        if grounding.support_geometry != Some(geometry) && !physics.falling {
             physics.refresh_support_anchor(environment.feet_anchor_logical);
-            *applied_support_geometry = Some(geometry);
+            grounding.support_geometry = Some(geometry);
         }
-    }
-
-    // ---------------------------------------------------------------------
-    // Death01 visual grounding
-    // ---------------------------------------------------------------------
-    //
-    // VRMA animates a 3D humanoid pose. The desktop/taskbar/window support is a
-    // 2D screen-space line. A normal VRM viewer owns a 3D floor plane, so a
-    // "lying down" clip naturally reads as grounded there; Project Nera has no
-    // such world floor. Keep the native HWND fixed and reconcile the mismatch
-    // inside the 3D scene by constraining Nera's live skeleton to the desktop
-    // floor. The VRMA still owns the pose; this only removes any vertical air
-    // gap that the desktop renderer would otherwise expose.
-    let death_active = death_pose;
-
-    if death_active
-        && environment.placement == PlacementState::Free
-        && interaction.state != InteractionState::Dragging
-        && interaction.drag_offset.is_none()
-    {
-        if !grounding.active {
-            grounding.active = true;
-            grounding.base_root_y = avatar_transform.translation.y;
-            grounding.floor_y_logical = environment
-                .feet_anchor_logical
-                .map(|anchor| anchor.y)
-                .or_else(|| death_fallback_floor_y_logical(&environment));
-        }
-
-        if let (Some(floor_y), Some(lowest_y)) = (
-            grounding.floor_y_logical,
-            death_support_points
-                .iter()
-                .map(|point| point.y)
-                .max_by(|a, b| a.total_cmp(b)),
-        ) {
-            // Death01 is authored in a normal 3D scene, while Project Nera's
-            // "floor" is a desktop-space 2D line. Do not ease toward contact:
-            // enforce contact immediately whenever the live animated skeleton
-            // is visibly above the floor.
-            //
-            // Viewport Y grows downward, so a positive gap means the body is
-            // hovering and the avatar root must move downward (-world Y).
-            let desired_lowest_y = floor_y - DEATH_CONTACT_MARGIN_LOGICAL * character_scale;
-
-            let missing_drop_px = desired_lowest_y - lowest_y;
-
-            if missing_drop_px > 0.5 {
-                let root_world = avatar_global.translation();
-
-                let pixels_per_world_y = camera
-                    .world_to_viewport(camera_transform, root_world)
-                    .ok()
-                    .zip(
-                        camera
-                            .world_to_viewport(camera_transform, root_world + Vec3::Y)
-                            .ok(),
-                    )
-                    .map(|(a, b)| (b.y - a.y).abs())
-                    .filter(|value| value.is_finite() && *value > 0.001);
-
-                if let Some(pixels_per_world_y) = pixels_per_world_y {
-                    let needed_world = missing_drop_px / pixels_per_world_y;
-                    let max_drop = DEATH_MAX_ROOT_DROP_WORLD * character_scale.max(0.25);
-
-                    let already_dropped =
-                        (grounding.base_root_y - avatar_transform.translation.y).max(0.0);
-
-                    let remaining_drop = (max_drop - already_dropped).max(0.0);
-
-                    // Hard floor constraint: consume the entire required
-                    // correction this frame instead of lerping/catching up.
-                    let correction = needed_world.min(remaining_drop);
-
-                    if correction > 0.0001 {
-                        avatar_transform.translation.y -= correction;
-                    }
-                }
-            }
-        }
-    } else if grounding.active {
-        // Restore the authored desktop-pet root as soon as Death01 releases
-        // ownership. The next VRMA transition then starts from the same root
-        // position as every normal animation.
-        avatar_transform.translation.y = grounding.base_root_y;
-
-        grounding.active = false;
-        grounding.floor_y_logical = None;
     }
 
     // Calibrate normal sitting/entry, but retain its support through seated
@@ -476,6 +542,141 @@ pub(crate) fn update_avatar_anchors(
 mod tests {
     use super::*;
     use crate::platform::PhysicalRect;
+    use bevy::{
+        camera::{CameraProjection, RenderTargetInfo},
+        ecs::system::RunSystemOnce,
+    };
+
+    fn grounding_world() -> (
+        World,
+        Entity,
+        Entity,
+        Entity,
+        Camera,
+        GlobalTransform,
+        Transform,
+    ) {
+        let mut world = World::new();
+        let mut projection = PerspectiveProjection::default();
+        projection.aspect_ratio = 600.0 / 950.0;
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::new(600, 950),
+            scale_factor: 1.0,
+        });
+        let view = GlobalTransform::from(Transform::from_xyz(0.0, 0.8, 4.5));
+        world.spawn((super::super::NeraMainCamera, camera.clone(), view));
+        let hips = world.spawn_empty().id();
+        let root = Transform {
+            translation: Vec3::new(0.0, -0.85, 0.0),
+            rotation: Quat::from_rotation_y(0.1),
+            scale: Vec3::splat(1.2),
+        };
+        let avatar = world.spawn((NeraAvatar, root, HipsBoneEntity(hips))).id();
+        let feet = world
+            .spawn((
+                crate::interaction::NeraLiveBone,
+                VrmBone::from("leftFoot"),
+                GlobalTransform::from_translation(Vec3::ZERO),
+            ))
+            .id();
+        let settings = NeraSettings::default();
+        let floor = camera.world_to_viewport(&view, Vec3::ZERO).unwrap().y
+            + FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale();
+        world.insert_resource(DesktopEnvironment {
+            feet_anchor_logical: Some(Vec2::new(300.0, floor)),
+            ..default()
+        });
+        world.insert_resource(AvatarVisualGrounding {
+            owner: Some(avatar),
+            support_geometry: Some(support_anchor_geometry(&settings, hips)),
+            ..default()
+        });
+        world.insert_resource(settings);
+        world.init_resource::<NeraAnimationState>();
+        world.init_resource::<desktop_physics::DesktopPhysicsState>();
+        world.init_resource::<DesktopPetInteraction>();
+        world.init_resource::<crate::presentation::PresentationState>();
+        (world, avatar, hips, feet, camera, view, root)
+    }
+
+    #[test]
+    fn grounded_pose_preserves_screen_support_at_the_animated_contact_depth_without_drift() {
+        let (mut world, avatar, _, feet, camera, view, raw) = grounding_world();
+        let target = world
+            .resource::<DesktopEnvironment>()
+            .feet_anchor_logical
+            .unwrap()
+            .y
+            - FOOT_SOLE_OFFSET_LOGICAL;
+        for depth in [-0.4, 0.0, 0.8].into_iter().cycle().take(90) {
+            let contact = Vec3::new(0.08, 0.35, depth);
+            *world.get_mut::<GlobalTransform>(feet).unwrap() =
+                GlobalTransform::from_translation(contact);
+            world.run_system_once(preserve_grounded_pose).unwrap();
+            let grounded = *world.get::<Transform>(avatar).unwrap();
+            let corrected = contact + Vec3::Y * (grounded.translation.y - raw.translation.y);
+            assert!((camera.world_to_viewport(&view, corrected).unwrap().y - target).abs() < 0.001);
+            assert_eq!(grounded.rotation, raw.rotation);
+            assert_eq!(grounded.scale, raw.scale);
+            world.run_system_once(restore_visual_grounding).unwrap();
+            assert_eq!(*world.get::<Transform>(avatar).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn airborne_falling_and_drag_do_not_take_standing_contact_ownership() {
+        use crate::animation::TemporaryAction;
+        for action in [
+            TemporaryAction::Floating,
+            TemporaryAction::Falling,
+            TemporaryAction::AlarmJump,
+        ] {
+            let (mut world, avatar, _, feet, _, _, raw) = grounding_world();
+            world
+                .resource_mut::<NeraAnimationState>()
+                .request_action_for_test(action, Duration::from_secs(2));
+            *world.get_mut::<GlobalTransform>(feet).unwrap() =
+                GlobalTransform::from_translation(Vec3::Y);
+            world.run_system_once(preserve_grounded_pose).unwrap();
+            assert_eq!(*world.get::<Transform>(avatar).unwrap(), raw);
+        }
+        for dragged in [false, true] {
+            let (mut world, avatar, _, feet, _, _, raw) = grounding_world();
+            if dragged {
+                world.resource_mut::<DesktopPetInteraction>().state = InteractionState::Dragging;
+            } else {
+                world
+                    .resource_mut::<desktop_physics::DesktopPhysicsState>()
+                    .falling = true;
+            }
+            *world.get_mut::<GlobalTransform>(feet).unwrap() =
+                GlobalTransform::from_translation(Vec3::Y);
+            world.run_system_once(preserve_grounded_pose).unwrap();
+            assert_eq!(*world.get::<Transform>(avatar).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn replacement_and_resizing_wait_for_fresh_neutral_geometry() {
+        let (mut world, avatar, hips, feet, _, _, raw) = grounding_world();
+        *world.get_mut::<GlobalTransform>(feet).unwrap() =
+            GlobalTransform::from_translation(Vec3::Y);
+        world.resource_mut::<NeraSettings>().character_size = 150;
+        world.run_system_once(preserve_grounded_pose).unwrap();
+        assert_eq!(*world.get::<Transform>(avatar).unwrap(), raw);
+        world.despawn(avatar);
+        let replacement = world.spawn((NeraAvatar, raw, HipsBoneEntity(hips))).id();
+        world.run_system_once(preserve_grounded_pose).unwrap();
+        assert_eq!(*world.get::<Transform>(replacement).unwrap(), raw);
+        assert!(
+            world
+                .resource::<AvatarVisualGrounding>()
+                .support_geometry
+                .is_none()
+        );
+    }
 
     #[test]
     fn standing_cache_waits_for_sitting_and_walking_blends_to_settle() {

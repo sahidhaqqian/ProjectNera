@@ -52,7 +52,7 @@ fn interaction_feedback(
         if headpat && cloud.mode() != Some(crate::cloud::CloudMode::Rest) {
             sfx.write(PetSfx(PetSfxKind::HeadPat));
             fx.write(PetFx {
-                kind: PetFxKind::HeadPatSparkle,
+                kind: PetFxKind::Heart,
                 anchor: PetFxAnchor::Head,
             });
         }
@@ -144,7 +144,7 @@ mod tests {
             .drain()
             .collect();
         assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0].kind, PetFxKind::HeadPatSparkle);
+        assert_eq!(effects[0].kind, PetFxKind::Heart);
         let sounds: Vec<_> = app
             .world_mut()
             .resource_mut::<Messages<PetSfx>>()

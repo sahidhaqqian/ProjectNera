@@ -133,11 +133,6 @@ fn rgb(value: (u8, u8, u8)) -> COLORREF {
 enum RadialPage {
     Root,
     Cloud,
-    Alarm,
-    /// Longer presets + "Test Now", reached from the Alarm page. Replaces the
-    /// old `Custom` slot, which was an enabled menu item that did nothing but
-    /// write a `warn!` to the log.
-    AlarmMore,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -180,7 +175,7 @@ const ROOT_ITEMS: [RadialItem; 5] = [
     RadialItem {
         glyph: "◷",
         label: "Alarm",
-        action: RadialItemAction::Open(RadialPage::Alarm),
+        action: RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings),
     },
     RadialItem {
         glyph: "◆",
@@ -218,93 +213,10 @@ const CLOUD_ITEMS: [RadialItem; 4] = [
     },
 ];
 
-const ALARM_ITEMS: [RadialItem; 6] = [
-    RadialItem {
-        glyph: "5",
-        label: "5 min",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
-            AlarmMenuChoice::FiveMinutes,
-        )),
-    },
-    RadialItem {
-        glyph: "10",
-        label: "10 min",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
-            AlarmMenuChoice::TenMinutes,
-        )),
-    },
-    RadialItem {
-        glyph: "30",
-        label: "30 min",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
-            AlarmMenuChoice::ThirtyMinutes,
-        )),
-    },
-    RadialItem {
-        glyph: "›",
-        label: "More",
-        action: RadialItemAction::Open(RadialPage::AlarmMore),
-    },
-    RadialItem {
-        glyph: "×",
-        label: "Cancel",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::Cancel)),
-    },
-    RadialItem {
-        glyph: "<",
-        label: "Back",
-        action: RadialItemAction::Back,
-    },
-];
-
-const ALARM_MORE_ITEMS: [RadialItem; 7] = [
-    RadialItem {
-        glyph: "15",
-        label: "15 min",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
-            AlarmMenuChoice::FifteenMinutes,
-        )),
-    },
-    RadialItem {
-        glyph: "45",
-        label: "45 min",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
-            AlarmMenuChoice::FortyFiveMinutes,
-        )),
-    },
-    RadialItem {
-        glyph: "1h",
-        label: "1 hour",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::OneHour)),
-    },
-    RadialItem {
-        glyph: "2h",
-        label: "2 hours",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TwoHours)),
-    },
-    RadialItem {
-        glyph: "⚙",
-        label: "Custom",
-        action: RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings),
-    },
-    RadialItem {
-        glyph: "!",
-        label: "Test Now",
-        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TestNow)),
-    },
-    RadialItem {
-        glyph: "<",
-        label: "Back",
-        action: RadialItemAction::Back,
-    },
-];
-
 fn items_for(page: RadialPage) -> &'static [RadialItem] {
     match page {
         RadialPage::Root => &ROOT_ITEMS,
         RadialPage::Cloud => &CLOUD_ITEMS,
-        RadialPage::Alarm => &ALARM_ITEMS,
-        RadialPage::AlarmMore => &ALARM_MORE_ITEMS,
     }
 }
 
@@ -318,8 +230,6 @@ fn parent_page(page: RadialPage) -> Option<RadialPage> {
     match page {
         RadialPage::Root => None,
         RadialPage::Cloud => Some(RadialPage::Root),
-        RadialPage::Alarm => Some(RadialPage::Root),
-        RadialPage::AlarmMore => Some(RadialPage::Alarm),
     }
 }
 
@@ -1168,8 +1078,8 @@ mod tests {
         ));
 
         assert!(matches!(
-            ALARM_ITEMS[1].action,
-            RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TenMinutes))
+            ROOT_ITEMS[3].action,
+            RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings)
         ));
     }
 
@@ -1179,12 +1089,7 @@ mod tests {
     /// parent — must not.
     #[test]
     fn every_sub_page_ends_with_a_back_item() {
-        for page in [
-            RadialPage::Root,
-            RadialPage::Cloud,
-            RadialPage::Alarm,
-            RadialPage::AlarmMore,
-        ] {
+        for page in [RadialPage::Root, RadialPage::Cloud] {
             let items = items_for(page);
             assert!(!items.is_empty(), "{page:?}");
 
@@ -1194,32 +1099,25 @@ mod tests {
         }
     }
 
-    /// `AlarmMore` is nested one level below `Alarm`, so going up must not dump
-    /// the user straight back to Root.
     #[test]
-    fn page_hierarchy_nests_alarm_more_under_alarm() {
-        assert_eq!(parent_page(RadialPage::Root), None);
-        assert_eq!(parent_page(RadialPage::Alarm), Some(RadialPage::Root));
-        assert_eq!(parent_page(RadialPage::AlarmMore), Some(RadialPage::Alarm));
-    }
-
-    /// Every alarm slot must perform a real action. `Custom` now opens the
-    /// Settings alarm editor instead of looking enabled and only logging a warn.
-    #[test]
-    fn custom_alarm_opens_the_dedicated_alarm_editor() {
+    fn alarm_has_one_direct_editor_entry_without_preset_pages() {
+        let alarm_entries: Vec<_> = ROOT_ITEMS
+            .iter()
+            .filter(|item| item.label == "Alarm")
+            .collect();
+        assert_eq!(alarm_entries.len(), 1);
         assert!(matches!(
-            ALARM_MORE_ITEMS[4].action,
+            alarm_entries[0].action,
             RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings)
         ));
-        assert_eq!(ALARM_MORE_ITEMS[4].label, "Custom");
-    }
-
-    #[test]
-    fn alarm_pages_have_no_dead_end_slots() {
-        for page in [RadialPage::Alarm, RadialPage::AlarmMore] {
-            for item in items_for(page) {
-                assert!(item.enabled(), "{page:?} -> {}", item.label);
-            }
-        }
+        assert!(
+            !ROOT_ITEMS
+                .iter()
+                .chain(CLOUD_ITEMS.iter())
+                .any(|item| matches!(
+                    item.action,
+                    RadialItemAction::Command(NeraActionMenuCommand::Alarm(_))
+                ))
+        );
     }
 }

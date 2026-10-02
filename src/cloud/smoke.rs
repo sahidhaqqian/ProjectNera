@@ -226,6 +226,16 @@ fn run(world: &mut World) {
                 VisualState::SittingLoop
             );
             assert!(!world.resource::<DesktopPhysicsState>().falling);
+            let avatar = world
+                .query_filtered::<Entity, With<NeraAvatar>>()
+                .single(world)
+                .unwrap();
+            assert!(world.get::<bevy_vrm1::prelude::LookAt>(avatar).is_none());
+            assert!(
+                world
+                    .get::<bevy_vrm1::vrm::body_tracking::BodyTracking>(avatar)
+                    .is_none()
+            );
             assert!(
                 world
                     .resource::<crate::animation::NeraAnimationClips>()
@@ -355,18 +365,70 @@ fn run(world: &mut World) {
             assert!(!physics.falling && !physics.throwing && physics.support.is_none());
             screenshot(world, "cloud-ride.png");
             begin_drag(world);
+            let work = world
+                .resource::<DesktopEnvironment>()
+                .monitor
+                .unwrap()
+                .work_area;
             position(
                 world,
-                world.resource::<Smoke>().released_seat.unwrap() + Vec2::new(140.0, -40.0),
+                Vec2::new(
+                    (work.left + work.right) as f32 * 0.5,
+                    work.bottom as f32 + 120.0,
+                ),
             );
             advance(world, 9);
         }
         9 if since > 0.3 => {
             release(world);
+            world
+                .run_system_once(
+                    |cloud: Res<CloudRuntime>,
+                     environment: Res<DesktopEnvironment>,
+                     settings: Res<crate::settings::NeraSettings>,
+                     camera: Query<
+                        (&Camera, &GlobalTransform),
+                        With<crate::avatar::NeraMainCamera>,
+                    >,
+                     children: Query<&Children>,
+                     meshes: Query<
+                        (&bevy::camera::primitives::Aabb, &GlobalTransform),
+                        With<Mesh3d>,
+                    >,
+                     visuals: Query<(&visual::CloudVisual, &GlobalTransform)>| {
+                        let a = cloud.attachment().unwrap();
+                        let (camera, view) = camera.single().unwrap();
+                        let visible = bounds::project_mounted_bounds(
+                            a.avatar,
+                            a.visual,
+                            a.seat,
+                            &environment,
+                            camera,
+                            view,
+                            settings.character_scale(),
+                            &children,
+                            &meshes,
+                            &visuals,
+                        )
+                        .unwrap();
+                        let work = environment.monitor.unwrap().work_area;
+                        assert!(
+                            visible.max.y <= work.bottom as f32 + 1.0,
+                            "ride below work area: {visible:?}"
+                        );
+                        assert!(visible.min.y >= work.top as f32 - 1.0);
+                    },
+                )
+                .unwrap();
             advance(world, 10);
         }
         10 if since > 1.0 => {
             assert!(world.resource::<CloudRuntime>().is_riding());
+            let avatar = world
+                .query_filtered::<Entity, With<NeraAvatar>>()
+                .single(world)
+                .unwrap();
+            assert!(world.get::<bevy_vrm1::prelude::LookAt>(avatar).is_some());
             screenshot(world, "cloud-ride-moved.png");
             world.write_message(crate::interaction::NeraHeadPatted {
                 pointer: NeraPointerPosition {
@@ -394,22 +456,23 @@ fn run(world: &mut World) {
                 .unwrap();
             assert_eq!(
                 face.current,
-                Some((crate::expression::NeraExpressionPreset::Joy, 1.0))
+                Some((crate::expression::NeraExpressionPreset::Timid, 1.0))
             );
-            assert_eq!(count, 3, "headpat must emit its three sparkles");
+            assert_eq!(count, 3, "headpat must emit its three hearts");
             assert!(world.resource::<CloudRuntime>().is_riding());
             screenshot(world, "headpat-ride.png");
             eprintln!(
-                "HEADPAT_SMOKE_PASS ShakeHeadNo1/Joy/sparkles (optional SFX dispatch covered by unit tests)"
+                "HEADPAT_SMOKE_PASS ShakeHeadNo1/Timid/hearts (optional SFX dispatch covered by unit tests)"
             );
             world.write_message(CloudCommand::Dismiss);
             advance(world, 11);
         }
         11 if since > 0.15 => {
             assert!(!world.resource::<CloudRuntime>().owns_placement());
+            let physics = world.resource::<DesktopPhysicsState>();
             assert!(
-                world.resource::<DesktopPhysicsState>().falling,
-                "dismissed ride must resume actual native freefall"
+                physics.falling || physics.support.is_some(),
+                "dismissed ride must resume native gravity/support; an edge-clamped mount may already land"
             );
             advance(world, 12);
         }
@@ -422,6 +485,22 @@ fn run(world: &mut World) {
                     .gravity_enabled
             );
             assert_eq!(count, 0, "short-lived particles must not accumulate");
+            world.write_message(crate::interaction::NeraHeadPatted {
+                pointer: NeraPointerPosition {
+                    screen: IVec2::ZERO,
+                    local: Vec2::ZERO,
+                },
+            });
+            advance(world, 23);
+        }
+        23 if since > 0.35 => {
+            assert_eq!(
+                world.resource::<NeraAnimationState>().visual_state(),
+                VisualState::HeadStroke
+            );
+            crate::avatar::assert_smoke_ground_contact(world);
+            screenshot(world, "headpat-grounded.png");
+            eprintln!("GROUNDING_SMOKE_PASS evaluated_headpat_foot_matches_native_support=true");
             world.write_message(CloudCommand::Summon(CloudMode::Ride));
             advance(world, 13);
         }
@@ -436,9 +515,10 @@ fn run(world: &mut World) {
             advance(world, 14);
         }
         14 if since > 3.0
-            && world
-                .resource::<crate::character::ActiveCharacter>()
-                .migrated_from_vrm0 =>
+            && !world
+                .resource::<crate::character::CharacterImportStatus>()
+                .loading
+            && !world.resource::<CloudRuntime>().owns_placement() =>
         {
             assert!(
                 !world.resource::<CloudRuntime>().owns_placement(),

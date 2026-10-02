@@ -1,4 +1,5 @@
 //! Temporary seat ownership, independent of native desktop attachments.
+mod bounds;
 mod pose;
 mod sleep_arms;
 #[cfg(debug_assertions)]
@@ -410,6 +411,11 @@ pub(crate) fn align_cloud_seat(
     mut environment: ResMut<DesktopEnvironment>,
     interaction: Res<DesktopPetInteraction>,
     presentation: Res<PresentationState>,
+    settings: Res<crate::settings::NeraSettings>,
+    camera: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
+    children: Query<&Children>,
+    meshes: Query<(&bevy::camera::primitives::Aabb, &GlobalTransform), With<Mesh3d>>,
+    visuals: Query<(&visual::CloudVisual, &GlobalTransform)>,
 ) {
     if !presentation.is_desktop_pet() {
         return;
@@ -420,15 +426,48 @@ pub(crate) fn align_cloud_seat(
     if interaction.state == InteractionState::Dragging && attachment.mode == CloudMode::Ride {
         if let Some(seat) = environment.seat_probe_global() {
             attachment.seat = Vec2::new(seat.x as f32, seat.y as f32);
-            match &mut cloud.state {
-                CloudState::Appearing {
-                    attachment: stored, ..
-                }
-                | CloudState::Attached(stored) => *stored = attachment,
-                _ => {}
-            }
         }
-        return;
+        // Interaction moved the HWND after the First snapshot. Refresh the
+        // existing monitor fact before clamping so a drag can cross monitors.
+        if let Some(monitor) = environment
+            .nera_hwnd
+            .and_then(crate::platform::monitor_info)
+        {
+            environment.monitor = Some(monitor);
+        }
+    }
+    let current_seat = environment
+        .seat_probe_global()
+        .map(|p| Vec2::new(p.x as f32, p.y as f32))
+        .unwrap_or(attachment.seat);
+    // Keep the complete mounted silhouette inside the native work area. Mesh
+    // bounds include shoes/hair/cloud lobes; an anchor alone cannot do that.
+    if attachment.mode == CloudMode::Ride
+        && let (Some(monitor), Ok((camera, view))) = (environment.monitor, camera.single())
+        && let Some(visible) = bounds::project_mounted_bounds(
+            attachment.avatar,
+            attachment.visual,
+            current_seat,
+            &environment,
+            camera,
+            view,
+            settings.character_scale(),
+            &children,
+            &meshes,
+            &visuals,
+        )
+    {
+        // Avatar bounds were sampled at the current pose/window, so translate
+        // them to the cloud's intended logical placement before clamping.
+        let visible = visible.translated(attachment.seat - current_seat);
+        attachment.seat += bounds::work_area_correction(visible, monitor.work_area);
+    }
+    match &mut cloud.state {
+        CloudState::Appearing {
+            attachment: stored, ..
+        }
+        | CloudState::Attached(stored) => *stored = attachment,
+        _ => {}
     }
     let (Some(hwnd), Some(rect), Some(seat)) = (
         environment.nera_hwnd,

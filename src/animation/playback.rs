@@ -12,6 +12,57 @@ use super::{
     SittingPose, VisualState,
 };
 
+/// Pose-space contact policy. Desktop/cloud/presentation still exclusively own
+/// placement; this only tells avatar projection whether feet should meet it.
+/// Future grounded Dance/Music clips can opt into the same policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroundingPolicy {
+    Grounded,
+    BodyContact,
+    Authored,
+}
+
+pub(crate) fn grounding_policy(visual: VisualState, library_path: Option<&str>) -> GroundingPolicy {
+    use GroundingPolicy::*;
+    match visual {
+        VisualState::Death => BodyContact,
+        VisualState::Floating
+        | VisualState::Falling
+        | VisualState::Landing
+        | VisualState::AlarmJump
+        | VisualState::AlarmWave
+        | VisualState::SittingEnter
+        | VisualState::SittingLoop
+        | VisualState::SittingExit
+        | VisualState::DodgeWhileSitting => Authored,
+        VisualState::IdleMicro(action) if action.base_pose() == BasePose::Sitting => Authored,
+        VisualState::LibraryAnimation(_) => match library_path {
+            Some(DEATH_VRMA_PATH) => BodyContact,
+            // The bundled library includes intentionally airborne and seated
+            // clips. Unknown imports retain their authored motion too: guessing
+            // contact from a filename could erase a custom jump.
+            Some(
+                IDLE_VRMA_PATH
+                | WALKING_VRMA_PATH
+                | HIT_HEAD_VRMA_PATH
+                | HIT_CHEST_VRMA_PATH
+                | HEAD_STROKE_VRMA_PATH
+                | PRAYING_VRMA_PATH
+                | IDLE_LOOK_AROUND_VRMA_PATH
+                | IDLE_RELAX_VRMA_PATH
+                | IDLE_SLEEPY_VRMA_PATH
+                | IDLE_BLUSH_VRMA_PATH
+                | IDLE_CATWALK_TWIST_VRMA_PATH
+                | IDLE_BORED_VRMA_PATH
+                | IDLE_ANGRY_GESTURE_VRMA_PATH
+                | "animations/animasi_basic/161_Waving.vrma",
+            ) => Grounded,
+            _ => Authored,
+        },
+        _ => Grounded,
+    }
+}
+
 #[cfg(target_os = "windows")]
 use crate::action_menu::AnimationMenuChoice;
 
@@ -797,6 +848,39 @@ pub(crate) fn apply_animation_state(
 mod cloud_sleep_tests {
     use super::*;
     use crate::{animation::TemporaryAction, cloud::RestPose};
+
+    #[test]
+    fn contact_policy_is_explicit_for_grounded_airborne_seated_and_unknown_library_clips() {
+        use GroundingPolicy::*;
+        let visual = VisualState::LibraryAnimation(Entity::PLACEHOLDER);
+        for path in [
+            IDLE_VRMA_PATH,
+            WALKING_VRMA_PATH,
+            HEAD_STROKE_VRMA_PATH,
+            PRAYING_VRMA_PATH,
+            IDLE_LOOK_AROUND_VRMA_PATH,
+            IDLE_RELAX_VRMA_PATH,
+            HIT_HEAD_VRMA_PATH,
+            ALARM_WAVE_VRMA_PATH,
+        ] {
+            assert_eq!(grounding_policy(visual, Some(path)), Grounded);
+        }
+        for path in [
+            ALARM_JUMP_VRMA_PATH,
+            FLOATING_VRMA_PATH,
+            FALLING_TO_LANDING_VRMA_PATH,
+            SITTING_ENTER_VRMA_PATH,
+            SITTING_LOOP_VRMA_PATH,
+            SLEEPING_IDLE_VRMA_PATH,
+            "custom/JumpingDance.vrma",
+            "custom/unknown.vrma",
+        ] {
+            assert_eq!(grounding_policy(visual, Some(path)), Authored);
+        }
+        assert_eq!(grounding_policy(visual, Some(DEATH_VRMA_PATH)), BodyContact);
+        assert_eq!(grounding_policy(VisualState::HeadStroke, None), Grounded);
+        assert_eq!(grounding_policy(VisualState::AlarmJump, None), Authored);
+    }
 
     #[test]
     fn headpat_body_remains_distinct_from_idle_blush() {

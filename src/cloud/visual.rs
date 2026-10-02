@@ -122,6 +122,27 @@ impl CloudVisualAssets {
     }
 }
 
+impl CloudVisual {
+    /// Predict the fully appeared mount so the usable-area clamp also protects
+    /// the model while it grows. This is derived geometry, not placement state.
+    pub(super) fn full_size_transform(
+        &self,
+        seat: Vec2,
+        environment: &DesktopEnvironment,
+        camera: &Camera,
+        view: &GlobalTransform,
+        character_scale: f32,
+    ) -> Option<GlobalTransform> {
+        let contact = desktop_point_to_world(seat, environment, camera, view, self.seat_depth)?;
+        Some(GlobalTransform::from(seat_transform(
+            contact,
+            self.seat_local,
+            MODEL_SCALE * character_scale,
+            0.0,
+        )))
+    }
+}
+
 pub(crate) fn cloud_hit(
     cloud: &CloudRuntime,
     cursor: Vec2,

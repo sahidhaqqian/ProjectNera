@@ -28,7 +28,8 @@ pub(crate) struct AlarmConfig {
     pub(crate) day: u8,
     /// Monday = bit 0 ... Sunday = bit 6.
     pub(crate) repeat_days: u8,
-    pub(crate) sound: u8,
+    /// Stable built-in/imported ID; u16::MAX selects Random at trigger time.
+    pub(crate) sound: u16,
 }
 
 impl AlarmConfig {
@@ -59,9 +60,6 @@ impl AlarmConfig {
             .day
             .clamp(1, alarm_days_in_month(self.year, self.month));
         self.repeat_days &= 0b0111_1111;
-        self.sound = self
-            .sound
-            .min((crate::alarm::sounds::SOUNDS.len() - 1) as u8);
         if self.mode == 1 && self.repeat_days == 0 {
             self.enabled = false;
         }
@@ -317,7 +315,7 @@ pub(crate) struct NeraSettings {
     /// False means this profile predates the multi-alarm book and should expose
     /// the legacy single-alarm fields as one migration candidate.
     pub(crate) alarm_book_initialized: bool,
-    pub(crate) alarm_sound: u8,
+    pub(crate) alarm_sound: u16,
 }
 
 fn default_alarm_date() -> (u16, u8, u8) {
@@ -907,6 +905,18 @@ mod roaming_settings_tests {
 #[cfg(test)]
 mod alarm_book_tests {
     use super::*;
+
+    #[test]
+    fn imported_and_random_sound_ids_survive_alarm_book_normalization() {
+        for sound in [5, 1024, crate::alarm::sounds::RANDOM_SOUND] {
+            let mut alarm = AlarmConfig::default_new(17);
+            alarm.sound = sound;
+            assert_eq!(
+                decode_alarm_book(&encode_alarm_book(&[alarm.clone()])).unwrap(),
+                vec![alarm]
+            );
+        }
+    }
 
     #[test]
     fn old_alarm_records_keep_classic_sound_and_new_records_preserve_choices() {

@@ -13,6 +13,8 @@ use bevy::{
     window::{WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints},
 };
 
+use crate::action_menu::{AlarmMenuChoice, NeraActionMenuCommand};
+use crate::alarm::sounds::{AlarmSoundLibrary, PreviewAlarmSound, STOP_PREVIEW};
 use crate::settings::{AlarmConfig, NeraSettings, save_settings_deferred};
 use crate::utility_window::font_cache::{FontCacheOwner, UtilityFontCache};
 use crate::utility_window::{UtilityWindow, spawn_window_controls};
@@ -21,6 +23,15 @@ use crate::utility_window::{UtilityWindow, spawn_window_controls};
 mod memory_audit;
 
 const MAX_ALARMS: usize = 12;
+const QUICK_PRESETS: [(&str, AlarmMenuChoice); 7] = [
+    ("5 min", AlarmMenuChoice::FiveMinutes),
+    ("10 min", AlarmMenuChoice::TenMinutes),
+    ("15 min", AlarmMenuChoice::FifteenMinutes),
+    ("30 min", AlarmMenuChoice::ThirtyMinutes),
+    ("45 min", AlarmMenuChoice::FortyFiveMinutes),
+    ("1 hour", AlarmMenuChoice::OneHour),
+    ("2 hours", AlarmMenuChoice::TwoHours),
+];
 
 const SHELL: Color = Color::srgba(0.032, 0.042, 0.078, 0.985);
 const CARD: Color = Color::srgba(0.055, 0.071, 0.122, 0.98);
@@ -77,6 +88,7 @@ enum AlarmSettingsView {
     Edit,
     TimePicker,
     DatePicker,
+    Sounds,
 }
 
 #[derive(Resource, Default)]
@@ -84,6 +96,7 @@ struct AlarmSettingsUiState {
     view: AlarmSettingsView,
     draft: Option<AlarmConfig>,
     rebuild: bool,
+    sound_status: String,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -116,6 +129,13 @@ enum AlarmSettingsAction {
     PreviewDraftSound,
     CycleQuickSound,
     PreviewQuickSound,
+    QuickPreset(AlarmMenuChoice),
+    OpenSoundLibrary,
+    ImportSound,
+    SelectSound(u16),
+    PreviewSound(u16),
+    DeleteSound(u16),
+    StopPreview,
 }
 
 pub(crate) struct AlarmSettingsPlugin;
@@ -132,9 +152,11 @@ impl Plugin for AlarmSettingsPlugin {
             memory_audit::install(app);
         }
         app.init_resource::<AlarmSettingsInputGate>()
+            .init_resource::<AlarmSoundLibrary>()
             .init_resource::<UtilityFontCache>()
             .init_resource::<AlarmSettingsUiState>()
             .add_message::<OpenAlarmSettingsWindow>()
+            .add_message::<NeraActionMenuCommand>()
             .add_systems(PreUpdate, sync_alarm_window_minimized)
             .add_systems(
                 Update,
@@ -242,6 +264,7 @@ fn sync_alarm_window_minimized(
 
 fn rebuild_alarm_settings_ui(
     settings: Res<NeraSettings>,
+    library: Res<AlarmSoundLibrary>,
     windows: Query<Entity, With<AlarmSettingsWindow>>,
     cameras: Query<Entity, With<AlarmSettingsCamera>>,
     roots: Query<Entity, With<AlarmSettingsUiRoot>>,
@@ -265,14 +288,28 @@ fn rebuild_alarm_settings_ui(
 
     match ui.view {
         AlarmSettingsView::List => {
-            spawn_alarm_list_ui(&mut commands, window, camera, &settings);
+            spawn_alarm_list_ui(
+                &mut commands,
+                window,
+                camera,
+                &settings,
+                &library,
+                &ui.sound_status,
+            );
         }
         AlarmSettingsView::Edit => {
             if let Some(draft) = ui.draft.as_ref() {
-                spawn_alarm_editor_ui(&mut commands, window, camera, draft);
+                spawn_alarm_editor_ui(&mut commands, window, camera, draft, &library);
             } else {
                 ui.view = AlarmSettingsView::List;
-                spawn_alarm_list_ui(&mut commands, window, camera, &settings);
+                spawn_alarm_list_ui(
+                    &mut commands,
+                    window,
+                    camera,
+                    &settings,
+                    &library,
+                    &ui.sound_status,
+                );
             }
         }
         AlarmSettingsView::TimePicker => {
@@ -280,7 +317,14 @@ fn rebuild_alarm_settings_ui(
                 spawn_time_picker_ui(&mut commands, window, camera, draft);
             } else {
                 ui.view = AlarmSettingsView::List;
-                spawn_alarm_list_ui(&mut commands, window, camera, &settings);
+                spawn_alarm_list_ui(
+                    &mut commands,
+                    window,
+                    camera,
+                    &settings,
+                    &library,
+                    &ui.sound_status,
+                );
             }
         }
         AlarmSettingsView::DatePicker => {
@@ -288,8 +332,29 @@ fn rebuild_alarm_settings_ui(
                 spawn_date_picker_ui(&mut commands, window, camera, draft);
             } else {
                 ui.view = AlarmSettingsView::List;
-                spawn_alarm_list_ui(&mut commands, window, camera, &settings);
+                spawn_alarm_list_ui(
+                    &mut commands,
+                    window,
+                    camera,
+                    &settings,
+                    &library,
+                    &ui.sound_status,
+                );
             }
+        }
+        AlarmSettingsView::Sounds => {
+            let selected = ui
+                .draft
+                .as_ref()
+                .map_or(settings.alarm_sound, |draft| draft.sound);
+            spawn_sound_library_ui(
+                &mut commands,
+                window,
+                camera,
+                &library,
+                selected,
+                &ui.sound_status,
+            );
         }
     }
 
@@ -349,6 +414,8 @@ fn spawn_alarm_list_ui(
     window: Entity,
     camera: Entity,
     settings: &NeraSettings,
+    library: &AlarmSoundLibrary,
+    status: &str,
 ) {
     let alarms = settings.alarm_configs();
     let enabled = alarms.iter().filter(|alarm| alarm.enabled).count();
@@ -364,11 +431,74 @@ fn spawn_alarm_list_ui(
         spawn_setting_row(
             panel,
             "Quick alarm sound",
-            crate::alarm::sounds::name(settings.alarm_sound),
+            library.name(settings.alarm_sound),
             AlarmSettingsAction::CycleQuickSound,
         );
-        spawn_small_button(panel, "Play", AlarmSettingsAction::PreviewQuickSound, BLUE);
+        panel
+            .spawn(Node {
+                width: percent(100),
+                column_gap: px(6),
+                flex_wrap: FlexWrap::Wrap,
+                row_gap: px(6),
+                ..default()
+            })
+            .with_children(|buttons| {
+                spawn_small_button(
+                    buttons,
+                    "Play",
+                    AlarmSettingsAction::PreviewQuickSound,
+                    BLUE,
+                );
+                spawn_small_button(buttons, "Stop", AlarmSettingsAction::StopPreview, CARD);
+                spawn_small_button(
+                    buttons,
+                    "Sound library",
+                    AlarmSettingsAction::OpenSoundLibrary,
+                    CARD,
+                );
+            });
+        spawn_section_title(panel, "Quick timers");
+        panel
+            .spawn(Node {
+                width: percent(100),
+                column_gap: px(6),
+                flex_wrap: FlexWrap::Wrap,
+                row_gap: px(6),
+                ..default()
+            })
+            .with_children(|buttons| {
+                for (label, preset) in QUICK_PRESETS {
+                    spawn_small_button(
+                        buttons,
+                        label,
+                        AlarmSettingsAction::QuickPreset(preset),
+                        CARD,
+                    );
+                }
+                spawn_small_button(
+                    buttons,
+                    "Test now",
+                    AlarmSettingsAction::QuickPreset(AlarmMenuChoice::TestNow),
+                    BLUE,
+                );
+                spawn_small_button(
+                    buttons,
+                    "Cancel timer",
+                    AlarmSettingsAction::QuickPreset(AlarmMenuChoice::Cancel),
+                    CARD,
+                );
+            });
 
+        if !status.is_empty() {
+            panel.spawn((
+                Text::new(status),
+                TextFont {
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
+                TextColor(BODY),
+            ));
+        }
         panel.spawn((
             Text::new(format!(
                 "{} alarm{} · {} enabled",
@@ -446,6 +576,133 @@ fn spawn_alarm_list_ui(
             },
             TextColor(MUTED),
         ));
+    });
+}
+
+fn spawn_sound_library_ui(
+    commands: &mut Commands,
+    window: Entity,
+    camera: Entity,
+    library: &AlarmSoundLibrary,
+    selected: u16,
+    status: &str,
+) {
+    spawn_root(commands, window, camera, |panel| {
+        spawn_header(
+            panel,
+            window,
+            "Alarm sounds",
+            Some("Choose a sound for this alarm"),
+            true,
+        );
+        panel
+            .spawn(Node {
+                column_gap: px(8),
+                ..default()
+            })
+            .with_children(|buttons| {
+                spawn_small_button(
+                    buttons,
+                    "Import sound",
+                    AlarmSettingsAction::ImportSound,
+                    BLUE,
+                );
+                spawn_small_button(
+                    buttons,
+                    "Stop preview",
+                    AlarmSettingsAction::StopPreview,
+                    CARD,
+                );
+            });
+        panel.spawn((
+            Text::new(if status.is_empty() {
+                "MP3 / OGG / WAV · up to 8 MiB and 5 minutes".to_string()
+            } else {
+                status.to_string()
+            }),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(BODY),
+        ));
+        panel
+            .spawn((
+                AlarmSettingsScrollArea,
+                Node {
+                    width: percent(100),
+                    flex_grow: 1.0,
+                    min_height: px(0),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+                ScrollPosition::default(),
+            ))
+            .with_children(|list| {
+                let sounds = (0..crate::alarm::sounds::SOUNDS.len() as u16)
+                    .chain(Some(crate::alarm::sounds::RANDOM_SOUND))
+                    .chain(library.entries().iter().map(|entry| entry.id));
+                for id in sounds {
+                    list.spawn((
+                        Node {
+                            width: percent(100),
+                            flex_shrink: 0.0,
+                            padding: UiRect::all(px(12)),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: px(7),
+                            border_radius: BorderRadius::all(px(12)),
+                            ..default()
+                        },
+                        BackgroundColor(CARD),
+                    ))
+                    .with_children(|card| {
+                        card.spawn((
+                            Text::new(format!(
+                                "{}{}",
+                                if id == selected { "✓ " } else { "" },
+                                library.name(id)
+                            )),
+                            TextFont {
+                                font_size: FontSize::Px(16.0),
+                                ..default()
+                            },
+                            TextColor(PRIMARY),
+                        ));
+                        card.spawn(Node {
+                            column_gap: px(6),
+                            ..default()
+                        })
+                        .with_children(|buttons| {
+                            spawn_small_button(
+                                buttons,
+                                if id == selected {
+                                    "Selected"
+                                } else {
+                                    "Use sound"
+                                },
+                                AlarmSettingsAction::SelectSound(id),
+                                BLUE,
+                            );
+                            spawn_small_button(
+                                buttons,
+                                "Play",
+                                AlarmSettingsAction::PreviewSound(id),
+                                CARD,
+                            );
+                            if library.entries().iter().any(|entry| entry.id == id) {
+                                spawn_small_button(
+                                    buttons,
+                                    "Delete",
+                                    AlarmSettingsAction::DeleteSound(id),
+                                    Color::srgb(0.28, 0.08, 0.11),
+                                );
+                            }
+                        });
+                    });
+                }
+            });
     });
 }
 
@@ -544,6 +801,7 @@ fn spawn_alarm_editor_ui(
     window: Entity,
     camera: Entity,
     alarm: &AlarmConfig,
+    library: &AlarmSoundLibrary,
 ) {
     spawn_root(commands, window, camera, |panel| {
         spawn_header(
@@ -609,8 +867,12 @@ fn spawn_alarm_editor_ui(
                 ScrollPosition::default(),
             ))
             .with_children(|form| {
-                spawn_setting_row(form, "Sound", crate::alarm::sounds::name(alarm.sound), AlarmSettingsAction::DraftCycleSound);
-                spawn_small_button(form, "Play", AlarmSettingsAction::PreviewDraftSound, BLUE);
+                spawn_setting_row(form, "Sound", library.name(alarm.sound), AlarmSettingsAction::DraftCycleSound);
+                form.spawn(Node { column_gap: px(8), ..default() }).with_children(|buttons| {
+                    spawn_small_button(buttons, "Play", AlarmSettingsAction::PreviewDraftSound, BLUE);
+                    spawn_small_button(buttons, "Stop", AlarmSettingsAction::StopPreview, CARD);
+                    spawn_small_button(buttons, "Sound library", AlarmSettingsAction::OpenSoundLibrary, CARD);
+                });
                 spawn_setting_row(
                     form,
                     "Enabled",
@@ -1159,6 +1421,9 @@ fn handle_alarm_settings_actions(
     mut ui: ResMut<AlarmSettingsUiState>,
     mut commands: Commands,
     mut previews: MessageWriter<crate::alarm::sounds::PreviewAlarmSound>,
+    mut alarm_commands: MessageWriter<NeraActionMenuCommand>,
+    mut library: ResMut<AlarmSoundLibrary>,
+    windows: Query<&UtilityWindow, With<AlarmSettingsWindow>>,
 ) {
     for (interaction, action, mut background) in &mut interactions {
         *background = BackgroundColor(action_color(*action, *interaction, ui.draft.as_ref()));
@@ -1168,9 +1433,92 @@ fn handle_alarm_settings_actions(
         }
 
         match *action {
+            AlarmSettingsAction::QuickPreset(choice) => {
+                alarm_commands.write(NeraActionMenuCommand::Alarm(choice));
+                ui.sound_status = if choice == AlarmMenuChoice::Cancel {
+                    "Quick timer cancelled".into()
+                } else {
+                    "Quick timer started".into()
+                };
+                ui.rebuild = true;
+            }
+            AlarmSettingsAction::OpenSoundLibrary => {
+                ui.view = AlarmSettingsView::Sounds;
+                ui.sound_status.clear();
+                ui.rebuild = true;
+            }
+            AlarmSettingsAction::ImportSound => {
+                let result = windows
+                    .single()
+                    .ok()
+                    .and_then(UtilityWindow::native_handle)
+                    .ok_or_else(|| {
+                        "Sound picker is unavailable until the window is ready.".to_string()
+                    })
+                    .and_then(|owner| {
+                        crate::platform::pick_asset_file(
+                            owner,
+                            "Import alarm sound",
+                            "Alarm sounds (*.mp3;*.ogg;*.wav)\0*.mp3;*.ogg;*.wav\0\0",
+                        )
+                    });
+                match result {
+                    Ok(Some(path)) => match library.import(&path) {
+                        Ok((id, duplicate)) => {
+                            ui.sound_status = if duplicate {
+                                "This sound is already in your library.".into()
+                            } else {
+                                format!("Imported {}", library.name(id))
+                            };
+                        }
+                        Err(error) => ui.sound_status = error,
+                    },
+                    Ok(None) => {}
+                    Err(error) => ui.sound_status = error,
+                }
+                ui.rebuild = true;
+            }
+            AlarmSettingsAction::SelectSound(id) => {
+                if let Some(draft) = ui.draft.as_mut() {
+                    draft.sound = id;
+                } else {
+                    settings.alarm_sound = id;
+                    save_settings_deferred(&mut commands);
+                }
+                ui.rebuild = true;
+            }
+            AlarmSettingsAction::DeleteSound(id) => {
+                match library.remove(id) {
+                    Ok(true) => {
+                        crate::alarm::sounds::clear_deleted_references(&mut settings, id);
+                        if let Some(draft) = ui.draft.as_mut()
+                            && draft.sound == id
+                        {
+                            draft.sound = crate::alarm::sounds::DEFAULT_SOUND;
+                        }
+                        previews.write(PreviewAlarmSound(STOP_PREVIEW));
+                        save_settings_deferred(&mut commands);
+                        ui.sound_status = "Sound removed. Selected alarms use Classic.".into();
+                    }
+                    Ok(false) => ui.sound_status = "Built-in sounds cannot be removed.".into(),
+                    Err(error) => ui.sound_status = error,
+                }
+                ui.rebuild = true;
+            }
+            AlarmSettingsAction::PreviewSound(id) => {
+                previews.write(PreviewAlarmSound(id));
+            }
+            AlarmSettingsAction::StopPreview => {
+                previews.write(PreviewAlarmSound(STOP_PREVIEW));
+            }
+            AlarmSettingsAction::DraftCycleSound => {
+                if let Some(draft) = ui.draft.as_mut() {
+                    draft.sound = library.next(draft.sound);
+                }
+                ui.rebuild = true;
+            }
             AlarmSettingsAction::CycleQuickSound => {
-                settings.alarm_sound =
-                    (settings.alarm_sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8;
+                settings.alarm_sound = library.next(settings.alarm_sound);
                 save_settings_deferred(&mut commands);
                 ui.rebuild = true;
             }
@@ -1227,6 +1575,14 @@ fn handle_alarm_settings_actions(
             }
             AlarmSettingsAction::Back => {
                 match ui.view {
+                    AlarmSettingsView::Sounds => {
+                        previews.write(PreviewAlarmSound(STOP_PREVIEW));
+                        ui.view = if ui.draft.is_some() {
+                            AlarmSettingsView::Edit
+                        } else {
+                            AlarmSettingsView::List
+                        };
+                    }
                     AlarmSettingsView::TimePicker | AlarmSettingsView::DatePicker => {
                         // Picker changes are kept in the in-memory draft. Return
                         // to the editor without committing to persistent settings.
@@ -1301,7 +1657,7 @@ pub(crate) fn smoke_action(world: &mut World, action: &str) {
 fn mutate_draft(draft: &mut AlarmConfig, action: AlarmSettingsAction) {
     match action {
         AlarmSettingsAction::DraftCycleSound => {
-            draft.sound = (draft.sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8;
+            draft.sound = (draft.sound + 1) % crate::alarm::sounds::SOUNDS.len() as u16;
         }
         AlarmSettingsAction::DraftToggleEnabled => draft.enabled = !draft.enabled,
         AlarmSettingsAction::DraftCycleLabel => draft.cycle_label(),
@@ -1483,11 +1839,17 @@ fn cleanup_alarm_settings_owned(
 
 fn cleanup_alarm_sound_preview(
     windows: Query<(), With<AlarmSettingsWindow>>,
-    previews: Query<Entity, With<crate::alarm::sounds::AlarmSoundPreview>>,
+    previews: Query<
+        (Entity, Option<&bevy::audio::AudioSink>),
+        With<crate::alarm::sounds::AlarmSoundPreview>,
+    >,
     mut commands: Commands,
 ) {
     if windows.is_empty() {
-        for entity in &previews {
+        for (entity, sink) in &previews {
+            if let Some(sink) = sink {
+                bevy::audio::AudioSinkPlayback::stop(sink);
+            }
             commands.entity(entity).despawn();
         }
     }
@@ -1545,6 +1907,39 @@ fn schedule_summary(alarm: &AlarmConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manager_preserves_every_quick_preset_and_emits_the_existing_runtime_command() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<AlarmSettingsInputGate>()
+            .init_resource::<AlarmSettingsUiState>()
+            .init_resource::<AlarmSoundLibrary>()
+            .add_message::<NeraActionMenuCommand>()
+            .add_message::<PreviewAlarmSound>()
+            .add_systems(Update, handle_alarm_settings_actions);
+        for (_, choice) in QUICK_PRESETS {
+            let button = app
+                .world_mut()
+                .spawn((
+                    Button,
+                    AlarmSettingsAction::QuickPreset(choice),
+                    Interaction::Pressed,
+                    BackgroundColor(BLUE),
+                ))
+                .id();
+            app.update();
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<Messages<NeraActionMenuCommand>>()
+                    .drain()
+                    .collect::<Vec<_>>(),
+                vec![NeraActionMenuCommand::Alarm(choice)]
+            );
+            app.world_mut().despawn(button);
+        }
+        assert_eq!(QUICK_PRESETS.len(), 7);
+    }
 
     #[test]
     fn alarm_editor_close_cleans_tree_preview_and_cache_without_changing_main_camera() {
@@ -1634,6 +2029,7 @@ mod tests {
             view: AlarmSettingsView::Edit,
             draft: Some(AlarmConfig::default_new(7)),
             rebuild: false,
+            ..default()
         })
         .init_resource::<UtilityFontCache>()
         .add_message::<OpenAlarmSettingsWindow>()
