@@ -2,6 +2,7 @@
 //! Scheduling remains in main so cross-subsystem ordering stays explicit.
 mod anchors;
 
+pub(crate) use anchors::seat_contact_world;
 pub(crate) use anchors::{DeathVisualGrounding, preserve_seated_hips, update_avatar_anchors};
 
 use crate::{
@@ -25,6 +26,25 @@ pub(crate) struct NeraMainLight;
 
 #[derive(Component)]
 pub(crate) struct LookAtTarget;
+
+/// Project a stable desktop point onto a camera-facing world plane.
+pub(crate) fn desktop_point_to_world(
+    point: Vec2,
+    environment: &DesktopEnvironment,
+    camera: &Camera,
+    view: &GlobalTransform,
+    z: f32,
+) -> Option<Vec3> {
+    let rect = environment.nera_rect?;
+    let local = (point - Vec2::new(rect.left as f32, rect.top as f32))
+        / environment.nera_scale_factor.max(0.25) as f32;
+    let ray = camera.viewport_to_world(view, local).ok()?;
+    if ray.direction.z.abs() < 0.0001 {
+        return None;
+    }
+    let distance = (z - ray.origin.z) / ray.direction.z;
+    (distance.is_finite() && distance >= 0.0).then(|| ray.get_point(distance))
+}
 
 pub(crate) fn setup_camera(mut commands: Commands) {
     commands.spawn((

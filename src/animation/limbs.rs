@@ -15,6 +15,7 @@ pub(super) fn install(app: &mut App) {
         PostUpdate,
         apply_limb_pose
             .after(bevy::app::AnimationSystems)
+            .after(crate::cloud::stabilize_cloud_pose)
             .before(VrmSystemSets::Constraints),
     );
 }

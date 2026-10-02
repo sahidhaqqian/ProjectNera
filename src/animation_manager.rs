@@ -1,6 +1,7 @@
 //! Animation gallery utility window. Preview instances never carry `NeraAvatar`
 //! and never enter the production animation state resolver.
 mod base;
+mod characters;
 mod combine;
 #[cfg(test)]
 mod combine_loader_tests;
@@ -8,7 +9,6 @@ mod preview;
 pub(crate) mod process;
 mod registry;
 mod ui;
-mod characters;
 
 use std::{
     path::PathBuf,
@@ -202,7 +202,8 @@ impl ManagerState {
             characters: Default::default(),
             character_slot: 0,
             character_scroll_y: 0.0,
-            character_path: std::env::var("NERA_GALLERY_CHARACTER").unwrap_or_else(|_| crate::character::DEFAULT_CHARACTER.into()),
+            character_path: std::env::var("NERA_GALLERY_CHARACTER")
+                .unwrap_or_else(|_| crate::character::DEFAULT_CHARACTER.into()),
             registry,
             tab: GalleryTab::All,
             expression: crate::expression::NeraExpressionPreset::Default,
@@ -287,14 +288,20 @@ impl Plugin for AnimationManagerPlugin {
                     ui::sync_gallery_count,
                     preview::sync_visible_previews,
                     preview::prepare_preview_rigs,
-                    (preview::start_ready_previews, preview::sync_expression_previews).chain(),
+                    (
+                        preview::start_ready_previews,
+                        preview::sync_expression_previews,
+                    )
+                        .chain(),
                     close_after_release,
                     cleanup_closed_window,
                 )
                     .chain(),
             )
-            .add_systems(PostUpdate, preview::frame_expression_heads
-                .after(bevy::transform::TransformSystems::Propagate));
+            .add_systems(
+                PostUpdate,
+                preview::frame_expression_heads.after(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -614,20 +621,47 @@ fn handle_actions(
             state.dirty = true;
         }
         match action {
-            ManagerAction::CharacterSlot(slot) => { state.character_slot = *slot; state.dirty = true; }
-            ManagerAction::AssignCharacter(path) => { roster.write(crate::character::roster::RosterRequest::Assign { slot: state.character_slot, path: path.clone() }); }
-            ManagerAction::ClearCharacter(slot) => { roster.write(crate::character::roster::RosterRequest::Clear { slot: *slot }); }
-            ManagerAction::AddCharacterSlot => { roster.write(crate::character::roster::RosterRequest::AddSlot); }
+            ManagerAction::CharacterSlot(slot) => {
+                state.character_slot = *slot;
+                state.dirty = true;
+            }
+            ManagerAction::AssignCharacter(path) => {
+                roster.write(crate::character::roster::RosterRequest::Assign {
+                    slot: state.character_slot,
+                    path: path.clone(),
+                });
+            }
+            ManagerAction::ClearCharacter(slot) => {
+                roster.write(crate::character::roster::RosterRequest::Clear { slot: *slot });
+            }
+            ManagerAction::AddCharacterSlot => {
+                roster.write(crate::character::roster::RosterRequest::AddSlot);
+            }
             ManagerAction::ImportCharacter => {
                 if let Some(owner) = windows.single().ok().and_then(UtilityWindow::native_handle) {
-                    match crate::platform::pick_asset_file(owner, "Import Character", "VRM character (*.vrm)\0*.vrm\0\0") {
-                        Ok(Some(path)) => { roster.write(crate::character::roster::RosterRequest::Import { slot: state.character_slot, path }); }
-                        Err(error) => { state.error = Some(error); state.dirty = true; }
+                    match crate::platform::pick_asset_file(
+                        owner,
+                        "Import Character",
+                        "VRM character (*.vrm)\0*.vrm\0\0",
+                    ) {
+                        Ok(Some(path)) => {
+                            roster.write(crate::character::roster::RosterRequest::Import {
+                                slot: state.character_slot,
+                                path,
+                            });
+                        }
+                        Err(error) => {
+                            state.error = Some(error);
+                            state.dirty = true;
+                        }
                         _ => {}
                     }
                 }
             }
-            ManagerAction::Close => { state.close_requested = true; state.return_to_menu = state.tab == GalleryTab::Characters; }
+            ManagerAction::Close => {
+                state.close_requested = true;
+                state.return_to_menu = state.tab == GalleryTab::Characters;
+            }
             ManagerAction::Back => {
                 state.close_requested = true;
                 state.return_to_menu = true;
@@ -657,16 +691,22 @@ fn handle_actions(
             }
             ManagerAction::Expression(preset) => {
                 state.expression = *preset;
-                expression_requests.write(crate::expression::ExpressionPreviewRequest::Set(
-                    *preset, f32::from(state.intensity) / 100.0,
-                ));
+                expression_requests.write(
+                    crate::expression::ExpressionPreviewRequest::for_selection(
+                        *preset,
+                        f32::from(state.intensity) / 100.0,
+                    ),
+                );
                 state.dirty = true;
             }
             ManagerAction::Intensity(value) => {
                 state.intensity = (*value).min(100);
-                expression_requests.write(crate::expression::ExpressionPreviewRequest::Set(
-                    state.expression, f32::from(state.intensity) / 100.0,
-                ));
+                expression_requests.write(
+                    crate::expression::ExpressionPreviewRequest::for_selection(
+                        state.expression,
+                        f32::from(state.intensity) / 100.0,
+                    ),
+                );
                 state.dirty = true;
             }
             ManagerAction::Search => {
@@ -774,7 +814,6 @@ fn handle_actions(
                 state.dirty = true;
             }
             ManagerAction::Restart(key) => {
-                expression_requests.write(crate::expression::ExpressionPreviewRequest::Clear);
                 previews.restart(key, &mut commands, &mut animation_players, &children);
                 desktop_requests.write(crate::animation::PlayLibraryAnimation {
                     path: format!("animations/{key}"),
@@ -844,8 +883,18 @@ fn handle_actions(
 fn scroll_gallery(
     mut wheel: MessageReader<MouseWheel>,
     windows: Query<Entity, With<ManagerWindow>>,
-    mut scroll: Query<(&mut ScrollPosition, &ComputedNode), (With<GalleryScroll>, Without<characters::CharacterRail>)>,
-    mut rails: Query<(&bevy::ui::RelativeCursorPosition, &mut ScrollPosition, &ComputedNode), (With<characters::CharacterRail>, Without<GalleryScroll>)>,
+    mut scroll: Query<
+        (&mut ScrollPosition, &ComputedNode),
+        (With<GalleryScroll>, Without<characters::CharacterRail>),
+    >,
+    mut rails: Query<
+        (
+            &bevy::ui::RelativeCursorPosition,
+            &mut ScrollPosition,
+            &ComputedNode,
+        ),
+        (With<characters::CharacterRail>, Without<GalleryScroll>),
+    >,
     mut state: ResMut<ManagerState>,
 ) {
     if state.dialog.is_some() {
@@ -867,7 +916,11 @@ fn scroll_gallery(
             MouseScrollUnit::Line => event.y * line_scroll_step(),
             MouseScrollUnit::Pixel => event.y,
         };
-        if let Ok((cursor, mut rail, computed)) = rails.single_mut() && cursor.normalized.is_some_and(|p| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y)) {
+        if let Ok((cursor, mut rail, computed)) = rails.single_mut()
+            && cursor
+                .normalized
+                .is_some_and(|p| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y))
+        {
             let (max, _) = scroll_metrics(computed);
             rail.0.y = (rail.0.y - delta).clamp(0.0, max);
             state.character_scroll_y = rail.0.y;
@@ -1060,6 +1113,80 @@ fn cleanup_closed_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn action_test_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(ManagerState::for_test())
+            .init_resource::<CaretBlink>()
+            .init_resource::<preview::PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .add_message::<crate::animation::PlayLibraryAnimation>()
+            .add_message::<crate::expression::ExpressionPreviewRequest>()
+            .add_message::<crate::character::roster::RosterRequest>()
+            .add_systems(Update, handle_actions);
+        app
+    }
+
+    #[test]
+    fn default_and_zero_percent_actions_send_clear_preview() {
+        use crate::expression::{ExpressionPreviewRequest, NeraExpressionPreset};
+        for action in [
+            ManagerAction::Expression(NeraExpressionPreset::Default),
+            ManagerAction::Intensity(0),
+        ] {
+            let mut app = action_test_app();
+            app.world_mut().resource_mut::<ManagerState>().expression = NeraExpressionPreset::Angry;
+            app.world_mut()
+                .spawn((Interaction::Pressed, action, BackgroundColor::default()));
+            app.update();
+            let requests: Vec<_> = app
+                .world_mut()
+                .resource_mut::<Messages<ExpressionPreviewRequest>>()
+                .drain()
+                .collect();
+            assert_eq!(requests, vec![ExpressionPreviewRequest::Clear]);
+        }
+    }
+
+    #[test]
+    fn playing_vrma_preserves_selected_expression_and_intensity() {
+        use crate::expression::{ExpressionPreviewRequest, NeraExpressionPreset};
+        for preset in [
+            NeraExpressionPreset::Angry,
+            NeraExpressionPreset::Timid,
+            NeraExpressionPreset::Exhausted,
+        ] {
+            let mut app = action_test_app();
+            {
+                let mut state = app.world_mut().resource_mut::<ManagerState>();
+                state.expression = preset;
+                state.intensity = 75;
+            }
+            app.world_mut().spawn((
+                Interaction::Pressed,
+                ManagerAction::Restart("animasi_basic/Sleepy.vrma".into()),
+                BackgroundColor::default(),
+            ));
+            app.update();
+            let state = app.world().resource::<ManagerState>();
+            assert_eq!(state.expression, preset);
+            assert_eq!(state.intensity, 75);
+            assert!(
+                app.world_mut()
+                    .resource_mut::<Messages<ExpressionPreviewRequest>>()
+                    .drain()
+                    .next()
+                    .is_none()
+            );
+            let playback: Vec<_> = app
+                .world_mut()
+                .resource_mut::<Messages<crate::animation::PlayLibraryAnimation>>()
+                .drain()
+                .collect();
+            assert_eq!(playback.len(), 1);
+            assert_eq!(playback[0].path, "animations/animasi_basic/Sleepy.vrma");
+        }
+    }
 
     #[test]
     fn manager_window_keeps_transparent_shell_and_allows_unbounded_maximize() {

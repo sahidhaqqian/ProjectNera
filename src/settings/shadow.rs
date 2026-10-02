@@ -196,6 +196,7 @@ fn apply_simple_shadow(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -207,7 +208,8 @@ fn apply_simple_shadow(
         &physics,
         &interaction,
         entrance.as_deref(),
-    ) && settings.uses_simple_shadow();
+    ) && settings.uses_simple_shadow()
+        && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
     let opacity = settings.shadow_opacity.clamp(0, 100) as f32 / 100.0;
     let softness = settings.shadow_softness.clamp(25, 100) as f32 / 100.0;
@@ -257,9 +259,7 @@ fn bone_position(
 ) -> Option<Vec3> {
     bones
         .iter()
-        .find_map(|(bone, transform)| {
-            (bone.as_str() == name).then(|| transform.translation())
-        })
+        .find_map(|(bone, transform)| (bone.as_str() == name).then(|| transform.translation()))
 }
 
 /// World-space support plane for the real shadow catcher.
@@ -302,11 +302,12 @@ fn desktop_shadow_ground(
         // Feet are animated; the cached desktop contact line is not.
         let distance = (SIMPLE_SHADOW_Z - ray.origin.z) / ray.direction.z;
         let point = ray.get_point(distance);
-        if distance > 0.0 && point.is_finite() { return Some(point); }
+        if distance > 0.0 && point.is_finite() {
+            return Some(point);
+        }
     }
     shadow_ground_with_user_offset(settings, bones, cameras)
 }
-
 
 /// Apply the user-facing Ground Offset to the shadow support plane in render
 /// world space. Physics stores that setting in logical screen pixels, while
@@ -339,17 +340,15 @@ fn shadow_ground_with_user_offset(
     let Ok(base_viewport) = camera.world_to_viewport(camera_transform, ground) else {
         return Some(ground);
     };
-    let Ok(up_viewport) = camera.world_to_viewport(
-        camera_transform,
-        ground + Vec3::Y * PROBE_WORLD_Y,
-    ) else {
+    let Ok(up_viewport) =
+        camera.world_to_viewport(camera_transform, ground + Vec3::Y * PROBE_WORLD_Y)
+    else {
         return Some(ground);
     };
 
     // Viewport Y grows downward. Moving +Y in world space normally decreases
     // viewport Y, so this value is positive for Nera's current camera.
-    let pixels_per_world_y =
-        (base_viewport.y - up_viewport.y) / PROBE_WORLD_Y;
+    let pixels_per_world_y = (base_viewport.y - up_viewport.y) / PROBE_WORLD_Y;
 
     if pixels_per_world_y.abs() > 0.001 {
         // Positive Ground Offset means a contact point lower on screen.
@@ -366,14 +365,11 @@ fn apply_character_shadow_receiver(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<ShadowOnlyMaterial>>,
-    mut receivers: Query<(
-        &CharacterShadowReceiver,
-        &mut Transform,
-        &mut Visibility,
-    )>,
+    mut receivers: Query<(&CharacterShadowReceiver, &mut Transform, &mut Visibility)>,
 ) {
     let should_show = shadow_is_grounded(
         &settings,
@@ -381,7 +377,8 @@ fn apply_character_shadow_receiver(
         &physics,
         &interaction,
         entrance.as_deref(),
-    ) && settings.uses_character_shadow();
+    ) && settings.uses_character_shadow()
+        && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
     let ground = if should_show {
         desktop_shadow_ground(&settings, &environment, &bones, &camera_query)
@@ -417,6 +414,7 @@ fn apply_light_settings(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     mut lights: Query<&mut DirectionalLight, With<NeraMainLight>>,
 ) {
     let multiplier = settings.brightness.clamp(50, 200) as f32 / 100.0;
@@ -426,7 +424,8 @@ fn apply_light_settings(
         &physics,
         &interaction,
         entrance.as_deref(),
-    ) && settings.uses_character_shadow();
+    ) && settings.uses_character_shadow()
+        && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
     for mut light in &mut lights {
         light.illuminance = BASE_LIGHT_ILLUMINANCE * multiplier;
@@ -439,11 +438,29 @@ fn apply_light_settings(
 
 #[cfg(debug_assertions)]
 pub(crate) fn assert_smoke_shadow_ground(world: &mut World) {
-    let anchor = world.resource::<DesktopEnvironment>().feet_anchor_logical.unwrap();
-    let points: Vec<_> = world.query_filtered::<&GlobalTransform, With<SimpleShadowLayer>>().iter(world).map(GlobalTransform::translation).collect();
-    let (camera, transform) = world.query_filtered::<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>().single(world).unwrap();
+    let anchor = world
+        .resource::<DesktopEnvironment>()
+        .feet_anchor_logical
+        .unwrap();
+    let points: Vec<_> = world
+        .query_filtered::<&GlobalTransform, With<SimpleShadowLayer>>()
+        .iter(world)
+        .map(GlobalTransform::translation)
+        .collect();
+    let (camera, transform) = world
+        .query_filtered::<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>()
+        .single(world)
+        .unwrap();
     assert_eq!(points.len(), 3);
-    for point in points { let viewport = camera.world_to_viewport(transform, point).unwrap(); assert!((viewport.y - anchor.y).abs() < 18.0, "shadow must stay at the cached floor, not lifted feet: {} vs {}", viewport.y, anchor.y); }
+    for point in points {
+        let viewport = camera.world_to_viewport(transform, point).unwrap();
+        assert!(
+            (viewport.y - anchor.y).abs() < 18.0,
+            "shadow must stay at the cached floor, not lifted feet: {} vs {}",
+            viewport.y,
+            anchor.y
+        );
+    }
 }
 
 #[cfg(test)]
@@ -453,47 +470,63 @@ mod tests {
     #[test]
     fn loading_avatar_has_no_shadow_but_scenes_without_entrance_keep_shadows() {
         let mut app = App::new();
-        app.insert_resource(NeraSettings { shadow_type: 1, ..default() })
-            .insert_resource(DesktopEnvironment {
-                feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
-                ..default()
-            })
-            .init_resource::<DesktopPhysicsState>()
-            .init_resource::<DesktopPetInteraction>()
-            .init_resource::<StartupEntrance>()
-            .add_systems(Update, apply_light_settings);
-        let light = app.world_mut()
+        app.insert_resource(NeraSettings {
+            shadow_type: 1,
+            ..default()
+        })
+        .insert_resource(DesktopEnvironment {
+            feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
+            ..default()
+        })
+        .init_resource::<DesktopPhysicsState>()
+        .init_resource::<DesktopPetInteraction>()
+        .init_resource::<StartupEntrance>()
+        .add_systems(Update, apply_light_settings);
+        let light = app
+            .world_mut()
             .spawn((NeraMainLight, DirectionalLight::default()))
             .id();
 
         app.update();
-        assert!(!app.world().get::<DirectionalLight>(light).unwrap().shadow_maps_enabled);
+        assert!(
+            !app.world()
+                .get::<DirectionalLight>(light)
+                .unwrap()
+                .shadow_maps_enabled
+        );
 
         // Preview/gallery scenes do not install the startup entrance resource.
         app.world_mut().remove_resource::<StartupEntrance>();
         app.update();
-        assert!(app.world().get::<DirectionalLight>(light).unwrap().shadow_maps_enabled);
+        assert!(
+            app.world()
+                .get::<DirectionalLight>(light)
+                .unwrap()
+                .shadow_maps_enabled
+        );
     }
 
     #[test]
     fn main_light_settings_leave_preview_lights_unchanged() {
         let mut app = App::new();
         app.insert_resource(NeraSettings {
-                brightness: 150,
-                shadow_type: 1,
-                ..default()
-            })
-            .insert_resource(DesktopEnvironment {
-                feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
-                ..default()
-            })
-            .init_resource::<DesktopPhysicsState>()
-            .init_resource::<DesktopPetInteraction>()
-            .add_systems(Update, apply_light_settings);
-        let main = app.world_mut()
+            brightness: 150,
+            shadow_type: 1,
+            ..default()
+        })
+        .insert_resource(DesktopEnvironment {
+            feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
+            ..default()
+        })
+        .init_resource::<DesktopPhysicsState>()
+        .init_resource::<DesktopPetInteraction>()
+        .add_systems(Update, apply_light_settings);
+        let main = app
+            .world_mut()
             .spawn((NeraMainLight, DirectionalLight::default()))
             .id();
-        let preview = app.world_mut()
+        let preview = app
+            .world_mut()
             .spawn(DirectionalLight {
                 illuminance: 1_234.0,
                 shadow_maps_enabled: false,

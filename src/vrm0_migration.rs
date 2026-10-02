@@ -32,7 +32,10 @@ pub(crate) fn migrate_vrm0(bytes: Vec<u8>) -> Result<MigratedVrm, String> {
         // legacy xRange to outputScale. A value around 90 degrees can rotate
         // eyeball meshes completely out of view. The repair is also a guard
         // against unsafe gaze ranges in ordinary imported VRM 1.0 files.
-        if sanitize_vrm1_look_at(&mut document) || repaired_expressions || (migrated_from_vrm0 && !had_marker) {
+        if sanitize_vrm1_look_at(&mut document)
+            || repaired_expressions
+            || (migrated_from_vrm0 && !had_marker)
+        {
             return Ok(MigratedVrm {
                 bytes: rebuild_glb(&bytes, json_length, &document)?,
                 converted: false,
@@ -394,20 +397,47 @@ fn repair_named_expressions(document: &mut Value) -> bool {
         ("relaxed", &["Fcl_ALL_Fun", "Fun", "Relaxed"]),
         ("surprised", &["Fcl_ALL_Surprised", "Surprised", "Surprise"]),
         ("blink", &["Fcl_EYE_Close", "Blink"]),
-        ("aa", &["Fcl_MTH_A", "A"]), ("ih", &["Fcl_MTH_I", "I"]),
-        ("ou", &["Fcl_MTH_U", "U"]), ("ee", &["Fcl_MTH_E", "E"]),
+        ("aa", &["Fcl_MTH_A", "A"]),
+        ("ih", &["Fcl_MTH_I", "I"]),
+        ("ou", &["Fcl_MTH_U", "U"]),
+        ("ee", &["Fcl_MTH_E", "E"]),
         ("oh", &["Fcl_MTH_O", "O"]),
     ];
-    let Some(nodes) = document.get("nodes").and_then(Value::as_array) else { return false; };
+    let Some(nodes) = document.get("nodes").and_then(Value::as_array) else {
+        return false;
+    };
     let mut inferred: Map<String, Value> = Map::new();
     for (preset, aliases) in ALIASES {
         let mut binds = Vec::new();
         for (node, value) in nodes.iter().enumerate() {
-            let Some(mesh) = value.get("mesh").and_then(Value::as_u64)
-                .and_then(|index| document.get("meshes")?.as_array()?.get(index as usize)) else { continue; };
-            let Some(names) = mesh.pointer("/extras/targetNames").and_then(Value::as_array) else { continue; };
-            if let Some(index) = names.iter().position(|name| name.as_str().is_some_and(|name| aliases.iter().any(|alias| name.eq_ignore_ascii_case(alias))))
-                && mesh.get("primitives").and_then(Value::as_array).is_some_and(|parts| !parts.is_empty() && parts.iter().all(|part| part.get("targets").and_then(Value::as_array).is_some_and(|targets| index < targets.len())))
+            let Some(mesh) = value
+                .get("mesh")
+                .and_then(Value::as_u64)
+                .and_then(|index| document.get("meshes")?.as_array()?.get(index as usize))
+            else {
+                continue;
+            };
+            let Some(names) = mesh
+                .pointer("/extras/targetNames")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            if let Some(index) = names.iter().position(|name| {
+                name.as_str().is_some_and(|name| {
+                    aliases.iter().any(|alias| name.eq_ignore_ascii_case(alias))
+                })
+            }) && mesh
+                .get("primitives")
+                .and_then(Value::as_array)
+                .is_some_and(|parts| {
+                    !parts.is_empty()
+                        && parts.iter().all(|part| {
+                            part.get("targets")
+                                .and_then(Value::as_array)
+                                .is_some_and(|targets| index < targets.len())
+                        })
+                })
             {
                 binds.push(json!({"node":node,"index":index,"weight":1.0}));
             }
@@ -416,27 +446,62 @@ fn repair_named_expressions(document: &mut Value) -> bool {
             inferred.insert((*preset).into(), json!({"morphTargetBinds":binds,"isBinary":false,"overrideBlink":"none","overrideLookAt":"none","overrideMouth":"none"}));
         }
     }
-    let Some(vrm) = document.pointer_mut("/extensions/VRMC_vrm").and_then(Value::as_object_mut) else { return false; };
-    let expressions = vrm.entry("expressions").or_insert_with(|| json!({"preset":{}}));
-    let Some(expressions) = expressions.as_object_mut() else { return false; };
+    let Some(vrm) = document
+        .pointer_mut("/extensions/VRMC_vrm")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let expressions = vrm
+        .entry("expressions")
+        .or_insert_with(|| json!({"preset":{}}));
+    let Some(expressions) = expressions.as_object_mut() else {
+        return false;
+    };
     // bevy_vrm1 initializes preset bindings, so mirror semantic custom groups too.
     if let Some(custom) = expressions.get("custom").and_then(Value::as_object) {
         for (name, expression) in custom {
             let key = match name.to_ascii_lowercase().as_str() {
-                "joy" | "happy" => "happy", "anger" | "angry" => "angry",
-                "sorrow" | "sad" => "sad", "fun" | "relaxed" => "relaxed",
-                "surprise" | "surprised" => "surprised", "blink" => "blink",
+                "joy" | "happy" => "happy",
+                "anger" | "angry" => "angry",
+                "sorrow" | "sad" => "sad",
+                "fun" | "relaxed" => "relaxed",
+                "surprise" | "surprised" => "surprised",
+                "blink" => "blink",
                 _ => continue,
             };
-            if expression.get("morphTargetBinds").and_then(Value::as_array).is_some_and(|binds| !binds.is_empty()) {
+            if expression
+                .get("morphTargetBinds")
+                .and_then(Value::as_array)
+                .is_some_and(|binds| !binds.is_empty())
+            {
                 inferred.insert(key.into(), expression.clone());
             }
         }
     }
-    let Some(preset) = expressions.entry("preset").or_insert_with(|| json!({})).as_object_mut() else { return false; };
+    let Some(preset) = expressions
+        .entry("preset")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        return false;
+    };
     let mut changed = false;
     for (name, expression) in inferred {
-        if preset.get(&name).is_none_or(|existing| ["morphTargetBinds", "materialColorBinds", "textureTransformBinds"].iter().all(|key| existing.get(*key).and_then(Value::as_array).is_none_or(Vec::is_empty))) {
+        if preset.get(&name).is_none_or(|existing| {
+            [
+                "morphTargetBinds",
+                "materialColorBinds",
+                "textureTransformBinds",
+            ]
+            .iter()
+            .all(|key| {
+                existing
+                    .get(*key)
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+            })
+        }) {
             preset.insert(name, expression);
             changed = true;
         }
@@ -901,22 +966,41 @@ mod tests {
         let mut document = json!({"nodes":[{"mesh":0},{"mesh":0}],"meshes":[{"extras":{"targetNames":["Fcl_ALL_Angry","Fcl_ALL_Joy"]},"primitives":[{"targets":[{},{}]}]}],"extensions":{"VRMC_vrm":{"expressions":{"preset":{"happy":{"morphTargetBinds":[{"node":0,"index":1,"weight":0.7}]}}}}}});
         assert!(repair_named_expressions(&mut document));
         let expressions = &document["extensions"]["VRMC_vrm"]["expressions"]["preset"];
-        assert_eq!(expressions["angry"]["morphTargetBinds"].as_array().unwrap().len(), 2);
-        assert_eq!(expressions["happy"]["morphTargetBinds"][0]["weight"], json!(0.7));
+        assert_eq!(
+            expressions["angry"]["morphTargetBinds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            expressions["happy"]["morphTargetBinds"][0]["weight"],
+            json!(0.7)
+        );
         assert!(!repair_named_expressions(&mut document));
         let mut baked = json!({"nodes":[{"mesh":0}],"meshes":[{"primitives":[{}]}],"extensions":{"VRMC_vrm":{"expressions":{"preset":{}}}}});
         assert!(!repair_named_expressions(&mut baked));
-        assert_eq!(baked["extensions"]["VRMC_vrm"]["expressions"]["preset"], json!({}));
+        assert_eq!(
+            baked["extensions"]["VRMC_vrm"]["expressions"]["preset"],
+            json!({})
+        );
     }
 
     #[test]
     fn unnamed_legacy_presets_and_semantic_custom_groups_are_supported() {
         let old = json!({"blendShapeMaster":{"blendShapeGroups":[{"name":"Angry","binds":[{"mesh":0,"index":2,"weight":90}]}]}});
-        let migrated = migrate_expressions(&old, &HashMap::from([(0,5)]));
-        assert_eq!(migrated["preset"]["angry"]["morphTargetBinds"][0], json!({"node":5,"index":2,"weight":0.9}));
+        let migrated = migrate_expressions(&old, &HashMap::from([(0, 5)]));
+        assert_eq!(
+            migrated["preset"]["angry"]["morphTargetBinds"][0],
+            json!({"node":5,"index":2,"weight":0.9})
+        );
         let mut document = json!({"nodes":[],"extensions":{"VRMC_vrm":{"expressions":{"custom":{"Joy":{"morphTargetBinds":[{"node":0,"index":0,"weight":1.0}]}},"preset":{}}}}});
         assert!(repair_named_expressions(&mut document));
-        assert!(document.pointer("/extensions/VRMC_vrm/expressions/preset/happy").is_some());
+        assert!(
+            document
+                .pointer("/extensions/VRMC_vrm/expressions/preset/happy")
+                .is_some()
+        );
     }
 
     #[test]

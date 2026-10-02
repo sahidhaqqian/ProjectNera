@@ -59,7 +59,9 @@ impl AlarmConfig {
             .day
             .clamp(1, alarm_days_in_month(self.year, self.month));
         self.repeat_days &= 0b0111_1111;
-        self.sound = self.sound.min((crate::alarm::sounds::SOUNDS.len() - 1) as u8);
+        self.sound = self
+            .sound
+            .min((crate::alarm::sounds::SOUNDS.len() - 1) as u8);
         if self.mode == 1 && self.repeat_days == 0 {
             self.enabled = false;
         }
@@ -255,6 +257,9 @@ pub(crate) struct NeraSettings {
     /// Disabled by default, including profiles created before walking existed.
     pub(crate) walking_enabled: bool,
     pub(crate) gravity_enabled: bool,
+    pub(crate) throw_enabled: bool,
+    /// Launch strength percentage. 100 preserves the original throw velocity.
+    pub(crate) throw_intensity: u8,
     /// 0 = Calm, 1 = Normal, 2 = Active. Unknown values use Normal.
     pub(crate) activity_level: u8,
     /// Maximum distance from the last user placement, in logical pixels (DPI-scaled).
@@ -355,6 +360,8 @@ impl Default for NeraSettings {
             ground_offset: 0,
             walking_enabled: false,
             gravity_enabled: true,
+            throw_enabled: true,
+            throw_intensity: 50,
             activity_level: 1,
             roaming_radius_px: 400,
             pause_roaming_fullscreen: true,
@@ -389,6 +396,18 @@ impl Default for NeraSettings {
 }
 
 impl NeraSettings {
+    pub(crate) fn throw_strength(&self) -> f32 {
+        if self.throw_enabled {
+            f32::from(self.throw_intensity.min(100)) / 100.0
+        } else {
+            0.0
+        }
+    }
+
+    pub(super) fn throw_intensity_label(&self) -> String {
+        format!("{}%", self.throw_intensity.min(100))
+    }
+
     pub(crate) fn activity_level(&self) -> ActivityLevel {
         match self.activity_level {
             0 => ActivityLevel::Calm,
@@ -722,7 +741,10 @@ fn decode_alarm_book(book: &str) -> Option<Vec<AlarmConfig>> {
                     day: fields[7].parse().ok()?,
                     repeat_days: fields[8].parse().ok()?,
                     label: decode_label_hex(fields[9])?,
-                    sound: fields.get(10).and_then(|sound| sound.parse().ok()).unwrap_or(0),
+                    sound: fields
+                        .get(10)
+                        .and_then(|sound| sound.parse().ok())
+                        .unwrap_or(0),
                 }
                 .normalized(),
             )
@@ -808,6 +830,37 @@ mod walking_settings_tests {
 }
 
 #[cfg(test)]
+mod throw_settings_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_profiles_default_to_gentler_throws_and_saved_preferences_are_reflectable() {
+        let mut old = bevy::reflect::structs::DynamicStruct::default();
+        old.insert("gravity_enabled", false);
+        let mut settings = NeraSettings::default();
+        settings.apply(&old);
+        assert!(settings.throw_enabled);
+        assert_eq!(settings.throw_intensity, 50);
+        assert_eq!(settings.throw_strength(), 0.5);
+        assert!(!settings.gravity_enabled);
+
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("throw_enabled", false);
+        saved.insert("throw_intensity", 30_u8);
+        settings.apply(&saved);
+        assert!(!settings.throw_enabled);
+        assert_eq!(settings.throw_intensity, 30);
+        assert_eq!(settings.throw_strength(), 0.0);
+        settings.throw_enabled = true;
+        assert_eq!(settings.throw_strength(), 0.3);
+        settings.throw_intensity = u8::MAX;
+        assert_eq!(settings.throw_strength(), 1.0);
+        settings.throw_intensity = 0;
+        assert_eq!(settings.throw_strength(), 0.0);
+    }
+}
+
+#[cfg(test)]
 mod roaming_settings_tests {
     use super::*;
 
@@ -862,7 +915,10 @@ mod alarm_book_tests {
         assert_eq!(old[0].sound, 0);
         let mut alarm = old[0].clone();
         alarm.sound = 4;
-        assert_eq!(decode_alarm_book(&encode_alarm_book(&[alarm.clone()])).unwrap(), vec![alarm]);
+        assert_eq!(
+            decode_alarm_book(&encode_alarm_book(&[alarm.clone()])).unwrap(),
+            vec![alarm]
+        );
     }
 
     #[test]

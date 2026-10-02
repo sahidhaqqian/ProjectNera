@@ -32,6 +32,7 @@ impl Plugin for AvatarMemoryPlugin {
 fn is_vrm_asset(path: &std::path::Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("vrm"))
+        || path.ends_with("vrm/Cloud/nera_cloud_1024.glb")
 }
 
 pub(crate) fn release_avatar_mesh_copies(

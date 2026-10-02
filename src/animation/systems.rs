@@ -24,9 +24,13 @@ pub(super) struct AlarmAnimationRuntime {
 }
 pub(crate) fn sync_environment_animation_state(
     environment: Res<DesktopEnvironment>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
 ) {
+    if cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()) {
+        return;
+    }
     observe_environment_support(&environment, &clips, &mut state);
 }
 
@@ -77,26 +81,45 @@ pub(crate) fn sync_interaction_animation_actions(
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
     mut environment: ResMut<DesktopEnvironment>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    cloud_pose: Option<Res<crate::cloud::CloudSeatPose>>,
 ) {
-    if drag_started.read().next().is_some() {
+    let cloud_seated = cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
+    let resting = cloud
+        .as_ref()
+        .is_some_and(|cloud| cloud.mode() == Some(crate::cloud::CloudMode::Rest));
+    let cloud_ready = cloud.as_ref().is_some_and(|cloud| {
+        cloud_pose
+            .as_ref()
+            .is_some_and(|pose| pose.is_ready_for(cloud))
+    });
+    if drag_started.read().next().is_some() && !cloud_seated {
         state.start_persistent_action(TemporaryAction::Floating);
     }
 
     for event in clicked.read() {
+        if resting {
+            continue;
+        }
         if matches!(event.body_part, BodyPart::Head | BodyPart::Torso)
-            && on_sitting_surface(environment.placement)
+            && (cloud_seated || on_sitting_surface(environment.placement))
         {
             // Native support may have changed earlier in this frame, before
             // the regular support sync. Use actual placement for hit routing.
-            observe_environment_support(&environment, &clips, &mut state);
+            if !cloud_seated {
+                observe_environment_support(&environment, &clips, &mut state);
+            }
             state.reset_damage_combo();
             // Let the base seated pose calibrate its anchor before playing a
             // clip authored with a different hip position. Early hits are
             // consumed, so they cannot fall through to standing damage.
-            if matches!(
-                environment.placement,
-                PlacementState::Window(_) | PlacementState::Taskbar(_)
-            ) {
+            if cloud_ready
+                || (!cloud_seated
+                    && matches!(
+                        environment.placement,
+                        PlacementState::Window(_) | PlacementState::Taskbar(_)
+                    ))
+            {
                 state.request_sitting_dodge(
                     clips
                         .dodge_while_sitting
@@ -104,6 +127,9 @@ pub(crate) fn sync_interaction_animation_actions(
                         .unwrap_or(Duration::ZERO),
                 );
             }
+            continue;
+        }
+        if cloud_seated && !cloud_ready {
             continue;
         }
         match event.body_part {
@@ -141,8 +167,10 @@ pub(crate) fn sync_interaction_animation_actions(
             }
             _ => {
                 state.reset_damage_combo();
-                state.request_one_shot(TemporaryAction::LimbReaction(event.body_part),
-                    super::limbs::REACTION_DURATION);
+                state.request_one_shot(
+                    TemporaryAction::LimbReaction(event.body_part),
+                    super::limbs::REACTION_DURATION,
+                );
             }
         }
     }
@@ -159,7 +187,7 @@ pub(crate) fn sync_interaction_animation_actions(
         info!("Nera detached: Death01 triggered while sitting/attached");
     }
 
-    if head_patted.read().next().is_some() {
+    if head_patted.read().count() > 0 && !resting && (!cloud_seated || cloud_ready) {
         if let Some(clip) = clips.head_stroke {
             state.request_one_shot(TemporaryAction::HeadStroke, clip.duration);
         } else {

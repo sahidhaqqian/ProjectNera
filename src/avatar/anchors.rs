@@ -22,6 +22,10 @@ const FOOT_SOLE_OFFSET_LOGICAL: f32 = 12.0;
 /// the current avatar orientation.
 const SEAT_OFFSET_WORLD: Vec3 = Vec3::new(0.0, -0.12, 0.08);
 
+pub(crate) fn seat_contact_world(hips: &GlobalTransform) -> Vec3 {
+    hips.transform_point(SEAT_OFFSET_WORLD)
+}
+
 /// VRMA is a 3D pose, while the Windows desktop support surface is a 2D
 /// screen-space line. During Death01 we gently reconcile those two spaces by
 /// translating only Nera's 3D root after the fall has begun. We never move the
@@ -182,6 +186,7 @@ pub(crate) fn preserve_seated_hips(
     time: Res<Time>,
     animation: Res<NeraAnimationState>,
     environment: Res<DesktopEnvironment>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     mut anchor: Local<SeatedHipsAnchor>,
     avatar: Query<&HipsBoneEntity, With<NeraAvatar>>,
     mut bones: Query<&mut Transform, Without<NeraAvatar>>,
@@ -196,10 +201,19 @@ pub(crate) fn preserve_seated_hips(
     anchor.apply(
         hips.0,
         animation.visual_state(),
-        environment.placement != PlacementState::Free,
+        environment.placement != PlacementState::Free
+            || cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()),
         time.delta(),
         &mut pose,
     );
+}
+
+#[cfg(target_os = "windows")]
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct AnchorOwners<'w> {
+    library: Option<Res<'w, crate::animation::LibraryPlayback>>,
+    cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
+    clips: Option<Res<'w, crate::animation::NeraAnimationClips>>,
 }
 
 #[cfg(target_os = "windows")]
@@ -207,7 +221,7 @@ pub(crate) fn update_avatar_anchors(
     time: Res<Time>,
     interaction: Res<DesktopPetInteraction>,
     animation: Res<NeraAnimationState>,
-    library: Option<Res<crate::animation::LibraryPlayback>>,
+    owners: AnchorOwners,
     walking: Res<crate::walking::WalkingRuntime>,
     settings: Res<NeraSettings>,
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
@@ -229,12 +243,16 @@ pub(crate) fn update_avatar_anchors(
     children_query: Query<&Children>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
-    let death_pose = animation.death_active() || matches!(animation.visual_state(), VisualState::LibraryAnimation(entity) if library.as_ref().and_then(|library| library.path_for(entity)).is_some_and(|path| path == "animations/animasi_basic/Death01.vrma"));
+    let library = owners.library;
+    let cloud = owners.cloud;
+    let death_pose = animation.death_active()
+        || matches!(animation.visual_state(), VisualState::LibraryAnimation(entity) if library.as_ref().and_then(|library| library.path_for(entity)).is_some_and(|path| path == "animations/animasi_basic/Death01.vrma"));
     let standing_sample_ready =
         standing_sample.ready(animation.visual_state(), walking.active(), time.delta());
     let seat_sample_ready = seat_sample.ready(
         animation.visual_state(),
-        environment.placement != PlacementState::Free,
+        environment.placement != PlacementState::Free
+            || cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()),
         time.delta(),
     );
     // Seat/hips must keep updating even during a free drag because it is the
@@ -307,7 +325,15 @@ pub(crate) fn update_avatar_anchors(
             "hips" => {
                 // The hips bone is the pelvis center, not the actual contact
                 // point with a chair/window edge.
-                let seat_world = transform.transform_point(SEAT_OFFSET_WORLD);
+                let sleeping = cloud.as_ref().is_some_and(|cloud| cloud.is_lying_rest())
+                    && owners
+                        .clips
+                        .as_ref()
+                        .is_some_and(|clips| clips.sleeping_idle_entity().is_some());
+                let seat_world = cloud.as_ref().map_or_else(
+                    || seat_contact_world(transform),
+                    |cloud| cloud.contact_world(transform, sleeping),
+                );
 
                 if let Ok(viewport) = camera.world_to_viewport(camera_transform, seat_world) {
                     seat = Some(viewport);
@@ -322,6 +348,7 @@ pub(crate) fn update_avatar_anchors(
     // this cache either: a drag begun mid-walk resets physics and later reuses
     // this standing sample when acquiring support after release.
     if environment.placement == PlacementState::Free
+        && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement())
         && interaction.state != InteractionState::Dragging
         && interaction.drag_offset.is_none()
         && standing_sample_ready

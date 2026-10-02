@@ -272,6 +272,8 @@ pub(crate) fn configure_instance(settings: &mut NeraSettings) {
         settings.audio_muted = value["muted"].as_bool().unwrap_or(false);
         settings.walking_enabled = value["walking"].as_bool().unwrap_or(false);
         settings.gravity_enabled = value["gravity"].as_bool().unwrap_or(true);
+        settings.throw_enabled = value["throw"].as_bool().unwrap_or(true);
+        settings.throw_intensity = value["throw_intensity"].as_u64().unwrap_or(50).min(100) as u8;
         settings.brightness = value["brightness"].as_u64().unwrap_or(100).clamp(25, 200) as u8;
         settings.shadow_enabled = value["shadow"].as_bool().unwrap_or(true);
     }
@@ -558,6 +560,7 @@ fn handle_requests(
                     "walking": settings.walking_enabled, "brightness": settings.brightness,
                     "shadow": settings.shadow_enabled,
                     "gravity": settings.gravity_enabled,
+                    "throw": settings.throw_enabled, "throw_intensity": settings.throw_intensity,
                 });
                 let result = std::env::current_exe().and_then(|executable| {
                     let mut command = Command::new(executable);

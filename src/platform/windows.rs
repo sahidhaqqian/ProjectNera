@@ -4,83 +4,31 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
-use bevy::{
-    prelude::Entity,
-    winit::WINIT_WINDOWS,
-};
+use bevy::{prelude::Entity, winit::WINIT_WINDOWS};
 
-use raw_window_handle::{
-    HasWindowHandle,
-    RawWindowHandle,
-};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use windows::core::BOOL;
 
 use windows::Win32::{
-    Foundation::{
-        HWND,
-        LPARAM,
-        POINT,
-        RECT,
-        SYSTEMTIME,
-    },
-
+    Foundation::{HWND, LPARAM, POINT, RECT, SYSTEMTIME},
     Graphics::{
-        Dwm::{
-            DwmGetWindowAttribute,
-            DWMWA_CLOAKED,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-        },
-
+        Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
         Gdi::{
-            EnumDisplayMonitors,
-            HDC,
-            HMONITOR,
-            GetMonitorInfoW,
-            MonitorFromWindow,
-            MONITORINFO,
-            MONITOR_DEFAULTTONEAREST,
+            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+            MONITORINFO, MonitorFromWindow,
         },
     },
-
     System::SystemInformation::GetLocalTime,
-
     UI::{
         HiDpi::GetDpiForWindow,
-
         WindowsAndMessaging::{
-            GetWindow,
-            GW_HWNDFIRST,
-            GW_HWNDNEXT,
-            GW_HWNDPREV,
-            EnumWindows,
-            GA_ROOT,
-            GetAncestor,
-            GetClassNameW,
-            GetCursorPos,
-            GetForegroundWindow,
-            GetShellWindow,
-            GetWindowLongPtrW,
-            GetWindowRect,
-            GetWindowThreadProcessId,
-            GWL_EXSTYLE,
-            GWL_STYLE,
-            IsIconic,
-            IsZoomed,
-            IsWindow,
-            IsWindowVisible,
-            SetWindowPos,
-            WindowFromPoint,
-            SWP_NOACTIVATE,
-            SWP_NOMOVE,
-            SWP_NOSIZE,
-            SWP_NOZORDER,
-            HWND_NOTOPMOST,
-            HWND_TOPMOST,
-            WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST,
-            WS_CAPTION,
-            WS_MAXIMIZE,
+            EnumWindows, GA_ROOT, GW_HWNDFIRST, GW_HWNDNEXT, GW_HWNDPREV, GWL_EXSTYLE, GWL_STYLE,
+            GetAncestor, GetClassNameW, GetCursorPos, GetForegroundWindow, GetShellWindow,
+            GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_NOTOPMOST,
+            HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, IsZoomed, SWP_NOACTIVATE,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WS_CAPTION, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_MAXIMIZE, WindowFromPoint,
         },
     },
 };
@@ -136,7 +84,6 @@ impl NativeWindowHandle {
         HWND(self.0 as *mut c_void)
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NativeMonitorHandle(isize);
@@ -215,10 +162,7 @@ impl PhysicalRect {
     }
 
     pub const fn contains(self, point: PhysicalPoint) -> bool {
-        point.x >= self.left
-            && point.x < self.right
-            && point.y >= self.top
-            && point.y < self.bottom
+        point.x >= self.left && point.x < self.right && point.y >= self.top && point.y < self.bottom
     }
 }
 
@@ -244,7 +188,6 @@ pub struct MonitorInfo {
     pub work_area: PhysicalRect,
     pub is_primary: bool,
 }
-
 
 // -----------------------------------------------------------------------------
 // Desktop Windows
@@ -273,9 +216,7 @@ pub fn native_window_handle(entity: Entity) -> Option<NativeWindowHandle> {
         let window_handle = window.window_handle().ok()?;
 
         match window_handle.as_raw() {
-            RawWindowHandle::Win32(handle) => {
-                Some(NativeWindowHandle::from_raw(handle.hwnd.get()))
-            }
+            RawWindowHandle::Win32(handle) => Some(NativeWindowHandle::from_raw(handle.hwnd.get())),
 
             _ => None,
         }
@@ -336,7 +277,6 @@ pub fn window_rect(handle: NativeWindowHandle) -> Option<PhysicalRect> {
     Some(rect.into())
 }
 
-
 // -----------------------------------------------------------------------------
 // Window Discovery
 // -----------------------------------------------------------------------------
@@ -353,20 +293,13 @@ fn native_handle_from_hwnd(hwnd: HWND) -> NativeWindowHandle {
 fn window_class_name(hwnd: HWND) -> String {
     let mut buffer = [0u16; 256];
 
-    let length = unsafe {
-        GetClassNameW(
-            hwnd,
-            &mut buffer,
-        )
-    };
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
 
     if length <= 0 {
         return String::new();
     }
 
-    String::from_utf16_lossy(
-        &buffer[..length as usize],
-    )
+    String::from_utf16_lossy(&buffer[..length as usize])
 }
 
 fn is_hwnd_cloaked(hwnd: HWND) -> bool {
@@ -403,10 +336,7 @@ fn is_system_window_class(class_name: &str) -> bool {
     )
 }
 
-fn is_window_candidate(
-    hwnd: HWND,
-    nera_hwnd: NativeWindowHandle,
-) -> bool {
+fn is_window_candidate(hwnd: HWND, nera_hwnd: NativeWindowHandle) -> bool {
     // Null / invalid HWND.
     if hwnd.0.is_null() {
         return false;
@@ -448,21 +378,14 @@ fn is_window_candidate(
     }
 
     // Jangan ambil shell desktop.
-    let shell_window = unsafe {
-        GetShellWindow()
-    };
+    let shell_window = unsafe { GetShellWindow() };
 
     if hwnd == shell_window {
         return false;
     }
 
     // Kita cuma mau root top-level window.
-    let root = unsafe {
-        GetAncestor(
-            hwnd,
-            GA_ROOT,
-        )
-    };
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
 
     if root != hwnd {
         return false;
@@ -474,81 +397,49 @@ fn is_window_candidate(
     }
 
     // Skip utility/tool windows.
-    let ex_style = unsafe {
-        GetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-        )
-    } as u32;
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
 
     if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
         return false;
     }
 
-    let class_name =
-        window_class_name(hwnd);
+    let class_name = window_class_name(hwnd);
 
     if is_system_window_class(&class_name) {
         return false;
     }
 
-    let handle =
-        native_handle_from_hwnd(hwnd);
+    let handle = native_handle_from_hwnd(hwnd);
 
-    let Some(rect) =
-        window_rect(handle)
-    else {
+    let Some(rect) = window_rect(handle) else {
         return false;
     };
 
     // Minimized/invalid/internal windows kadang menghasilkan
     // geometry yang tidak berguna.
-    if rect.width() <= 1
-        || rect.height() <= 1
-    {
+    if rect.width() <= 1 || rect.height() <= 1 {
         return false;
     }
 
     true
 }
 
-fn desktop_window_from_hwnd(
-    hwnd: HWND,
-    nera_hwnd: NativeWindowHandle,
-) -> Option<DesktopWindow> {
-    if !is_window_candidate(
-        hwnd,
-        nera_hwnd,
-    ) {
+fn desktop_window_from_hwnd(hwnd: HWND, nera_hwnd: NativeWindowHandle) -> Option<DesktopWindow> {
+    if !is_window_candidate(hwnd, nera_hwnd) {
         return None;
     }
 
-    let handle =
-        native_handle_from_hwnd(hwnd);
+    let handle = native_handle_from_hwnd(hwnd);
 
-    let rect =
-        window_rect(handle)?;
+    let rect = window_rect(handle)?;
 
-    Some(DesktopWindow {
-        handle,
-        rect,
-    })
+    Some(DesktopWindow { handle, rect })
 }
 
-unsafe extern "system" fn enum_windows_proc(
-    hwnd: HWND,
-    lparam: LPARAM,
-) -> BOOL {
-    let context = unsafe {
-        &mut *(lparam.0 as *mut EnumWindowsContext)
-    };
+unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let context = unsafe { &mut *(lparam.0 as *mut EnumWindowsContext) };
 
-    if let Some(window) =
-        desktop_window_from_hwnd(
-            hwnd,
-            context.nera_hwnd,
-        )
-    {
+    if let Some(window) = desktop_window_from_hwnd(hwnd, context.nera_hwnd) {
         context.windows.push(window);
     }
 
@@ -558,19 +449,15 @@ unsafe extern "system" fn enum_windows_proc(
 pub fn enumerate_windows(
     nera_hwnd: NativeWindowHandle,
 ) -> windows::core::Result<Vec<DesktopWindow>> {
-    let mut context =
-        EnumWindowsContext {
-            nera_hwnd,
-            windows: Vec::new(),
-        };
+    let mut context = EnumWindowsContext {
+        nera_hwnd,
+        windows: Vec::new(),
+    };
 
     unsafe {
         EnumWindows(
             Some(enum_windows_proc),
-            LPARAM(
-                (&mut context as *mut EnumWindowsContext)
-                    as isize,
-            ),
+            LPARAM((&mut context as *mut EnumWindowsContext) as isize),
         )?;
     }
 
@@ -582,33 +469,23 @@ fn direct_window_at_point(
     nera_hwnd: NativeWindowHandle,
 ) -> Option<NativeWindowHandle> {
     let hwnd = unsafe {
-        WindowFromPoint(
-            POINT {
-                x: point.x,
-                y: point.y,
-            },
-        )
+        WindowFromPoint(POINT {
+            x: point.x,
+            y: point.y,
+        })
     };
 
     if hwnd.0.is_null() {
         return None;
     }
 
-    let root = unsafe {
-        GetAncestor(
-            hwnd,
-            GA_ROOT,
-        )
-    };
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
 
     if root.0.is_null() {
         return None;
     }
 
-    if !is_window_candidate(
-        root,
-        nera_hwnd,
-    ) {
+    if !is_window_candidate(root, nera_hwnd) {
         return None;
     }
 
@@ -621,12 +498,7 @@ pub fn window_at_point(
     _windows: &[DesktopWindow],
 ) -> Option<NativeWindowHandle> {
     // Fast/native path.
-    if let Some(handle) =
-        direct_window_at_point(
-            point,
-            nera_hwnd,
-        )
-    {
+    if let Some(handle) = direct_window_at_point(point, nera_hwnd) {
         return Some(handle);
     }
 
@@ -656,7 +528,6 @@ pub fn window_at_point(
     None
 }
 
-
 /// Pindahkan window tanpa:
 ///
 /// - resize
@@ -672,7 +543,6 @@ pub fn window_at_point(
 pub fn window_is_visible(handle: NativeWindowHandle) -> bool {
     unsafe { IsWindowVisible(handle.hwnd()) }.as_bool()
 }
-
 
 pub fn move_window(
     handle: NativeWindowHandle,
@@ -691,14 +561,11 @@ pub fn move_window(
     }
 }
 
-
 /// Reassert an HWND at the front of the Windows topmost band without moving,
 /// resizing, or activating it. Taskbar sitting uses this because Shell_TrayWnd
 /// can otherwise visually cover part of an always-on-top pet after the taskbar
 /// itself is clicked.
-pub fn place_window_topmost_noactivate(
-    handle: NativeWindowHandle,
-) -> windows::core::Result<()> {
+pub fn place_window_topmost_noactivate(handle: NativeWindowHandle) -> windows::core::Result<()> {
     unsafe {
         SetWindowPos(
             handle.hwnd(),
@@ -711,7 +578,6 @@ pub fn place_window_topmost_noactivate(
         )
     }
 }
-
 
 /// Keep Nera immediately above a normal target window without making Nera
 /// globally topmost. Windows that are already above the target remain above
@@ -768,27 +634,12 @@ pub fn place_window_directly_above(
     }
 }
 
-
-pub fn is_window_alive(
-    handle: NativeWindowHandle,
-) -> bool {
-    unsafe {
-        IsWindow(
-            Some(handle.hwnd()),
-        )
-        .as_bool()
-    }
+pub fn is_window_alive(handle: NativeWindowHandle) -> bool {
+    unsafe { IsWindow(Some(handle.hwnd())).as_bool() }
 }
 
-pub fn is_window_minimized(
-    handle: NativeWindowHandle,
-) -> bool {
-    unsafe {
-        IsIconic(
-            handle.hwnd(),
-        )
-        .as_bool()
-    }
+pub fn is_window_minimized(handle: NativeWindowHandle) -> bool {
+    unsafe { IsIconic(handle.hwnd()).as_bool() }
 }
 
 pub fn is_window_maximized(handle: NativeWindowHandle) -> bool {
@@ -824,12 +675,22 @@ pub fn pick_asset_file(
     };
     if !unsafe { GetOpenFileNameW(&mut dialog).as_bool() } {
         let error = unsafe { CommDlgExtendedError() };
-        return if error.0 == 0 { Ok(None) } else {
-            Err(format!("Could not open file picker (Windows error {}).", error.0))
+        return if error.0 == 0 {
+            Ok(None)
+        } else {
+            Err(format!(
+                "Could not open file picker (Windows error {}).",
+                error.0
+            ))
         };
     }
-    let len = buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len());
-    Ok(Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len]))))
+    let len = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    Ok(Some(std::path::PathBuf::from(
+        std::ffi::OsString::from_wide(&buffer[..len]),
+    )))
 }
 
 /// Whether an external foreground application covers the physical monitor.
@@ -1013,15 +874,9 @@ mod fullscreen_tests {
 // -----------------------------------------------------------------------------
 
 pub fn dpi_for_window(handle: NativeWindowHandle) -> u32 {
-    let dpi = unsafe {
-        GetDpiForWindow(handle.hwnd())
-    };
+    let dpi = unsafe { GetDpiForWindow(handle.hwnd()) };
 
-    if dpi == 0 {
-        BASE_DPI
-    } else {
-        dpi
-    }
+    if dpi == 0 { BASE_DPI } else { dpi }
 }
 
 pub fn dpi_scale_factor(dpi: u32) -> f64 {
@@ -1031,9 +886,7 @@ pub fn dpi_scale_factor(dpi: u32) -> f64 {
 // -----------------------------------------------------------------------------
 // Monitor Information
 // -----------------------------------------------------------------------------
-fn monitor_info_from_hmonitor(
-    monitor: HMONITOR,
-) -> Option<MonitorInfo> {
+fn monitor_info_from_hmonitor(monitor: HMONITOR) -> Option<MonitorInfo> {
     if monitor.0.is_null() {
         return None;
     }
@@ -1043,40 +896,25 @@ fn monitor_info_from_hmonitor(
         ..Default::default()
     };
 
-    let success = unsafe {
-        GetMonitorInfoW(
-            monitor,
-            &mut info,
-        )
-    };
+    let success = unsafe { GetMonitorInfoW(monitor, &mut info) };
 
     if !success.as_bool() {
         return None;
     }
 
     Some(MonitorInfo {
-        handle: NativeMonitorHandle::from_raw(
-            monitor.0 as isize,
-        ),
+        handle: NativeMonitorHandle::from_raw(monitor.0 as isize),
 
         bounds: info.rcMonitor.into(),
 
         work_area: info.rcWork.into(),
 
-        is_primary:
-            (info.dwFlags & MONITOR_PRIMARY_FLAG) != 0,
+        is_primary: (info.dwFlags & MONITOR_PRIMARY_FLAG) != 0,
     })
 }
 
-pub fn monitor_info(
-    handle: NativeWindowHandle,
-) -> Option<MonitorInfo> {
-    let monitor = unsafe {
-        MonitorFromWindow(
-            handle.hwnd(),
-            MONITOR_DEFAULTTONEAREST,
-        )
-    };
+pub fn monitor_info(handle: NativeWindowHandle) -> Option<MonitorInfo> {
+    let monitor = unsafe { MonitorFromWindow(handle.hwnd(), MONITOR_DEFAULTTONEAREST) };
 
     monitor_info_from_hmonitor(monitor)
 }
@@ -1095,18 +933,9 @@ unsafe extern "system" fn enum_monitors_proc(
     _rect: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
-    let context = unsafe {
-        &mut *(
-            lparam.0
-                as *mut EnumMonitorsContext
-        )
-    };
+    let context = unsafe { &mut *(lparam.0 as *mut EnumMonitorsContext) };
 
-    if let Some(info) =
-        monitor_info_from_hmonitor(
-            monitor,
-        )
-    {
+    if let Some(info) = monitor_info_from_hmonitor(monitor) {
         context.monitors.push(info);
     }
 
@@ -1123,10 +952,7 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
             None,
             None,
             Some(enum_monitors_proc),
-            LPARAM(
-                (&mut context as *mut EnumMonitorsContext)
-                    as isize,
-            ),
+            LPARAM((&mut context as *mut EnumMonitorsContext) as isize),
         )
     };
 

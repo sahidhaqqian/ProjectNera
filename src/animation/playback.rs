@@ -40,6 +40,7 @@ pub(crate) struct NeraAnimationClips {
     pub(super) sitting_loop: Option<ClipSlot>,
     pub(super) sitting_2: Option<ClipSlot>,
     pub(super) sitting_4: Option<ClipSlot>,
+    pub(super) sleeping_idle: Option<ClipSlot>,
     // Legacy resolver slot only: detach is immediate, so no exit clip is preloaded.
     pub(super) sitting_exit: Option<ClipSlot>,
 
@@ -70,6 +71,17 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    pub(crate) fn sleeping_idle_entity(&self) -> Option<Entity> {
+        self.sleeping_idle
+            .filter(|clip| !clip.duration.is_zero())
+            .map(|clip| clip.entity)
+    }
+
+    pub(crate) fn sleeping_idle_playing(&self, playback: &NeraAnimationPlayback) -> bool {
+        self.sleeping_idle_entity()
+            .is_some_and(|entity| playback.current_clip == Some(entity))
+    }
+
     pub(super) fn sitting_pose(&self, pose: SittingPose) -> Option<ClipSlot> {
         match pose {
             SittingPose::Default => self.sitting_loop,
@@ -194,6 +206,11 @@ register_clip!(
     "SittingEnter"
 );
 register_clip!(register_sitting_loop_animation, sitting_loop, "SittingLoop");
+register_clip!(
+    register_sleeping_idle_animation,
+    sleeping_idle,
+    "Cloud/SleepingIdle"
+);
 
 // Phase 5.8 idle micro-actions.
 register_clip!(
@@ -239,6 +256,7 @@ const HEAD_STROKE_VRMA_PATH: &str = "animations/animasi_basic/Blush.vrma";
 const PRAYING_VRMA_PATH: &str = "animations/animasi_basic/Praying.vrma";
 const SITTING_ENTER_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Enter.vrma";
 const SITTING_LOOP_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Idle_Loop.vrma";
+const SLEEPING_IDLE_VRMA_PATH: &str = "animations/animasi_basic/Sleeping_Idle.vrma";
 
 // Phase 5.8 idle micro-actions. Fidgets only: Clapping/Goodbye/Jump are also
 // converted and unused, but a pet that randomly applauds while you work reads
@@ -260,6 +278,7 @@ const IDLE_SITTING_RUBBING_ARM_VRMA_PATH: &str =
 /// the actual `VrmaHandle` is inserted only when a feature first requests it.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LazyNeraVrma {
+    SleepingIdle,
     AlarmJump,
     Praying,
     IdleSleepy,
@@ -272,6 +291,7 @@ pub(crate) enum LazyNeraVrma {
 impl LazyNeraVrma {
     fn path(self) -> &'static str {
         match self {
+            Self::SleepingIdle => SLEEPING_IDLE_VRMA_PATH,
             Self::AlarmJump => ALARM_JUMP_VRMA_PATH,
             Self::Praying => PRAYING_VRMA_PATH,
             Self::IdleSleepy => IDLE_SLEEPY_VRMA_PATH,
@@ -317,7 +337,10 @@ pub(crate) fn request_lazy_vrma(
                 VrmaHandle(asset_server.load(kind.path())),
                 LazyNeraVrmaRequested,
             ));
-            info!("Nera lazy VRMA requested | kind={kind:?} path={}", kind.path());
+            info!(
+                "Nera lazy VRMA requested | kind={kind:?} path={}",
+                kind.path()
+            );
         }
         return true;
     }
@@ -328,10 +351,21 @@ pub(crate) fn request_lazy_vrma(
 pub(crate) fn ensure_state_lazy_vrmas(
     state: Res<NeraAnimationState>,
     clips: Res<NeraAnimationClips>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
 ) {
+    if cloud.as_ref().is_some_and(|cloud| cloud.is_lying_rest())
+        && clips.sleeping_idle_entity().is_none()
+    {
+        request_lazy_vrma(
+            LazyNeraVrma::SleepingIdle,
+            &mut commands,
+            &asset_server,
+            &loaders,
+        );
+    }
     if state.visual_state() == VisualState::Praying && clips.praying.is_none() {
         request_lazy_vrma(
             LazyNeraVrma::Praying,
@@ -446,6 +480,13 @@ pub(crate) fn spawn_animation_library(
         ))
         .observe(register_sitting_loop_animation);
 
+    parent
+        .spawn((
+            Name::new("Nera Sleeping Idle (lazy)"),
+            LazyNeraVrma::SleepingIdle,
+        ))
+        .observe(register_sleeping_idle_animation);
+
     // Phase 5.8 idle micro-actions. Same child-of-"Nera" pattern as
     // everything else here: bevy_vrm1 needs the VRM ancestry to
     // retarget the clip.
@@ -464,7 +505,10 @@ pub(crate) fn spawn_animation_library(
         .observe(register_idle_relax_animation);
 
     parent
-        .spawn((Name::new("Nera Idle Sleepy (lazy)"), LazyNeraVrma::IdleSleepy))
+        .spawn((
+            Name::new("Nera Idle Sleepy (lazy)"),
+            LazyNeraVrma::IdleSleepy,
+        ))
         .observe(register_idle_sleepy_animation);
 
     parent
@@ -599,6 +643,21 @@ pub(super) fn clip_for_state(
     clip_for_visual(state.visual_state(), clips)
 }
 
+pub(super) fn clip_for_cloud(
+    state: &NeraAnimationState,
+    clips: &NeraAnimationClips,
+    rest_pose: Option<crate::cloud::RestPose>,
+) -> (Option<ClipSlot>, RepeatAnimation, &'static str) {
+    if rest_pose == Some(crate::cloud::RestPose::Lying)
+        && state.visual_state() == VisualState::SittingLoop
+    {
+        if let Some(clip) = clips.sleeping_idle.filter(|clip| !clip.duration.is_zero()) {
+            return (Some(clip), RepeatAnimation::Forever, "Cloud/SleepingIdle");
+        }
+    }
+    clip_for_state(state, clips)
+}
+
 fn selected_sitting_clip(
     state: &NeraAnimationState,
     clips: &NeraAnimationClips,
@@ -644,6 +703,7 @@ pub(crate) fn apply_animation_state(
     mut environment: ResMut<DesktopEnvironment>,
     state: Res<NeraAnimationState>,
     clips: Res<NeraAnimationClips>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     mut playback: ResMut<NeraAnimationPlayback>,
 ) {
     let anchor = match state.base_pose() {
@@ -666,7 +726,8 @@ pub(crate) fn apply_animation_state(
         playback.visual = Some(visual);
     }
 
-    let (requested, requested_repeat, requested_label) = clip_for_state(&state, &clips);
+    let rest_pose = cloud.as_ref().and_then(|cloud| cloud.rest_pose());
+    let (requested, requested_repeat, requested_label) = clip_for_cloud(&state, &clips, rest_pose);
 
     let (clip, repeat, label, using_requested) = if let Some(clip) = requested {
         (clip, requested_repeat, requested_label, true)
@@ -678,7 +739,14 @@ pub(crate) fn apply_animation_state(
             );
         }
 
-        let Some(fallback) = base_fallback(&state, &clips) else {
+        let cloud_base = if rest_pose == Some(crate::cloud::RestPose::Lying)
+            && state.base_pose() == BasePose::Sitting
+        {
+            clips.sleeping_idle.filter(|clip| !clip.duration.is_zero())
+        } else {
+            None
+        };
+        let Some(fallback) = cloud_base.or_else(|| base_fallback(&state, &clips)) else {
             return;
         };
 
@@ -717,4 +785,101 @@ pub(crate) fn apply_animation_state(
         "Nera playback -> {} | anchor={:?} | clip_duration={:?} | blend={:?}",
         label, anchor, clip.duration, transition_duration
     );
+}
+
+#[cfg(test)]
+mod cloud_sleep_tests {
+    use super::*;
+    use crate::{animation::TemporaryAction, cloud::RestPose};
+
+    #[test]
+    fn rest_loops_sleep_but_ride_support_reactions_and_detach_keep_their_own_clips() {
+        let mut world = World::new();
+        let mut slot = || ClipSlot {
+            entity: world.spawn_empty().id(),
+            duration: Duration::from_secs(2),
+        };
+        let idle = slot();
+        let sitting = slot();
+        let sleeping = slot();
+        let headpat = slot();
+        let clips = NeraAnimationClips {
+            idle: Some(idle),
+            sitting_4: Some(sitting),
+            sleeping_idle: Some(sleeping),
+            head_stroke: Some(headpat),
+            ..default()
+        };
+        let mut state = NeraAnimationState::default();
+        state.enter_cloud_seat(SittingPose::Sitting4);
+        for pose in [None, Some(RestPose::Seated)] {
+            assert_eq!(
+                clip_for_cloud(&state, &clips, pose).0.unwrap().entity,
+                sitting.entity
+            );
+        }
+        let (rest, repeat, _) = clip_for_cloud(&state, &clips, Some(RestPose::Lying));
+        assert_eq!(rest.unwrap().entity, sleeping.entity);
+        assert_eq!(repeat, RepeatAnimation::Forever);
+        state.request_one_shot(TemporaryAction::HeadStroke, headpat.duration);
+        assert_eq!(
+            clip_for_cloud(&state, &clips, Some(RestPose::Lying))
+                .0
+                .unwrap()
+                .entity,
+            headpat.entity
+        );
+        state.advance(headpat.duration);
+        assert_eq!(
+            clip_for_cloud(&state, &clips, Some(RestPose::Lying))
+                .0
+                .unwrap()
+                .entity,
+            sleeping.entity
+        );
+        state.restore_support_after_attention(false);
+        assert_eq!(
+            clip_for_cloud(&state, &clips, Some(RestPose::Lying))
+                .0
+                .unwrap()
+                .entity,
+            idle.entity
+        );
+    }
+
+    #[test]
+    fn cold_or_zero_duration_sleep_falls_back_then_switches_when_ready() {
+        let mut world = World::new();
+        let sitting = ClipSlot {
+            entity: world.spawn_empty().id(),
+            duration: Duration::from_secs(2),
+        };
+        let sleep = world.spawn_empty().id();
+        let mut state = NeraAnimationState::default();
+        state.enter_cloud_seat(SittingPose::Sitting4);
+        let mut clips = NeraAnimationClips {
+            sitting_4: Some(sitting),
+            ..default()
+        };
+        for duration in [None, Some(Duration::ZERO), Some(Duration::from_secs(7))] {
+            clips.sleeping_idle = duration.map(|duration| ClipSlot {
+                entity: sleep,
+                duration,
+            });
+            let expected = if duration.is_some_and(|duration| !duration.is_zero()) {
+                sleep
+            } else {
+                sitting.entity
+            };
+            assert_eq!(
+                clip_for_cloud(&state, &clips, Some(RestPose::Lying))
+                    .0
+                    .unwrap()
+                    .entity,
+                expected
+            );
+        }
+        assert!(crate::nera_asset_file(SLEEPING_IDLE_VRMA_PATH).is_file());
+        assert!(!crate::nera_asset_file("animations/Bookmarks/Sleeping_Idle.vrma").exists());
+    }
 }

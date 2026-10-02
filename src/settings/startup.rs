@@ -5,17 +5,20 @@
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::{ffi::{c_void, OsStr}, os::windows::ffi::OsStrExt};
+    use std::{
+        ffi::{OsStr, c_void},
+        os::windows::ffi::OsStrExt,
+    };
 
     use windows::{
-        core::w,
         Win32::{
             Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS},
             System::Registry::{
-                HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW,
-                RegGetValueW, RegSetKeyValueW,
+                HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW,
+                RegSetKeyValueW,
             },
         },
+        core::w,
     };
 
     const VALUE_NAME: &str = "Project Nera";
@@ -48,7 +51,10 @@ mod imp {
             return Ok(false);
         }
 
-        Err(format!("registry query failed with Win32 error {}", status.0))
+        Err(format!(
+            "registry query failed with Win32 error {}",
+            status.0
+        ))
     }
 
     pub(super) fn set_enabled(enabled: bool) -> Result<(), String> {

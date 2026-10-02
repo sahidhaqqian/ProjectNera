@@ -570,7 +570,9 @@ fn tick_alarm_deadline(
     commands.spawn((
         Name::new("Nera Alarm Audio"),
         AlarmAudioPlayback,
-        AudioPlayer::new(assets.sounds[usize::from(display.sound).min(assets.sounds.len() - 1)].clone()),
+        AudioPlayer::new(
+            assets.sounds[usize::from(display.sound).min(assets.sounds.len() - 1)].clone(),
+        ),
         PlaybackSettings::ONCE,
         AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
     ));
@@ -592,12 +594,18 @@ fn repeat_alarm_sound(
     display: Res<AlarmDisplayInfo>,
     players: Query<(Entity, &AudioSink, &AlarmRepeatAfter), With<AlarmAudioPlayback>>,
 ) {
-    if !state.is_ringing() { return; }
+    if !state.is_ringing() {
+        return;
+    }
     for (entity, sink, repeat) in &players {
         if sink.empty() && Instant::now() >= repeat.0 {
             commands.entity(entity).despawn();
-            commands.spawn((AlarmAudioPlayback, AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
-                AudioPlayer::new(assets.sounds[usize::from(display.sound).min(4)].clone()), PlaybackSettings::ONCE));
+            commands.spawn((
+                AlarmAudioPlayback,
+                AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
+                AudioPlayer::new(assets.sounds[usize::from(display.sound).min(4)].clone()),
+                PlaybackSettings::ONCE,
+            ));
         }
     }
 }
@@ -835,7 +843,10 @@ mod tests {
             state.phase = AlarmPhase::Idle;
             assert_eq!(state.advance_deadline(now, &mut display), None);
             assert_eq!(display.label, label);
-            assert_eq!(display.sound, 4, "a queued quick/snoozed alarm must retain its sound");
+            assert_eq!(
+                display.sound, 4,
+                "a queued quick/snoozed alarm must retain its sound"
+            );
             assert!(matches!(state.phase, AlarmPhase::Armed { deadline, .. } if deadline == later));
             assert_eq!(
                 state.advance_deadline(later, &mut display),

@@ -2,7 +2,7 @@
 
 Project Nera is a 3D desktop pet for Windows built with Rust and Bevy. It renders a VRM avatar in a transparent native window and combines avatar interaction, VRMA animation, desktop-aware movement, utility windows, alarms, and Win32 integration.
 
-> Application version: **0.1.0** · Current milestone: **Phase 7 — Autonomous behavior and roaming implementation; native visual validation pending**
+> Application version: **0.1.0** · Current milestone: **Phase 7 — Cloud, semantic SFX, and interaction feedback polish**
 
 ## Overview
 
@@ -33,11 +33,55 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Attachment following, target-relative z-order, temporary suspension, and drag-to-unsnap behavior.
 - Desktop-space gravity, falling, landing, and support detection in global physical pixels.
 - Quick drag-and-release transfers momentum into a bounded throw, followed by gravity and landing.
+- Settings **Throw Physics** can switch drag momentum ON/OFF. **Throw Intensity**
+  is saved from 0-100%, defaulting to a gentler 50%; 100% restores the original
+  launch strength. OFF or 0% stops throw momentum without disabling gravity.
 - Settings **Gravity** defaults to ON. OFF keeps unsupported placements still;
   throws retain momentum briefly and damp to a stop without downward acceleration.
 - Standing support on monitor work-area floors, taskbars, and visible native-window top edges.
 - Support revalidation when a window moves or disappears, plus tray-based position recovery.
 - Multi-monitor and non-zero/negative desktop coordinate handling in native geometry paths.
+
+### Cloud and interaction feedback
+
+- Right-click Nera, then **Cloud > Rest**, **Ride**, or **Dismiss**.
+- Rest creates a stationary temporary bed with two sleep variations: lying
+  to the right (`Sleeping_Idle.vrma`) and seated sleeping (`Sitting_4.vrma`).
+  Each new Rest chooses the other variation, then loops it for that attachment;
+  repeated Rest commands do not restart or change it. Both use automatic
+  Exhausted 100%. Sleeping Idle was promoted from Bookmarks to Animasi Dasar
+  and loads only on first lying Rest per rig; Sitting 4/Exhausted 60% remain
+  its loading fallback. Dragging Nera detaches her and shrinks the cloud
+  away; ordinary dragging, throw, gravity, and desktop support resume.
+- Ordinary sitting uses Default rather than Timid, so it does not force eyelids
+  closed. Sleeping Rest ignores head/torso/arm/hand/leg/foot clicks and headpat
+  animations/feedback. Drag, explicit dismiss, and alarm interruption still work.
+- Ride uses the existing seated loop and remains floating after release, even
+  with no desktop/window/taskbar support. Drag either Nera or the cloud to move
+  the ride together. Ride releases do not throw or snap to native supports.
+- Dismiss restores normal placement ownership without changing the saved Gravity
+  preference. Character replacement, hiding, alarm Attention, explicit animation
+  playback, and tray Reset Position intentionally leave the cloud.
+- The local author-provided `assets/vrm/Cloud/nera_cloud_1024.glb` loads only on
+  first summon. A small procedural cloud is available if the model is absent.
+  Subtle visual bobbing never changes the logical desktop seat point.
+- Ride and seated sleeping use the model's measured front rim and the live hips'
+  contact depth, keeping dangling legs in front of the cloud. Lying Rest uses the
+  inner cushion with the lobes behind the face and a world-down pelvis contact.
+  Rest rolls the sleeping pose toward the right without changing the VRMA file.
+  A rig-rest-aware arm layer lowers the elbows and relaxes the wrists, keeping
+  hands alongside the waist/over the torso instead of raised beside the face.
+  It blends in over 300 ms and releases when leaving lying sleep. On Ride,
+  upper-body reactions retain the calibrated pelvis/leg pose through their
+  return blend; early hits wait for seat calibration.
+- Headpat sparkles, touchdown puffs, anger marks, occasional Rest Zs, and cloud
+  puffs work without the Animation Manager. At most 32 particles exist, with
+  lifetimes of 0.75-1.8 seconds and debounced bursts.
+- Semantic pet SFX use the existing Bevy Audio/master volume/mute stack, at most
+  four concurrent short cues. Optional files are checked once at startup; missing
+  files remain silent and never interrupt interactions. No pet sounds were
+  downloaded or added in this milestone. Expected paths and the Windows release
+  checklist are in [Phase 7 polish validation](PHASE_7_POLISH_VALIDATION.md).
 
 ### Character behavior
 
@@ -77,7 +121,7 @@ The application uses Bevy resources, components, messages, and systems for behav
   braking, and an inward return after reaching a roaming boundary.
 - Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.
 - Facial expression crossfades derived from the resolved body-animation state.
-- All 24 basic clips have facial intent, shared by gallery previews and desktop
+- All 25 basic clips have facial intent, shared by gallery previews and desktop
   playback. Headpat now plays **Blush + Embarrassed 75%**, Angry Gesture uses
   **Angry 90%**, Sleepy uses **Exhausted 60%**, and LookAround uses **Surprised 35%**.
   Expressions fade over 180 ms and return to the active base pose afterward.
@@ -85,7 +129,10 @@ The application uses Bevy resources, components, messages, and systems for behav
   current character, with selectable intensity. Nera uses independent eyebrow,
   eyelid, and mouth morphs for Default, Joy, Sad, Angry, Embarrassed, Timid,
   Surprised, and Exhausted. Other models fall back to available VRM expressions.
-  Clearing the preview returns the face to automatic animation and blinking.
+  Default, Reset Expression, and 0% intensity release manual preview ownership
+  and return the face to automatic animation and blinking. Playing a VRMA keeps
+  the selected expression and intensity. Unchanged card faces are not re-sent
+  every frame; late-loaded or changed model bindings still receive their preview.
   Angry uses a stronger brow, narrowed-eye, and downturned-mouth recipe in both
   previews and automatic reactions; Embarrassed and Timid also add a soft blush.
   Exact likeness to an external reference depends on the model's geometry,
@@ -128,8 +175,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 - System tray commands for Show, Hide, Reset Position, Always On Top, and Exit.
 - Saved settings, position recovery, deferred persistence during editing, and synchronous save on controlled exit paths.
 
-The radial menu currently shows **Chat** and **Games** as disabled placeholders.
-They are not implemented features.
+The radial menu currently shows **Games** as a disabled placeholder.
+It is not an implemented feature. The former disabled Chat slot now opens Cloud.
 
 Roaming stays near the latest user placement and on its current monitor. Dragging
 Nera establishes a new home; the radius scales with monitor DPI. Activity sets a
@@ -259,7 +306,7 @@ ProjectNera/
 ├── assets/
 │   ├── animations/
 │   │   ├── Falling.vrma
-│   │   ├── animasi_basic/                 # 24 active, protected Nera animations
+│   │   ├── animasi_basic/                 # 25 active, protected Nera animations
 │   │   ├── Clawatar_animations/
 │   │   ├── FreeMotionPack1_converted_21_vrma/
 │   │   ├── UAL1_converted_43_vrma/
@@ -406,11 +453,17 @@ and its manager process are excluded from support/fullscreen detection, and ligh
 settings affect only the desktop key light.
 
 Validation: `cargo check --all-targets --offline` and the debug build pass;
-`cargo test --bin nera --offline` reports **280 passed, 0 failed, 6 ignored**.
+`cargo fmt --all -- --check` passes; `cargo test --offline` reports
+**320 passed, 0 failed, 6 ignored**, including 19 Cloud/SFX/FX milestone tests
+and eleven sleeping-loop/pose regressions.
 Bounded native smoke runs verify live face/model previews at desktop and compact
 sizes, initialized companions and selective close, procedural limb reactions,
-alarm sound save, throw/landing, gravity-OFF coasting, and legacy Death01 shadow
-contact. The debug executable is `target/debug/nera.exe`. Real multi-monitor,
+alarm sound save, throw checkbox/slider controls, throw/landing, gravity-OFF coasting, and legacy Death01 shadow
+contact. The Cloud native smoke also verifies resting/riding ownership, stable
+both sleep variations and blocked sleeping body clicks/headpat, mid-air
+drag/release, dismiss/freefall/landing,
+VRM 0.x replacement, Attention cleanup, and particle expiry. The debug executable
+is `target/debug/nera.exe`. Real multi-monitor,
 mixed-DPI, focus/tray, and extended-use checks remain necessary; the smoke runs
 do not establish those behaviors. See [PHASE_7_PLAN.md](PHASE_7_PLAN.md).
 
@@ -444,6 +497,7 @@ cargo build --bin nera
 .\target\debug\nera.exe --animation-manager-worker --roster-smoke
 .\target\debug\nera.exe --feature-smoke
 .\target\debug\nera.exe --feature-smoke --motion-smoke
+.\target\debug\nera.exe --feature-smoke --cloud-smoke
 ```
 
 The expression run captures all eight heads at desktop and compact sizes. The
@@ -455,6 +509,24 @@ and closes its companions when the run completes.
 The roster run captures the model picker at desktop and compact sizes. The motion
 run verifies a throw arc and landing, gravity-OFF coasting and stable placement,
 then loads a legacy character and checks the Death01 shadow's projected floor.
+The Cloud run uses an isolated settings profile and validates native Rest/Ride
+ownership, synthetic drag/release, mid-air release, gravity after dismissal,
+sleeping touch suppression/particle cleanup, VRM 0.x replacement, and alarm Attention handoff.
+An optional local reference model can verify real closed-eyelid morphs after
+legacy migration, without changing the main profile's active character:
+
+```powershell
+.\target\debug\nera.exe --feature-smoke --cloud-smoke --cloud-smoke-blink-model=C:\path\to\blink-capable.vrm
+```
+
+Use a VRM 0.x model with an authored Blink. This run checks the expression and
+rendered morph weights, and captures `cloud-rest-vrm0-blink.png`. The reference
+model is imported into the shared local character library, not bundled with Nera.
+The separately downloaded Alicia Solid reference passed this native check; the
+bundled Charlotte model has no eyelid morphs and cannot close its eyes.
+It captures `cloud-*.png` in the same temporary directory. Synthetic input does
+not replace the mixed-DPI, pointer-hit, edge, fullscreen, or extended soak checks
+in [the release checklist](PHASE_7_POLISH_VALIDATION.md).
 
 ## Known Limitations and Notes
 

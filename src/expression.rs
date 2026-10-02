@@ -36,25 +36,17 @@
 
 use std::time::Duration;
 
-pub(crate) mod presets;
-pub(crate) mod face;
 pub(crate) mod basic;
-pub(crate) use presets::NeraExpressionPreset;
+pub(crate) mod face;
+pub(crate) mod presets;
 use presets::preset_weights;
+pub(crate) use presets::{NeraExpressionPreset, preview_selection};
 
 use bevy::prelude::*;
 
-use bevy_vrm1::prelude::{
-    ExpressionEntityMap,
-    SetExpressions,
-    VrmSystemSets,
-};
+use bevy_vrm1::prelude::{ExpressionEntityMap, SetExpressions, VrmSystemSets};
 
-use crate::animation::{
-    IdleMicroAction,
-    NeraAnimationState,
-    VisualState,
-};
+use crate::animation::{IdleMicroAction, NeraAnimationState, VisualState};
 
 // -----------------------------------------------------------------------------
 // Tuning
@@ -156,8 +148,10 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         Body::HitHead | Body::DodgeWhileSitting => Face::Surprised,
         Body::HitChest => Face::Angry,
         Body::LimbReaction(part) => match part {
-            crate::interaction::BodyPart::LeftArm | crate::interaction::BodyPart::RightArm
-            | crate::interaction::BodyPart::LeftHand | crate::interaction::BodyPart::RightHand => Face::Happy,
+            crate::interaction::BodyPart::LeftArm
+            | crate::interaction::BodyPart::RightArm
+            | crate::interaction::BodyPart::LeftHand
+            | crate::interaction::BodyPart::RightHand => Face::Happy,
             _ => Face::Surprised,
         },
         Body::Death => Face::Sad,
@@ -167,9 +161,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         Body::AlarmWave | Body::AlarmJump => Face::Surprised,
 
         // Settled, calm states.
-        Body::SittingLoop | Body::SittingEnter | Body::Praying => {
-            Face::Relaxed
-        }
+        Body::SittingLoop | Body::SittingEnter | Body::Praying => Face::Relaxed,
 
         #[cfg(target_os = "windows")]
         Body::MenuAnimation(choice) => expression_for_menu(choice),
@@ -191,19 +183,14 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
 ///
 /// The micro-action clips are body-only like everything else Nera plays, so
 /// these overrides add the face rather than fight one.
-fn expression_for_idle_micro(
-    action: IdleMicroAction,
-) -> NeraExpression {
+fn expression_for_idle_micro(action: IdleMicroAction) -> NeraExpression {
     use IdleMicroAction as Fidget;
     use NeraExpression as Face;
 
     match action {
         // Scanning the room is attention, not emotion.
         Fidget::LookAround | Fidget::CatwalkIdleTwistR => Face::Neutral,
-        Fidget::Relax
-        | Fidget::Sleepy
-        | Fidget::Bored
-        | Fidget::SittingRubbingArm => Face::Relaxed,
+        Fidget::Relax | Fidget::Sleepy | Fidget::Bored | Fidget::SittingRubbingArm => Face::Relaxed,
         Fidget::AngryGesture => Face::Angry,
         // `nera_256.vrm` declares no blush preset, so the shy clip gets the
         // nearest available emotion instead of an override that would fight it.
@@ -215,9 +202,7 @@ fn expression_for_idle_micro(
 /// what the clip leaves out. Matching the clip's own intent is what keeps the
 /// two layers reading as one gesture.
 #[cfg(target_os = "windows")]
-fn expression_for_menu(
-    choice: crate::action_menu::AnimationMenuChoice,
-) -> NeraExpression {
+fn expression_for_menu(choice: crate::action_menu::AnimationMenuChoice) -> NeraExpression {
     use crate::action_menu::AnimationMenuChoice as Menu;
     use NeraExpression as Face;
 
@@ -256,10 +241,7 @@ fn compute_weights(
     let raw = if previous == current {
         [(current.preset(), 1.0), (None, 0.0)]
     } else {
-        [
-            (previous.preset(), outgoing),
-            (current.preset(), incoming),
-        ]
+        [(previous.preset(), outgoing), (current.preset(), incoming)]
     };
 
     let slots = raw.map(|(preset, weight)| {
@@ -305,11 +287,20 @@ pub(crate) enum ExpressionPreviewRequest {
     Clear,
 }
 
+impl ExpressionPreviewRequest {
+    pub(crate) fn for_selection(preset: NeraExpressionPreset, intensity: f32) -> Self {
+        preview_selection(preset, intensity).map_or(Self::Clear, |(preset, intensity)| {
+            Self::Set(preset, intensity)
+        })
+    }
+}
+
 impl ExpressionPreviewOverride {
     fn apply(&mut self, request: ExpressionPreviewRequest) {
         self.selection = match request {
-            ExpressionPreviewRequest::Set(preset, intensity) => Some((preset,
-                if intensity.is_finite() { intensity.clamp(0.0, 1.0) } else { 0.0 })),
+            ExpressionPreviewRequest::Set(preset, intensity) => {
+                preview_selection(preset, intensity)
+            }
             ExpressionPreviewRequest::Clear => None,
         };
     }
@@ -353,8 +344,7 @@ impl NeraExpressionState {
             return;
         }
 
-        self.blend =
-            (self.blend + delta.as_secs_f32() / total).min(1.0);
+        self.blend = (self.blend + delta.as_secs_f32() / total).min(1.0);
     }
 
     fn weights(&self) -> ExpressionWeights {
@@ -371,10 +361,9 @@ impl Plugin for NeraExpressionPlugin {
             .init_resource::<ExpressionPreviewOverride>()
             .add_message::<ExpressionPreviewRequest>()
             .add_systems(
-            PostUpdate,
-            drive_nera_expressions
-                .before(VrmSystemSets::Expressions),
-        );
+                PostUpdate,
+                drive_nera_expressions.before(VrmSystemSets::Expressions),
+            );
     }
 }
 
@@ -384,6 +373,8 @@ impl Plugin for NeraExpressionPlugin {
 fn drive_nera_expressions(
     time: Res<Time>,
     animation: Res<NeraAnimationState>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    clips: Option<Res<crate::animation::NeraAnimationClips>>,
     library: Option<Res<crate::animation::LibraryPlayback>>,
     mut automatic: Local<face::AutomaticFace>,
     mut state: ResMut<NeraExpressionState>,
@@ -396,10 +387,34 @@ fn drive_nera_expressions(
         preview.apply(*request);
     }
     let visual = animation.visual_state();
-    let path = if let VisualState::LibraryAnimation(entity) = visual { library.as_ref().and_then(|library| library.path_for(entity)) } else { None };
-    let selection = if visual == VisualState::SittingLoop && animation.selected_sitting_pose() == crate::animation::SittingPose::Sitting4 {
+    let path = if let VisualState::LibraryAnimation(entity) = visual {
+        library
+            .as_ref()
+            .and_then(|library| library.path_for(entity))
+    } else {
+        None
+    };
+    let selection = if visual == VisualState::SittingLoop
+        && cloud
+            .as_ref()
+            .is_some_and(|cloud| cloud.mode() == Some(crate::cloud::CloudMode::Rest))
+    {
+        if !cloud.as_ref().is_some_and(|cloud| cloud.is_lying_rest())
+            || clips
+                .as_ref()
+                .is_some_and(|clips| clips.sleeping_idle_entity().is_some())
+        {
+            basic::for_clip("animasi_basic/Sleeping_Idle.vrma")
+        } else {
+            Some((NeraExpressionPreset::Exhausted, 0.6))
+        }
+    } else if visual == VisualState::SittingLoop
+        && animation.selected_sitting_pose() == crate::animation::SittingPose::Sitting4
+    {
         basic::for_clip("animasi_basic/Sitting_4.vrma")
-    } else { basic::for_visual(visual, path) };
+    } else {
+        basic::for_visual(visual, path)
+    };
     automatic.advance(selection, time.delta_secs());
     let target = expression_for_visual(visual);
     state.advance(target, time.delta());
@@ -421,20 +436,33 @@ fn drive_nera_expressions(
     }
 
     let weights: Vec<(String, f32)> = match preview.selection {
-        Some((preset, intensity)) => preset_weights(
-            preset, intensity, map.0.keys().map(|name| name.0.as_str()),
-        ),
-        None if automatic.current.is_some() || automatic.previous.is_some() => automatic.weights(map.0.keys().map(|name| name.0.as_str())),
-        None => state.weights().live().filter_map(|(name, weight)| {
-            map.0.keys().find(|available| available.0 == name)
-                .map(|_| (name.to_owned(), weight))
-        }).collect(),
+        Some((preset, intensity)) => {
+            preset_weights(preset, intensity, map.0.keys().map(|name| name.0.as_str()))
+        }
+        None if automatic.current.is_some() || automatic.previous.is_some() => {
+            automatic.weights(map.0.keys().map(|name| name.0.as_str()))
+        }
+        None => state
+            .weights()
+            .live()
+            .filter_map(|(name, weight)| {
+                map.0
+                    .keys()
+                    .find(|available| available.0 == name)
+                    .map(|_| (name.to_owned(), weight))
+            })
+            .collect(),
     };
 
-    let angry = state.weights().live().find(|(name, _)| *name == "angry")
+    let angry = state
+        .weights()
+        .live()
+        .find(|(name, _)| *name == "angry")
         .map_or(0.0, |(_, weight)| weight);
     commands.entity(vrm_entity).insert((
-        face::FacePose(preview.selection), *automatic, face::AutomaticAngry(angry),
+        face::FacePose(preview.selection),
+        *automatic,
+        face::AutomaticAngry(angry),
     ));
 
     if state.last_pushed.as_ref() == Some(&weights) {
@@ -448,7 +476,9 @@ fn drive_nera_expressions(
     // back to the VRMA clip.
     commands.trigger(SetExpressions::from_iter(
         vrm_entity,
-        weights.iter().map(|(name, weight)| (name.as_str(), *weight)),
+        weights
+            .iter()
+            .map(|(name, weight)| (name.as_str(), *weight)),
     ));
 
     if weights.is_empty() {
@@ -475,55 +505,192 @@ mod tests {
             .add_message::<ExpressionPreviewRequest>()
             .add_systems(PostUpdate, drive_nera_expressions);
         let expression = app.world_mut().spawn_empty().id();
-        let avatar = app.world_mut().spawn((
-            crate::avatar::NeraAvatar,
-            ExpressionEntityMap([(VrmExpression::from("happy"), expression)].into()),
-        )).id();
+        let avatar = app
+            .world_mut()
+            .spawn((
+                crate::avatar::NeraAvatar,
+                ExpressionEntityMap([(VrmExpression::from("happy"), expression)].into()),
+            ))
+            .id();
 
-        app.world_mut().write_message(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, 1.0));
+        app.world_mut().write_message(ExpressionPreviewRequest::Set(
+            NeraExpressionPreset::Joy,
+            1.0,
+        ));
         app.update();
-        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed,
-            Some(vec![("happy".into(), 1.0)]));
+        assert_eq!(
+            app.world().resource::<NeraExpressionState>().last_pushed,
+            Some(vec![("happy".into(), 1.0)])
+        );
 
-        app.world_mut().write_message(ExpressionPreviewRequest::Set(NeraExpressionPreset::Angry, 1.0));
+        app.world_mut().write_message(ExpressionPreviewRequest::Set(
+            NeraExpressionPreset::Angry,
+            1.0,
+        ));
         app.update();
-        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed, Some(vec![]));
+        assert_eq!(
+            app.world().resource::<NeraExpressionState>().last_pushed,
+            Some(vec![])
+        );
 
         app.world_mut().despawn(avatar);
-        let replacement = app.world_mut().spawn((
-            crate::avatar::NeraAvatar,
-            ExpressionEntityMap([(VrmExpression::from("happy"), expression)].into()),
-        )).id();
-        app.world_mut().write_message(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, 1.0));
+        let replacement = app
+            .world_mut()
+            .spawn((
+                crate::avatar::NeraAvatar,
+                ExpressionEntityMap([(VrmExpression::from("happy"), expression)].into()),
+            ))
+            .id();
+        app.world_mut().write_message(ExpressionPreviewRequest::Set(
+            NeraExpressionPreset::Joy,
+            1.0,
+        ));
         app.update();
-        assert_eq!(app.world().resource::<NeraExpressionState>().bound_entity, Some(replacement));
-        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed,
-            Some(vec![("happy".into(), 1.0)]));
+        assert_eq!(
+            app.world().resource::<NeraExpressionState>().bound_entity,
+            Some(replacement)
+        );
+        assert_eq!(
+            app.world().resource::<NeraExpressionState>().last_pushed,
+            Some(vec![("happy".into(), 1.0)])
+        );
 
-        app.world_mut().write_message(ExpressionPreviewRequest::Clear);
+        app.world_mut()
+            .write_message(ExpressionPreviewRequest::Clear);
         app.update();
-        assert!(app.world().resource::<ExpressionPreviewOverride>().selection.is_none());
-        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed, Some(vec![]));
+        assert!(
+            app.world()
+                .resource::<ExpressionPreviewOverride>()
+                .selection
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<NeraExpressionState>().last_pushed,
+            Some(vec![])
+        );
     }
 
     #[test]
     fn preview_intensity_is_clamped() {
         let mut preview = ExpressionPreviewOverride::default();
-        preview.apply(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, 2.0));
+        preview.apply(ExpressionPreviewRequest::Set(
+            NeraExpressionPreset::Joy,
+            2.0,
+        ));
         assert_eq!(preview.selection, Some((NeraExpressionPreset::Joy, 1.0)));
-        preview.apply(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, -1.0));
-        assert_eq!(preview.selection, Some((NeraExpressionPreset::Joy, 0.0)));
+        preview.apply(ExpressionPreviewRequest::Set(
+            NeraExpressionPreset::Joy,
+            -1.0,
+        ));
+        assert!(preview.selection.is_none());
         preview.apply(ExpressionPreviewRequest::Clear);
         assert!(preview.selection.is_none());
     }
 
     #[test]
+    fn default_and_zero_intensity_release_preview_ownership() {
+        for request in [
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Default, 1.0),
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Default, 0.75),
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Angry, 0.0),
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Timid, f32::NAN),
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Exhausted, f32::INFINITY),
+        ] {
+            let mut preview = ExpressionPreviewOverride::default();
+            preview.apply(ExpressionPreviewRequest::Set(
+                NeraExpressionPreset::Angry,
+                0.9,
+            ));
+            assert!(preview.selection.is_some());
+            preview.apply(request);
+            assert!(preview.selection.is_none(), "{request:?}");
+            let ExpressionPreviewRequest::Set(preset, intensity) = request else {
+                unreachable!()
+            };
+            assert_eq!(
+                ExpressionPreviewRequest::for_selection(preset, intensity),
+                ExpressionPreviewRequest::Clear
+            );
+        }
+    }
+
+    #[test]
+    fn driver_releases_manual_pose_and_deduplicates_unchanged_expression_events() {
+        use bevy_vrm1::prelude::VrmExpression;
+        #[derive(Resource, Default)]
+        struct Pushes(usize);
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<NeraAnimationState>()
+            .init_resource::<NeraExpressionState>()
+            .init_resource::<ExpressionPreviewOverride>()
+            .init_resource::<Pushes>()
+            .add_message::<ExpressionPreviewRequest>()
+            .add_systems(PostUpdate, drive_nera_expressions)
+            .add_observer(|_: On<SetExpressions>, mut pushes: ResMut<Pushes>| {
+                pushes.0 += 1;
+            });
+        let angry = app.world_mut().spawn_empty().id();
+        let avatar = app
+            .world_mut()
+            .spawn((
+                crate::avatar::NeraAvatar,
+                ExpressionEntityMap([(VrmExpression::from("angry"), angry)].into()),
+            ))
+            .id();
+
+        for release in [
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Default, 1.0),
+            ExpressionPreviewRequest::Set(NeraExpressionPreset::Angry, 0.0),
+        ] {
+            app.world_mut().write_message(ExpressionPreviewRequest::Set(
+                NeraExpressionPreset::Angry,
+                0.9,
+            ));
+            app.update();
+            assert_eq!(
+                app.world().get::<face::FacePose>(avatar).unwrap().0,
+                Some((NeraExpressionPreset::Angry, 0.9))
+            );
+            let pushes = app.world().resource::<Pushes>().0;
+            for _ in 0..3 {
+                app.world_mut().write_message(ExpressionPreviewRequest::Set(
+                    NeraExpressionPreset::Angry,
+                    0.9,
+                ));
+                app.update();
+            }
+            assert_eq!(app.world().resource::<Pushes>().0, pushes);
+
+            app.world_mut().write_message(release);
+            app.update();
+            assert!(
+                app.world()
+                    .resource::<ExpressionPreviewOverride>()
+                    .selection
+                    .is_none()
+            );
+            assert!(
+                app.world()
+                    .get::<face::FacePose>(avatar)
+                    .unwrap()
+                    .0
+                    .is_none()
+            );
+            assert_eq!(
+                app.world().resource::<NeraExpressionState>().last_pushed,
+                Some(vec![])
+            );
+            assert_eq!(app.world().resource::<Pushes>().0, pushes + 1);
+            app.update();
+            assert_eq!(app.world().resource::<Pushes>().0, pushes + 1);
+        }
+    }
+
+    #[test]
     fn neutral_emits_no_override_at_all() {
-        let weights = compute_weights(
-            NeraExpression::Neutral,
-            NeraExpression::Neutral,
-            1.0,
-        );
+        let weights = compute_weights(NeraExpression::Neutral, NeraExpression::Neutral, 1.0);
 
         assert!(weights.is_empty());
         assert_eq!(weights.live().count(), 0);
@@ -536,8 +703,7 @@ mod tests {
                 continue;
             };
 
-            let weights =
-                compute_weights(expression, expression, 1.0);
+            let weights = compute_weights(expression, expression, 1.0);
 
             let live: Vec<_> = weights.live().collect();
             assert_eq!(live, vec![(preset, 1.0)], "{expression:?}");
@@ -549,17 +715,12 @@ mod tests {
     /// which is far more noticeable than a wrong emotion.
     #[test]
     fn only_emotion_presets_can_ever_be_pushed() {
-        const ALLOWED: [&str; 5] =
-            ["happy", "angry", "sad", "surprised", "relaxed"];
+        const ALLOWED: [&str; 5] = ["happy", "angry", "sad", "surprised", "relaxed"];
 
         for previous in ALL_EXPRESSIONS {
             for current in ALL_EXPRESSIONS {
                 for step in 0..=10 {
-                    let weights = compute_weights(
-                        previous,
-                        current,
-                        step as f32 / 10.0,
-                    );
+                    let weights = compute_weights(previous, current, step as f32 / 10.0);
 
                     for (preset, weight) in weights.live() {
                         assert!(
@@ -587,18 +748,14 @@ mod tests {
 
         for step in 0..=1000 {
             let blend = step as f32 / 1000.0;
-            let weights =
-                compute_weights(previous, current, blend);
+            let weights = compute_weights(previous, current, blend);
 
             let live: Vec<_> = weights.live().collect();
 
             // Both ends of the fade legitimately hold a single preset.
             if live.len() == 2 {
                 let total: f32 = live.iter().map(|(_, w)| *w).sum();
-                assert_eq!(
-                    total, 1.0,
-                    "blend {blend} summed to {total}: {live:?}",
-                );
+                assert_eq!(total, 1.0, "blend {blend} summed to {total}: {live:?}",);
             } else {
                 assert_eq!(live.len(), 1, "blend {blend}: {live:?}");
                 assert_eq!(live[0].1, 1.0, "blend {blend}: {live:?}",);
@@ -608,11 +765,7 @@ mod tests {
 
     #[test]
     fn crossfade_midpoint_holds_both_presets() {
-        let weights = compute_weights(
-            NeraExpression::Angry,
-            NeraExpression::Happy,
-            0.5,
-        );
+        let weights = compute_weights(NeraExpression::Angry, NeraExpression::Happy, 0.5);
 
         let live: Vec<_> = weights.live().collect();
 
@@ -623,11 +776,7 @@ mod tests {
 
     #[test]
     fn a_finished_crossfade_drops_the_outgoing_preset() {
-        let weights = compute_weights(
-            NeraExpression::Angry,
-            NeraExpression::Happy,
-            1.0,
-        );
+        let weights = compute_weights(NeraExpression::Angry, NeraExpression::Happy, 1.0);
 
         let live: Vec<_> = weights.live().collect();
 
@@ -638,47 +787,23 @@ mod tests {
     /// event 60 times a second.
     #[test]
     fn quantized_weights_are_stable_while_settled() {
-        let first = compute_weights(
-            NeraExpression::Happy,
-            NeraExpression::Happy,
-            1.0,
-        );
-        let second = compute_weights(
-            NeraExpression::Happy,
-            NeraExpression::Happy,
-            1.0,
-        );
+        let first = compute_weights(NeraExpression::Happy, NeraExpression::Happy, 1.0);
+        let second = compute_weights(NeraExpression::Happy, NeraExpression::Happy, 1.0);
 
         assert_eq!(first, second);
     }
 
     #[test]
     fn out_of_range_blend_is_clamped_not_extrapolated() {
-        let settled = compute_weights(
-            NeraExpression::Sad,
-            NeraExpression::Happy,
-            1.0,
-        );
+        let settled = compute_weights(NeraExpression::Sad, NeraExpression::Happy, 1.0);
 
         assert_eq!(
-            compute_weights(
-                NeraExpression::Sad,
-                NeraExpression::Happy,
-                42.0,
-            ),
+            compute_weights(NeraExpression::Sad, NeraExpression::Happy, 42.0,),
             settled,
         );
         assert_eq!(
-            compute_weights(
-                NeraExpression::Sad,
-                NeraExpression::Happy,
-                -7.0,
-            ),
-            compute_weights(
-                NeraExpression::Sad,
-                NeraExpression::Happy,
-                0.0,
-            ),
+            compute_weights(NeraExpression::Sad, NeraExpression::Happy, -7.0,),
+            compute_weights(NeraExpression::Sad, NeraExpression::Happy, 0.0,),
         );
     }
 
@@ -791,22 +916,13 @@ mod tests {
     fn menu_expressions_agree_with_their_own_clips() {
         use crate::action_menu::AnimationMenuChoice as Menu;
 
-        assert_eq!(
-            expression_for_menu(Menu::Angry),
-            NeraExpression::Angry,
-        );
-        assert_eq!(
-            expression_for_menu(Menu::Sad),
-            NeraExpression::Sad,
-        );
+        assert_eq!(expression_for_menu(Menu::Angry), NeraExpression::Angry,);
+        assert_eq!(expression_for_menu(Menu::Sad), NeraExpression::Sad,);
         assert_eq!(
             expression_for_menu(Menu::Surprised),
             NeraExpression::Surprised,
         );
-        assert_eq!(
-            expression_for_menu(Menu::Wave),
-            NeraExpression::Happy,
-        );
+        assert_eq!(expression_for_menu(Menu::Wave), NeraExpression::Happy,);
     }
 
     #[test]
@@ -837,15 +953,11 @@ mod tests {
         use crate::animation::IdleMicroAction as Fidget;
 
         assert_eq!(
-            expression_for_visual(VisualState::IdleMicro(
-                Fidget::Sleepy
-            )),
+            expression_for_visual(VisualState::IdleMicro(Fidget::Sleepy)),
             NeraExpression::Relaxed,
         );
         assert_eq!(
-            expression_for_visual(VisualState::IdleMicro(
-                Fidget::LookAround
-            )),
+            expression_for_visual(VisualState::IdleMicro(Fidget::LookAround)),
             NeraExpression::Neutral,
         );
     }
@@ -879,10 +991,7 @@ mod tests {
             (IdleMicroAction::Bored, NeraExpression::Relaxed),
             (IdleMicroAction::AngryGesture, NeraExpression::Angry),
         ] {
-            assert_eq!(
-                expression_for_visual(VisualState::IdleMicro(action)),
-                face,
-            );
+            assert_eq!(expression_for_visual(VisualState::IdleMicro(action)), face,);
         }
     }
 
@@ -911,10 +1020,7 @@ mod tests {
         );
 
         for _ in 0..10 {
-            state.advance(
-                NeraExpression::Happy,
-                Duration::from_millis(60),
-            );
+            state.advance(NeraExpression::Happy, Duration::from_millis(60));
         }
 
         assert_eq!(state.blend, 1.0);

@@ -83,6 +83,10 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
         label: "Idle: sleepy",
     },
     BaseAnimation {
+        key: "animasi_basic/Sleeping_Idle.vrma",
+        label: "Cloud rest: sleeping idle",
+    },
+    BaseAnimation {
         key: "animasi_basic/Blush.vrma",
         label: "Headpat / blush",
     },
@@ -169,7 +173,7 @@ mod tests {
 
     #[test]
     fn base_keys_are_unique() {
-        assert_eq!(BASE_ANIMATIONS.len(), 24);
+        assert_eq!(BASE_ANIMATIONS.len(), 25);
         for (index, entry) in BASE_ANIMATIONS.iter().enumerate() {
             assert_eq!(base_order(entry.key), Some(index));
             assert!(!entry.label.is_empty());
@@ -208,6 +212,35 @@ mod tests {
             registry.delete(&renamed).unwrap();
         }
         assert!(registry.entries.is_empty());
+    }
+
+    #[test]
+    fn promoted_sleeping_idle_is_basic_and_stale_bookmark_metadata_cannot_move_it_back() {
+        let directory = TestDirectory::new();
+        let key = "animasi_basic/Sleeping_Idle.vrma";
+        directory.write_animation(key, b"sleep clip");
+        fs::write(
+            directory.0.join("bookmarks.txt"),
+            "Bookmarks/Sleeping_Idle.vrma\tMixamo-VRMA/Sleeping_Idle.vrma\n",
+        )
+        .unwrap();
+        let mut registry = directory.registry();
+        assert!(registry.bookmarks.is_empty());
+        assert_eq!(base_label(key), Some("Cloud rest: sleeping idle"));
+        assert_eq!(
+            registry.toggle_bookmark(key).unwrap_err().kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            fs::read(registry.path(key).unwrap()).unwrap(),
+            b"sleep clip"
+        );
+        assert!(
+            !directory
+                .0
+                .join("assets/Bookmarks/Sleeping_Idle.vrma")
+                .exists()
+        );
     }
 
     #[test]

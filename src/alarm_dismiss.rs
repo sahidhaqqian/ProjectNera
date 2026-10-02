@@ -21,7 +21,9 @@ use bevy::{
     camera::RenderTarget,
     prelude::*,
     ui::UiTargetCamera,
-    window::{WindowCloseRequested, WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints},
+    window::{
+        WindowCloseRequested, WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints,
+    },
 };
 
 use crate::{
@@ -29,8 +31,8 @@ use crate::{
     environment::DesktopEnvironment,
     platform::{self, LocalDateTime, NativeWindowHandle, PhysicalPoint, PhysicalRect},
     presentation::{
-        AttentionKind, PresentationCommand, PresentationEntered,
-        PresentationExited, PresentationState,
+        AttentionKind, PresentationCommand, PresentationEntered, PresentationExited,
+        PresentationState,
     },
     utility_window::{UtilityWindow, spawn_window_controls},
 };
@@ -114,8 +116,7 @@ struct AlarmPanelSnapshot {
 
 impl AlarmPanelSnapshot {
     fn from_alarm(local: LocalDateTime, alarm: &AlarmDisplayInfo) -> Self {
-        let (time, meridiem) =
-            format_alarm_time(alarm.hour as u16, alarm.minute as u16);
+        let (time, meridiem) = format_alarm_time(alarm.hour as u16, alarm.minute as u16);
 
         Self {
             time,
@@ -170,11 +171,7 @@ impl Plugin for AlarmDismissPlugin {
 /// it. Works with negative desktop coordinates used by left/top secondary
 /// monitors and degrades to the monitor origin if the panel is larger than the
 /// usable bounds.
-fn panel_target(
-    bounds: PhysicalRect,
-    panel_width: i32,
-    panel_height: i32,
-) -> PhysicalPoint {
+fn panel_target(bounds: PhysicalRect, panel_width: i32, panel_height: i32) -> PhysicalPoint {
     let panel_width = panel_width.max(1);
     let panel_height = panel_height.max(1);
 
@@ -269,17 +266,9 @@ fn spawn_dismiss_panel(
         ))
         .id();
 
-    let snapshot = AlarmPanelSnapshot::from_alarm(
-        platform::local_datetime(),
-        &alarm,
-    );
+    let snapshot = AlarmPanelSnapshot::from_alarm(platform::local_datetime(), &alarm);
 
-    spawn_alarm_panel_ui(
-        &mut commands,
-        window_entity,
-        camera_entity,
-        snapshot,
-    );
+    spawn_alarm_panel_ui(&mut commands, window_entity, camera_entity, snapshot);
 
     runtime.window = Some(window_entity);
 
@@ -429,11 +418,7 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands, window: Entity) {
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.22, 0.43, 0.92, 0.14)),
-                    Outline::new(
-                        px(1),
-                        Val::ZERO,
-                        Color::srgba(0.34, 0.52, 1.0, 0.32),
-                    ),
+                    Outline::new(px(1), Val::ZERO, Color::srgba(0.34, 0.52, 1.0, 0.32)),
                 ))
                 .with_children(|pill| {
                     pill.spawn((
@@ -447,39 +432,41 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands, window: Entity) {
                 });
 
             spawn_window_controls(header, window);
-            header.spawn((
-                Button,
-                AlarmActionButton {
-                    action: AlarmPanelAction::Dismiss,
-                    normal: SECONDARY_COLOR,
-                    hovered: SECONDARY_HOVER,
-                    pressed: SECONDARY_PRESSED,
-                },
-                Node {
-                    width: px(36),
-                    height: px(42),
-                    flex_shrink: 0.0,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    border_radius: BorderRadius::all(px(14)),
-                    ..default()
-                },
-                BackgroundColor(SECONDARY_COLOR),
-                Outline::new(px(1), Val::ZERO, SECONDARY_OUTLINE),
-            )).with_children(|button| {
-                button.spawn((
-                    Text::new("X"),
-                    TextFont { font_size: FontSize::Px(18.0), ..default() },
-                    TextColor(SECONDARY_TEXT),
-                ));
-            });
+            header
+                .spawn((
+                    Button,
+                    AlarmActionButton {
+                        action: AlarmPanelAction::Dismiss,
+                        normal: SECONDARY_COLOR,
+                        hovered: SECONDARY_HOVER,
+                        pressed: SECONDARY_PRESSED,
+                    },
+                    Node {
+                        width: px(36),
+                        height: px(42),
+                        flex_shrink: 0.0,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border_radius: BorderRadius::all(px(14)),
+                        ..default()
+                    },
+                    BackgroundColor(SECONDARY_COLOR),
+                    Outline::new(px(1), Val::ZERO, SECONDARY_OUTLINE),
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("X"),
+                        TextFont {
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(SECONDARY_TEXT),
+                    ));
+                });
         });
 }
 
-fn spawn_alarm_card(
-    parent: &mut ChildSpawnerCommands,
-    snapshot: &AlarmPanelSnapshot,
-) {
+fn spawn_alarm_card(parent: &mut ChildSpawnerCommands, snapshot: &AlarmPanelSnapshot) {
     parent
         .spawn((
             Name::new("Nera Alarm Card"),
@@ -677,8 +664,7 @@ fn acquire_dismiss_hwnd(world: &mut World) {
         return;
     }
 
-    let Some(window_entity) = world.resource::<AlarmDismissRuntime>().window
-    else {
+    let Some(window_entity) = world.resource::<AlarmDismissRuntime>().window else {
         return;
     };
 
@@ -856,9 +842,7 @@ fn commit_alarm_action_after_release(
             presentation.write(PresentationCommand::ExitAttention);
         }
         AlarmPanelAction::SnoozeFiveMinutes => {
-            alarm_control.write(AlarmControlCommand::Snooze(
-                DEFAULT_SNOOZE_DURATION,
-            ));
+            alarm_control.write(AlarmControlCommand::Snooze(DEFAULT_SNOOZE_DURATION));
         }
     }
 }

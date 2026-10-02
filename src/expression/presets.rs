@@ -57,6 +57,19 @@ impl NeraExpressionPreset {
     }
 }
 
+/// Default and invisible previews hand facial ownership back to animation.
+pub(crate) fn preview_selection(
+    preset: NeraExpressionPreset,
+    intensity: f32,
+) -> Option<(NeraExpressionPreset, f32)> {
+    let intensity = if intensity.is_finite() {
+        intensity.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (preset != NeraExpressionPreset::Default && intensity > 0.0).then_some((preset, intensity))
+}
+
 /// A matched custom expression takes precedence. Otherwise use VRM standard
 /// emotions, with gentle combinations when there is no exact standard emotion.
 /// Manual previews may control eyelids and mouth; clearing the preview restores

@@ -186,6 +186,7 @@ fn idle_candidates(
 
 #[derive(SystemParam)]
 pub(crate) struct BehaviorContext<'w, 's> {
+    cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
     settings: Res<'w, NeraSettings>,
     interaction: Res<'w, DesktopPetInteraction>,
     presentation: Res<'w, PresentationState>,
@@ -202,6 +203,13 @@ pub(crate) struct BehaviorContext<'w, 's> {
 
 impl BehaviorContext<'_, '_> {
     fn available(&self) -> bool {
+        if self
+            .cloud
+            .as_ref()
+            .is_some_and(|cloud| cloud.owns_placement())
+        {
+            return false;
+        }
         #[cfg(target_os = "windows")]
         if !crate::alarm_settings::nera_input_available(Res::clone(&self.alarm_gate))
             || self.manager_gate.window_open
@@ -502,7 +510,10 @@ mod tests {
     }
     fn behavior_test_app() -> App {
         let mut app = App::new();
-        app.add_plugins((bevy::app::TaskPoolPlugin::default(), bevy::asset::AssetPlugin::default()));
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+        ));
         app.init_resource::<Time>()
             .init_resource::<Time<Real>>()
             .init_resource::<NeraSettings>()

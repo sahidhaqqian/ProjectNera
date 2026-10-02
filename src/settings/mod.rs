@@ -14,6 +14,8 @@ mod startup;
 mod ui;
 #[cfg(debug_assertions)]
 pub(crate) use shadow::assert_smoke_shadow_ground;
+#[cfg(debug_assertions)]
+pub(crate) use ui::smoke_throw_controls;
 
 pub(crate) use model::{ActivityLevel, AlarmConfig, NeraSettings};
 pub(crate) use runtime::{save_settings_before_exit, save_settings_deferred};
@@ -57,12 +59,17 @@ impl Plugin for NeraSettingsPlugin {
                     open_settings_window,
                     (handle_settings_buttons, import_character_from_settings).chain(),
                     handle_roaming_radius_slider,
+                    handle_throw_intensity_slider,
                     drag_settings_window,
                     scroll_settings_window,
                     close_settings_after_mouse_release,
                     update_settings_labels,
-                    (update_character_settings_labels, update_character_import_status,
-                        update_gravity_label),
+                    (
+                        update_character_settings_labels,
+                        update_character_import_status,
+                        update_gravity_label,
+                        update_throw_settings_labels,
+                    ),
                     update_audio_settings_labels,
                     update_roaming_settings_labels,
                     apply_always_on_top,

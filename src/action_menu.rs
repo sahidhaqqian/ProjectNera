@@ -85,6 +85,7 @@ pub(crate) enum AlarmMenuChoice {
 
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NeraActionMenuCommand {
+    Cloud(crate::cloud::CloudCommand),
     Animation(AnimationMenuChoice),
     AnimationManager,
     Alarm(AlarmMenuChoice),
@@ -133,6 +134,7 @@ fn rgb(value: (u8, u8, u8)) -> COLORREF {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RadialPage {
     Root,
+    Cloud,
     Roaming,
     Alarm,
     /// Longer presets + "Test Now", reached from the Alarm page. Replaces the
@@ -164,9 +166,9 @@ impl RadialItem {
 
 const ROOT_ITEMS: [RadialItem; 6] = [
     RadialItem {
-        glyph: "●",
-        label: "Chat",
-        action: RadialItemAction::Disabled,
+        glyph: "☁",
+        label: "Cloud",
+        action: RadialItemAction::Open(RadialPage::Cloud),
     },
     RadialItem {
         glyph: "⚙",
@@ -205,6 +207,35 @@ const ROAMING_ITEMS: [RadialItem; 3] = [
         glyph: "⌂",
         label: "Stay Here",
         action: RadialItemAction::Command(NeraActionMenuCommand::StayHere),
+    },
+    RadialItem {
+        glyph: "<",
+        label: "Back",
+        action: RadialItemAction::Back,
+    },
+];
+
+const CLOUD_ITEMS: [RadialItem; 4] = [
+    RadialItem {
+        glyph: "Z",
+        label: "Rest",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
+            crate::cloud::CloudCommand::Summon(crate::cloud::CloudMode::Rest),
+        )),
+    },
+    RadialItem {
+        glyph: "~",
+        label: "Ride",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
+            crate::cloud::CloudCommand::Summon(crate::cloud::CloudMode::Ride),
+        )),
+    },
+    RadialItem {
+        glyph: "×",
+        label: "Dismiss",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
+            crate::cloud::CloudCommand::Dismiss,
+        )),
     },
     RadialItem {
         glyph: "<",
@@ -297,6 +328,7 @@ const ALARM_MORE_ITEMS: [RadialItem; 7] = [
 fn items_for(page: RadialPage) -> &'static [RadialItem] {
     match page {
         RadialPage::Root => &ROOT_ITEMS,
+        RadialPage::Cloud => &CLOUD_ITEMS,
         RadialPage::Roaming => &ROAMING_ITEMS,
         RadialPage::Alarm => &ALARM_ITEMS,
         RadialPage::AlarmMore => &ALARM_MORE_ITEMS,
@@ -312,6 +344,7 @@ fn items_for(page: RadialPage) -> &'static [RadialItem] {
 fn parent_page(page: RadialPage) -> Option<RadialPage> {
     match page {
         RadialPage::Root => None,
+        RadialPage::Cloud => Some(RadialPage::Root),
         RadialPage::Roaming => Some(RadialPage::Root),
         RadialPage::Alarm => Some(RadialPage::Root),
         RadialPage::AlarmMore => Some(RadialPage::Alarm),
@@ -537,7 +570,7 @@ fn keep_action_menu_front(menu: Res<ActionMenuState>) {
     };
 }
 
-fn poll_action_menu_result(
+pub(crate) fn poll_action_menu_result(
     mut menu: ResMut<ActionMenuState>,
     mut animation: ResMut<NeraAnimationState>,
     tray: Option<Res<TrayRuntime>>,
@@ -562,6 +595,9 @@ fn poll_action_menu_result(
         };
 
         match command {
+            NeraActionMenuCommand::Cloud(choice) => {
+                info!("Nera radial menu -> Cloud::{choice:?}");
+            }
             NeraActionMenuCommand::AnimationManager => {
                 info!("Nera radial menu -> Animation Manager");
                 open_animation_manager.write(crate::animation_manager::OpenAnimationManager);
@@ -1218,6 +1254,7 @@ mod tests {
     fn every_sub_page_ends_with_a_back_item() {
         for page in [
             RadialPage::Root,
+            RadialPage::Cloud,
             RadialPage::Roaming,
             RadialPage::Alarm,
             RadialPage::AlarmMore,

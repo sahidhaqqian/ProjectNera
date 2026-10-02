@@ -9,10 +9,7 @@
 //! Deliberately *not* used for anything security-relevant. If Nera ever needs
 //! a token, a nonce, or a secret, this is the wrong tool.
 
-use std::time::{
-    SystemTime,
-    UNIX_EPOCH,
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Golden-ratio fractional bits. Used both as the fallback entropy source and
 /// to repair a zero seed, because zero is xorshift's only fixed point.
@@ -34,10 +31,7 @@ impl NeraRng {
         let mixed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|elapsed| {
-                elapsed
-                    .as_secs()
-                    .wrapping_mul(1_000_000_007)
-                    ^ elapsed.subsec_nanos() as u64
+                elapsed.as_secs().wrapping_mul(1_000_000_007) ^ elapsed.subsec_nanos() as u64
             })
             .unwrap_or(GOLDEN_RATIO);
 

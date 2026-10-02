@@ -16,11 +16,11 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 mod library;
+mod limbs;
 mod playback;
 mod state;
 mod systems;
 mod walking_loop;
-mod limbs;
 
 pub(crate) use library::{LibraryAnimationError, LibraryPlayback, PlayLibraryAnimation};
 pub(crate) use playback::*;
@@ -51,6 +51,17 @@ pub(crate) fn character_animation_ready(world: &World) -> bool {
     requested.is_some_and(|clip| {
         world.resource::<NeraAnimationPlayback>().current_clip == Some(clip.entity)
     })
+}
+
+#[cfg(test)]
+pub(crate) fn head_stroke_test_clips(world: &mut World) -> NeraAnimationClips {
+    NeraAnimationClips {
+        head_stroke: Some(playback::ClipSlot {
+            entity: world.spawn_empty().id(),
+            duration: Duration::from_secs(1),
+        }),
+        ..default()
+    }
 }
 
 #[cfg(test)]
@@ -142,7 +153,12 @@ impl Plugin for NeraAnimationPlugin {
                     .before(tick_animation_actions),
             )
             .add_message::<AlarmAnimationCommand>()
-            .add_systems(Update, ensure_state_lazy_vrmas)
+            .add_systems(
+                Update,
+                ensure_state_lazy_vrmas
+                    .after(crate::cloud::update_cloud)
+                    .before(apply_animation_state),
+            )
             .add_systems(
                 Update,
                 sync_alarm_animation

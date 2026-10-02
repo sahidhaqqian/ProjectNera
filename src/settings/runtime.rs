@@ -545,6 +545,8 @@ mod tests {
             ground_offset: 0,
             walking_enabled: false,
             gravity_enabled: true,
+            throw_enabled: true,
+            throw_intensity: 50,
             activity_level: 1,
             roaming_radius_px: 400,
             pause_roaming_fullscreen: true,

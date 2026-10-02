@@ -205,9 +205,11 @@ impl TemporaryAction {
         match self {
             Self::Walking => AnimationPriority::Walking,
             Self::StartupGreeting => AnimationPriority::StartupGreeting,
-            Self::HitHead | Self::HitChest | Self::DodgeWhileSitting | Self::HeadStroke | Self::LimbReaction(_) => {
-                AnimationPriority::Reaction
-            }
+            Self::HitHead
+            | Self::HitChest
+            | Self::DodgeWhileSitting
+            | Self::HeadStroke
+            | Self::LimbReaction(_) => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
             #[cfg(target_os = "windows")]
@@ -317,7 +319,19 @@ impl Default for NeraAnimationState {
 }
 
 impl NeraAnimationState {
-    pub(crate) fn selected_sitting_pose(&self) -> SittingPose { self.sitting_pose.unwrap_or_default() }
+    /// A cloud reuses ordinary seated playback without a falling entry clip.
+    /// Future sleep enter/loop/wake sequencing can remain inside the Cloud owner.
+    pub(crate) fn enter_cloud_seat(&mut self, pose: SittingPose) {
+        self.active_actions.clear();
+        self.support_transition = None;
+        self.was_on_sitting_surface = true;
+        self.sitting_pose = Some(pose);
+        self.set_base_pose(BasePose::Sitting);
+        self.bump_revision();
+    }
+    pub(crate) fn selected_sitting_pose(&self) -> SittingPose {
+        self.sitting_pose.unwrap_or_default()
+    }
     pub(super) fn select_sitting_pose(&mut self, available: &[SittingPose]) {
         let candidates: Vec<_> = available
             .iter()

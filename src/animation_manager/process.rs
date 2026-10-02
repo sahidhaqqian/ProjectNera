@@ -25,7 +25,9 @@ enum Event {
 
 fn decode_event(line: &str) -> Option<Event> {
     let message = line.strip_prefix(PREFIX)?;
-    if message == "SETTINGS" { return Some(Event::Settings); }
+    if message == "SETTINGS" {
+        return Some(Event::Settings);
+    }
     if let Some(json) = message.strip_prefix("ROSTER_REQUEST\t") {
         let request: crate::character::roster::RosterRequest = serde_json::from_str(json).ok()?;
         return request.valid().then_some(Event::Roster(request));
@@ -155,7 +157,15 @@ fn open_manager(
     }
     if let Some(child) = &mut process.child {
         if let Some(input) = &mut child.stdin {
-            let _ = writeln!(input, "{}", if character_panel { "CHARACTERS" } else { "ANIMATIONS" });
+            let _ = writeln!(
+                input,
+                "{}",
+                if character_panel {
+                    "CHARACTERS"
+                } else {
+                    "ANIMATIONS"
+                }
+            );
         }
         return;
     }
@@ -171,14 +181,40 @@ fn open_manager(
         error!("Could not open Animation Manager: {error}");
     }
     gate.window_open = process.child.is_some();
-    if character_panel && let Some(input) = process.child.as_mut().and_then(|child| child.stdin.as_mut()) { let _ = writeln!(input, "CHARACTERS"); }
+    if character_panel
+        && let Some(input) = process
+            .child
+            .as_mut()
+            .and_then(|child| child.stdin.as_mut())
+    {
+        let _ = writeln!(input, "CHARACTERS");
+    }
 }
 
-fn forward_roster(instances: Res<crate::character::library::CharacterInstances>, catalog: Res<crate::character::library::CharacterCatalog>, active: Res<crate::character::ActiveCharacter>, status: Res<crate::character::CharacterImportStatus>, windows: Query<&Window, With<bevy::window::PrimaryWindow>>, mut process: ResMut<ManagerProcess>) {
-    if process.child.is_none() { return; }
-    let roster = instances.roster(&catalog, &active, windows.single().is_ok_and(|w| w.visible), &status.message);
+fn forward_roster(
+    instances: Res<crate::character::library::CharacterInstances>,
+    catalog: Res<crate::character::library::CharacterCatalog>,
+    active: Res<crate::character::ActiveCharacter>,
+    status: Res<crate::character::CharacterImportStatus>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut process: ResMut<ManagerProcess>,
+) {
+    if process.child.is_none() {
+        return;
+    }
+    let roster = instances.roster(
+        &catalog,
+        &active,
+        windows.single().is_ok_and(|w| w.visible),
+        &status.message,
+    );
     let json = serde_json::to_string(&roster).unwrap();
-    if json != process.roster_snapshot && let Some(input) = process.child.as_mut().and_then(|c| c.stdin.as_mut()) && writeln!(input, "ROSTER\t{json}").is_ok() { process.roster_snapshot = json; }
+    if json != process.roster_snapshot
+        && let Some(input) = process.child.as_mut().and_then(|c| c.stdin.as_mut())
+        && writeln!(input, "ROSTER\t{json}").is_ok()
+    {
+        process.roster_snapshot = json;
+    }
 }
 
 fn forward_character(
@@ -216,8 +252,12 @@ fn poll_manager(
     if let Some(events) = &process.events {
         for event in events.lock().unwrap().try_iter() {
             match event {
-                Event::Settings => { settings.write_default(); }
-                Event::Roster(request) => { roster.write(request); }
+                Event::Settings => {
+                    settings.write_default();
+                }
+                Event::Roster(request) => {
+                    roster.write(request);
+                }
                 Event::Play(path) => {
                     play.write(crate::animation::PlayLibraryAnimation { path });
                 }
@@ -226,7 +266,11 @@ fn poll_manager(
                 }
                 Event::Expression(preset, intensity) => {
                     if process.child.is_some() {
-                        expression.write(crate::expression::ExpressionPreviewRequest::Set(preset, intensity));
+                        expression.write(
+                            crate::expression::ExpressionPreviewRequest::for_selection(
+                                preset, intensity,
+                            ),
+                        );
                     }
                 }
                 Event::ClearExpression => {
@@ -283,9 +327,15 @@ enum Control {
 }
 
 fn decode_control(line: &str) -> Option<Control> {
-    if line == "ANIMATIONS" { return Some(Control::Animations); }
-    if line == "CHARACTERS" { return Some(Control::Characters); }
-    if let Some(json) = line.strip_prefix("ROSTER\t") { return serde_json::from_str(json).ok().map(Control::Roster); }
+    if line == "ANIMATIONS" {
+        return Some(Control::Animations);
+    }
+    if line == "CHARACTERS" {
+        return Some(Control::Characters);
+    }
+    if let Some(json) = line.strip_prefix("ROSTER\t") {
+        return serde_json::from_str(json).ok().map(Control::Roster);
+    }
     if line == "FOCUS" {
         return Some(Control::Focus);
     }
@@ -400,15 +450,47 @@ fn receive_controls(
                 state.dirty = true;
             }
             Ok(Control::Character(path)) => {
-                state.character_path = path.clone(); state.dirty = true;
+                state.character_path = path.clone();
+                state.dirty = true;
                 previews.set_character(path, &mut commands, &mut images);
             }
-            Ok(Control::Characters) => { previews.clear(&mut commands, &mut images); state.tab = super::GalleryTab::Characters; state.scroll_y = 0.0; state.dirty = true; for mut window in &mut windows { window.title = "Nera Multi Character".into(); window.set_minimized(false); window.focused = true; } }
-            Ok(Control::Animations) => { if state.tab == super::GalleryTab::Characters { previews.clear(&mut commands, &mut images); state.tab = super::GalleryTab::All; state.scroll_y = 0.0; state.dirty = true; } for mut window in &mut windows { window.title = "Nera Animations".into(); window.set_minimized(false); window.focused = true; } }
-            Ok(Control::Roster(roster)) => { if state.characters != roster { state.characters = roster; state.dirty = true; } }
+            Ok(Control::Characters) => {
+                previews.clear(&mut commands, &mut images);
+                state.tab = super::GalleryTab::Characters;
+                state.scroll_y = 0.0;
+                state.dirty = true;
+                for mut window in &mut windows {
+                    window.title = "Nera Multi Character".into();
+                    window.set_minimized(false);
+                    window.focused = true;
+                }
+            }
+            Ok(Control::Animations) => {
+                if state.tab == super::GalleryTab::Characters {
+                    previews.clear(&mut commands, &mut images);
+                    state.tab = super::GalleryTab::All;
+                    state.scroll_y = 0.0;
+                    state.dirty = true;
+                }
+                for mut window in &mut windows {
+                    window.title = "Nera Animations".into();
+                    window.set_minimized(false);
+                    window.focused = true;
+                }
+            }
+            Ok(Control::Roster(roster)) => {
+                if state.characters != roster {
+                    state.characters = roster;
+                    state.dirty = true;
+                }
+            }
             Err(mpsc::TryRecvError::Disconnected) => {
                 #[cfg(debug_assertions)]
-                if std::env::args().any(|arg| arg == "--expression-smoke" || arg == "--roster-smoke") { break; }
+                if std::env::args()
+                    .any(|arg| arg == "--expression-smoke" || arg == "--roster-smoke")
+                {
+                    break;
+                }
                 exit.write(AppExit::Success);
                 break;
             }
@@ -422,6 +504,7 @@ fn expression_smoke(
     time: Res<Time>,
     mut stage: Local<u8>,
     mut state: ResMut<super::ManagerState>,
+    previews: Res<super::preview::PreviewRuntime>,
     windows: Query<Entity, With<ManagerWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
@@ -435,22 +518,30 @@ fn expression_smoke(
         *stage = 1;
     }
     if *stage == 1 && time.elapsed_secs() > 12.0 {
+        previews.capture_expression_heads(&mut commands, &folder);
         if let Ok(window) = windows.single() {
-            commands.spawn(Screenshot::window(window)).observe(save_to_disk(folder.join("expressions-desktop.png")));
+            commands
+                .spawn(Screenshot::window(window))
+                .observe(save_to_disk(folder.join("expressions-desktop.png")));
         }
         *stage = 2;
     }
     if *stage == 2 && time.elapsed_secs() > 14.0 {
         commands.entity(windows.single().unwrap()).insert(Window {
-            resolution: (720, 640).into(), ..super::manager_window_descriptor()
+            resolution: (720, 640).into(),
+            ..super::manager_window_descriptor()
         });
         *stage = 3;
     }
     if *stage == 3 && time.elapsed_secs() > 17.0 {
-        commands.spawn(Screenshot::window(windows.single().unwrap())).observe(save_to_disk(folder.join("expressions-compact.png")));
+        commands
+            .spawn(Screenshot::window(windows.single().unwrap()))
+            .observe(save_to_disk(folder.join("expressions-compact.png")));
         *stage = 4;
     }
-    if time.elapsed_secs() > 20.0 { exit.write(AppExit::Success); }
+    if time.elapsed_secs() > 20.0 {
+        exit.write(AppExit::Success);
+    }
 }
 
 fn send_event(message: &str) {
@@ -460,25 +551,56 @@ fn send_event(message: &str) {
 }
 
 #[cfg(debug_assertions)]
-fn roster_smoke(time: Res<Time>, mut stage: Local<u8>, mut state: ResMut<super::ManagerState>, windows: Query<Entity, With<ManagerWindow>>, mut commands: Commands, mut exit: MessageWriter<AppExit>) {
+fn roster_smoke(
+    time: Res<Time>,
+    mut stage: Local<u8>,
+    mut state: ResMut<super::ManagerState>,
+    windows: Query<Entity, With<ManagerWindow>>,
+    mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
+) {
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     let folder = std::env::temp_dir().join("nera-feature-smoke");
     let _ = std::fs::create_dir_all(&folder);
     if *stage == 0 && time.elapsed_secs() > 0.5 {
-        state.tab = super::GalleryTab::Characters; state.dirty = true; *stage = 1;
+        state.tab = super::GalleryTab::Characters;
+        state.dirty = true;
+        *stage = 1;
     }
     if *stage == 1 && time.elapsed_secs() > 12.0 {
-        commands.spawn(Screenshot::window(windows.single().unwrap())).observe(save_to_disk(folder.join("roster-desktop.png"))); *stage = 2;
+        commands
+            .spawn(Screenshot::window(windows.single().unwrap()))
+            .observe(save_to_disk(folder.join("roster-desktop.png")));
+        *stage = 2;
     }
     if *stage == 2 && time.elapsed_secs() > 14.0 {
-        for _ in 2..8 { state.characters.slots.push(crate::character::roster::SlotView { used: false, path: None, name: String::new() }); }
-        state.characters.can_add = false; state.dirty = true;
-        commands.entity(windows.single().unwrap()).insert(Window { resolution: (720, 640).into(), ..super::manager_window_descriptor() }); *stage = 3;
+        for _ in 2..8 {
+            state
+                .characters
+                .slots
+                .push(crate::character::roster::SlotView {
+                    used: false,
+                    path: None,
+                    name: String::new(),
+                });
+        }
+        state.characters.can_add = false;
+        state.dirty = true;
+        commands.entity(windows.single().unwrap()).insert(Window {
+            resolution: (720, 640).into(),
+            ..super::manager_window_descriptor()
+        });
+        *stage = 3;
     }
     if *stage == 3 && time.elapsed_secs() > 19.0 {
-        commands.spawn(Screenshot::window(windows.single().unwrap())).observe(save_to_disk(folder.join("roster-compact.png"))); *stage = 4;
+        commands
+            .spawn(Screenshot::window(windows.single().unwrap()))
+            .observe(save_to_disk(folder.join("roster-compact.png")));
+        *stage = 4;
     }
-    if time.elapsed_secs() > 22.0 { exit.write(AppExit::Success); }
+    if time.elapsed_secs() > 22.0 {
+        exit.write(AppExit::Success);
+    }
 }
 fn forward_play(mut play: MessageReader<crate::animation::PlayLibraryAnimation>) {
     for event in play.read() {
@@ -486,11 +608,23 @@ fn forward_play(mut play: MessageReader<crate::animation::PlayLibraryAnimation>)
     }
 }
 fn forward_roster_requests(mut requests: MessageReader<crate::character::roster::RosterRequest>) {
-    for request in requests.read() { send_event(&format!("ROSTER_REQUEST\t{}", serde_json::to_string(request).unwrap())); }
+    for request in requests.read() {
+        send_event(&format!(
+            "ROSTER_REQUEST\t{}",
+            serde_json::to_string(request).unwrap()
+        ));
+    }
 }
-fn forward_back(mut back: MessageReader<crate::settings::ReturnToActionMenu>, state: Res<super::ManagerState>) {
+fn forward_back(
+    mut back: MessageReader<crate::settings::ReturnToActionMenu>,
+    state: Res<super::ManagerState>,
+) {
     for _ in back.read() {
-        send_event(if state.tab == super::GalleryTab::Characters { "SETTINGS" } else { "BACK" });
+        send_event(if state.tab == super::GalleryTab::Characters {
+            "SETTINGS"
+        } else {
+            "BACK"
+        });
     }
 }
 
@@ -498,7 +632,11 @@ fn forward_expression(mut requests: MessageReader<crate::expression::ExpressionP
     for request in requests.read() {
         match request {
             crate::expression::ExpressionPreviewRequest::Set(preset, intensity) => {
-                send_event(&format!("EXPRESSION\t{}\t{}", preset.wire(), (intensity * 100.0).round() as u8));
+                send_event(&format!(
+                    "EXPRESSION\t{}\t{}",
+                    preset.wire(),
+                    (intensity * 100.0).round() as u8
+                ));
             }
             crate::expression::ExpressionPreviewRequest::Clear => send_event("CLEAR_EXPRESSION"),
         }
@@ -623,15 +761,24 @@ mod tests {
     #[test]
     fn expression_protocol_accepts_only_known_presets_and_valid_intensity() {
         use crate::expression::NeraExpressionPreset as Preset;
-        assert_eq!(decode_event("NERA_MANAGER\tEXPRESSION\tjoy\t100"),
-            Some(Event::Expression(Preset::Joy, 1.0)));
-        assert_eq!(decode_event("NERA_MANAGER\tEXPRESSION\tdefault\t0"),
-            Some(Event::Expression(Preset::Default, 0.0)));
-        assert_eq!(decode_event("NERA_MANAGER\tCLEAR_EXPRESSION"), Some(Event::ClearExpression));
-        for invalid in ["NERA_MANAGER\tEXPRESSION\tblush\t100",
+        assert_eq!(
+            decode_event("NERA_MANAGER\tEXPRESSION\tjoy\t100"),
+            Some(Event::Expression(Preset::Joy, 1.0))
+        );
+        assert_eq!(
+            decode_event("NERA_MANAGER\tEXPRESSION\tdefault\t0"),
+            Some(Event::Expression(Preset::Default, 0.0))
+        );
+        assert_eq!(
+            decode_event("NERA_MANAGER\tCLEAR_EXPRESSION"),
+            Some(Event::ClearExpression)
+        );
+        for invalid in [
+            "NERA_MANAGER\tEXPRESSION\tblush\t100",
             "NERA_MANAGER\tEXPRESSION\tjoy\t101",
             "NERA_MANAGER\tEXPRESSION\tjoy\tNaN",
-            "NERA_MANAGER\tEXPRESSION\tjoy\t50\tPLAY"] {
+            "NERA_MANAGER\tEXPRESSION\tjoy\t50\tPLAY",
+        ] {
             assert_eq!(decode_event(invalid), None);
         }
     }
@@ -685,7 +832,10 @@ mod tests {
 
     #[test]
     fn pipe_protocol_only_accepts_library_paths_and_back() {
-        assert_eq!(decode_event("NERA_MANAGER\tSETTINGS"), Some(Event::Settings));
+        assert_eq!(
+            decode_event("NERA_MANAGER\tSETTINGS"),
+            Some(Event::Settings)
+        );
         assert_eq!(decode_control("CHARACTERS"), Some(Control::Characters));
         assert_eq!(decode_control("ANIMATIONS"), Some(Control::Animations));
         assert_eq!(decode_event("NERA_MANAGER\tBACK"), Some(Event::Back));
@@ -712,20 +862,58 @@ mod tests {
             .init_resource::<super::super::preview::PreviewRuntime>()
             .init_resource::<Assets<Image>>()
             .add_message::<AppExit>()
-            .add_systems(Update, (receive_controls, super::super::ui::rebuild_ui).chain());
+            .add_systems(
+                Update,
+                (receive_controls, super::super::ui::rebuild_ui).chain(),
+            );
         app.world_mut().spawn((ManagerWindow, Window::default()));
-        app.world_mut().spawn((super::super::ManagerCamera, Camera2d));
-        assert!(app.world().resource::<super::super::ManagerState>().tab == super::super::GalleryTab::All);
+        app.world_mut()
+            .spawn((super::super::ManagerCamera, Camera2d));
+        assert!(
+            app.world().resource::<super::super::ManagerState>().tab
+                == super::super::GalleryTab::All
+        );
         app.update();
         let world = app.world_mut();
-        assert!(!world.query::<&super::super::ManagerAction>().iter(world).any(|action| matches!(action, super::super::ManagerAction::CharacterSlot(_))));
-        send.send(Control::Characters).unwrap(); app.update();
+        assert!(
+            !world
+                .query::<&super::super::ManagerAction>()
+                .iter(world)
+                .any(|action| matches!(action, super::super::ManagerAction::CharacterSlot(_)))
+        );
+        send.send(Control::Characters).unwrap();
+        app.update();
         let world = app.world_mut();
-        assert!(world.query::<&super::super::ManagerAction>().iter(world).any(|action| matches!(action, super::super::ManagerAction::CharacterSlot(0))));
-        assert!(!world.query::<&super::super::ManagerAction>().iter(world).any(|action| matches!(action, super::super::ManagerAction::All | super::super::ManagerAction::Base | super::super::ManagerAction::Expressions | super::super::ManagerAction::Import)));
-        assert!(world.query::<&Text>().iter(world).any(|text| text.0 == "Done"));
-        send.send(Control::Animations).unwrap(); app.update();
-        assert!(app.world().resource::<super::super::ManagerState>().tab == super::super::GalleryTab::All);
+        assert!(
+            world
+                .query::<&super::super::ManagerAction>()
+                .iter(world)
+                .any(|action| matches!(action, super::super::ManagerAction::CharacterSlot(0)))
+        );
+        assert!(
+            !world
+                .query::<&super::super::ManagerAction>()
+                .iter(world)
+                .any(|action| matches!(
+                    action,
+                    super::super::ManagerAction::All
+                        | super::super::ManagerAction::Base
+                        | super::super::ManagerAction::Expressions
+                        | super::super::ManagerAction::Import
+                ))
+        );
+        assert!(
+            world
+                .query::<&Text>()
+                .iter(world)
+                .any(|text| text.0 == "Done")
+        );
+        send.send(Control::Animations).unwrap();
+        app.update();
+        assert!(
+            app.world().resource::<super::super::ManagerState>().tab
+                == super::super::GalleryTab::All
+        );
     }
 
     #[test]

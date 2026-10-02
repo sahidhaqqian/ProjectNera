@@ -223,19 +223,22 @@ preview rig, framed from that rig's `HeadBoneEntity`; the desktop avatar keeps i
 ordinary body framing. `face.rs` caches named morph-target metadata before GPU
 extraction frees mesh CPU data. Before the VRM expression pass it removes the
 previous detailed pose; after the pass it applies independent brow/eye/mouth
-weights for a selected face. Clearing the selection restores normal VRM control,
+weights for a selected face. Default, 0% intensity, and explicit Clear release
+manual preview ownership. Clearing the selection restores normal VRM control,
 including unbound custom facial morphs. Models without these named targets use
 available VRM emotion/blink/mouth expressions instead. Anatomical differences
 and missing morphs prevent a promise of identical appearance across models.
 Where a model separates Face/Hair and Body meshes, expression previews hide Body
-without altering the live desktop avatar. `basic.rs` maps all 24 protected clips
+without altering the live desktop avatar. `basic.rs` maps all 25 protected clips
 to a facial preset and intensity. Desktop playback resolves the path from the
 actually active library clip entity, never a pending selection. `AutomaticFace`
 crossfades the outgoing and incoming detailed recipes over 180 ms, replacing
 aggregate facial emotions but preserving natural blink. Gallery clips use the
 same table; unknown custom clips keep their own facial animation. Headpat loads
 Blush and selects Embarrassed at 75%. A manual preview takes precedence and
-selecting a gallery animation releases that manual override.
+survives gallery animation playback; only a release action or closing its owner
+ends it. Preview rigs cache their last selection and resend it only when that
+selection or the expression-entity map changes, including late initialization.
 Embarrassed/Timid use subtle transparent cheek geometry attached to the head,
 with each preview's render layer preserved.
 
@@ -279,10 +282,17 @@ use grows per renderer rather than sharing one global animation/physics resource
 
 `interaction/momentum.rs` samples recent free-drag cursor travel and emits
 `NeraThrow` only above a DPI-scaled speed threshold. Paused/slow releases emit
-none; fast movement suppresses drag-to-sit acquisition. Gesture cancellation
+none; fast movement suppresses drag-to-sit acquisition only while throwing is
+enabled with nonzero intensity. Gesture cancellation
 clears the velocity history. `desktop_physics.rs` owns horizontal/vertical launch
 velocity, subpixel movement, screen bounds, drag damping, support collision, and
 the single landing transition. Existing sitting and drag ownership still win.
+Persistent `throw_enabled` and `throw_intensity` settings default to ON and 50%.
+The Settings checkbox and 0-100% slider are independent of gravity. Launch
+velocity is capped and multiplied by intensity once, in the physics consumer;
+100% preserves the original speed. OFF/0% blocks releases and new launches,
+stops in-flight momentum, and lets enabled gravity continue normal falling.
+New companions inherit the owner's throw preferences.
 The persistent `gravity_enabled` setting defaults true. OFF suppresses unsupported
 falling and startup drops; an explicit throw coasts with damping, then freezes.
 
@@ -528,6 +538,9 @@ and must atomically suspend and restore placement, interaction, and animation.
 | `Pressed -> Dragging -> Released` lifecycle | `InteractionState` plus `DesktopPetInteraction` | `drag_nera_window` is the transition owner | `NeraReleased` is a semantic message; state returns to `Hover` |
 | Headpat recognition | `interaction::HeadPatGesture` | `detect_head_pat` writes; utility/presentation resets | Travel, reversals, timing, cooldown |
 | Sitting/attachment | `environment::DesktopEnvironment.placement` | Pointer requests/detaches; sitting systems commit/follow; presentation snapshots/restores; animation observes | `PendingWindow`/`PendingTaskbar` delay native attachment until Seat sampling |
+| Cloud attachment | `cloud::CloudRuntime` | Cloud commands/lifecycle; pointer drag edge; pose-first Last alignment | Hidden / Appearing / Attached / Disappearing; attachment exists only in the two active states |
+| Pet SFX | `pet_feedback/sfx.rs` | Semantic `PetSfx` messages; optional startup catalog; bounded playback | Nine cooldown slots; up to four players; master volume/mute remains Settings-owned |
+| Interaction particles | `pet_feedback/particles.rs` | Semantic `PetFx` messages; real-time expiry | Five shared mesh/material pairs, five debounce slots, at most 32 short-lived entities |
 | Desktop/monitor/window snapshot | `environment::DesktopEnvironment` | Environment systems write; interaction, physics, avatar, presentation, settings shadow read | HWND rect/DPI, discovered/tracked windows, monitor, taskbars |
 | Pose support anchors | `DesktopEnvironment.feet_anchor_logical` / `seat_anchor_logical` | `avatar::anchors` writes; sitting/physics consume | Screen projection of live avatar bones; feet may be deliberately frozen by physics |
 | Freefall and standing support | `desktop_physics::DesktopPhysicsState` | Physics writes; tray resets; avatar refreshes support anchor; shadow reads | Velocity, support enum, subpixel Y, landing latch |
@@ -708,6 +721,7 @@ mark_nera_live_bones
   -> attach_bone_colliders
   -> update_look_at_target
   -> suspend interaction when a utility window owns input
+  -> update_cloud [menu/lifecycle commands, before drag and physics]
   -> drag_nera_window [DesktopPet + utility input available]
   -> prepare_startup_entrance
   -> update_desktop_physics [DesktopPet]
@@ -757,6 +771,9 @@ requires a new ordering constraint.
   so it consumes the current semantic hover.
 - Expression driving runs before `VrmSystemSets::Expressions`, allowing its
   override to land in the same frame.
+- Cloud seat-pose preservation runs after animation sampling/seated hips,
+  before procedural limb offsets and VRM constraints. It is inactive without a
+  cloud attachment; reactions cannot interrupt initial seat calibration.
 - Interaction logging is a debug consumer in `PostUpdate`; it does not own state.
 
 ### `Last`
@@ -765,6 +782,7 @@ requires a new ordering constraint.
 
 ```text
 update_avatar_anchors -> settle_pending_sit [DesktopPet]
+  -> align_cloud_seat -> animate_cloud_visual -> update_particles
 ```
 
 This is the pose-first sitting calibration: `SittingEnter` starts earlier,
@@ -778,6 +796,107 @@ order between it and the anchor/settle pair; run conditions and presentation
 state prevent desktop settling from operating during attention.
 
 ## 7. Behavior-sensitive areas
+
+### Cloud and semantic feedback ownership
+
+`cloud.rs` owns the complete cloud attachment; native `PlacementState` remains
+Free while it is active. Consumers query `CloudRuntime::owns_placement()` rather
+than duplicating cloud booleans or extending window/taskbar placement variants.
+Cloud summoning clears native attachments and motion caches, sets an existing
+seated base pose (Rest fallback: Sitting4; Ride: Default), and keeps a physical desktop
+seat point independent of visual bobbing. No gravity setting is mutated.
+
+Drag still moves the same HWND through `interaction.rs`. At Pressed -> Dragging,
+Rest immediately releases attachment and starts the visual disappearance. Ride
+stays attached: Last reads the dragged seat point and updates the logical mount
+position. Its release cannot launch throw momentum or acquire a native seat.
+While either cloud owns placement, physics cancels stale freefall/throws and
+does not search for support; behavior cancels roaming/fidgets. Normal support
+animation sync yields to the cloud-selected base pose. Seat/hips sampling and
+shadow visibility recognize the cloud owner. `CloudRuntime::rest_pose()` owns
+the two Rest variations: Lying and Seated. New Rest attachments alternate without
+repeating; repeated summons and elapsed time never change an active selection.
+The selected pose is not another placement owner. Lying Rest lazily retargets the promoted
+`animasi_basic/Sleeping_Idle.vrma`, selects it as the base looping clip without
+adding it to random taskbar/window sitting choices, and falls back to Sitting4
+while loading. It requests Exhausted 100% (60% during the loading fallback) only
+in the automatic expression layer; manual gallery previews remain authoritative.
+Seated Rest loops the existing Sitting4 with Exhausted 100%, without the lying
+roll/arm layer or inner-cushion contact. Ordinary sitting clips instead request
+Default; Timid remains available as an explicit facial preset. While Rest owns
+placement, interaction animation routing consumes all body clicks and headpat
+messages without starting reactions, damage combos or limb animation. Headpat
+feedback is also suppressed. The drag/release paths are not gated and normal
+reactions resume after detachment; Ride keeps its existing reactions.
+
+Dismiss releases ownership *before* its 250 ms visual shrink. Cached physics is
+reset and the ordinary free-placement solver resumes at the current HWND
+position, honoring Gravity OFF as well as ON. A missing visual/rig, character
+commit, hide, Attention, actual manual VRMA/menu-animation playback, or tray
+position recovery intentionally exits cloud placement. Character commit also
+destroys old feedback entities. Fullscreen retains the cloud and existing
+behavior-pause semantics; opening/closing utility windows alone does not exit it.
+
+`cloud/visual.rs` lazily reuses the supplied GLB through Bevy's existing
+`WorldAssetRoot`, with procedural lobes only when the file is absent. Its own
+small hierarchy is refreshed after native Last alignment, avoiding a full-world
+transform pass. Existing memory policy releases immutable cloud mesh/texture CPU
+copies after render extraction. One cloud model is cached after first use.
+The measured model-local front-rim seat is `(0, 0.94, 1.4)`, rather than the
+outer lobes' maximum height. Projection uses the live hips contact's depth; the
+root subtracts the scaled local seat, so appearance scaling stays centered on
+that contact. Lying Rest instead uses the inner cushion `(0, 1.12, 0.95)` and
+a world-down, scale-aware pelvis contact; a sideways hips rotation must not turn
+the contact offset sideways. Cloud hit testing follows the actual visual root, not the seat's
+old screen-space ellipse. Bobbing affects only the visual contact by a tiny amount.
+
+`cloud/pose.rs` holds a derived nine-bone lower-body cache, not another attachment
+owner. After 220 ms of seated evaluation it preserves pelvis/legs when headpat,
+dodge, or limb reactions use standing-authored clips, and during their return
+blend. Head/torso/arms remain animated and procedural limb offsets apply afterward.
+Detachment/replacement clears the cache; ordinary desktop sitting is unchanged.
+When the cold sleep clip becomes available, base-pose calibration restarts before
+the lower-body cache is admitted for reactions. Pointer reactions are disabled
+on Rest, and explicit VRMA playback/dismissal still releases cloud ownership.
+Lying Rest applies a reversible screen-plane roll to the sampled hips so the
+head lies to the right without turning the face away from the viewer. PreUpdate
+restores its raw rotation before the next animation sample. The original VRMA
+bytes are unchanged.
+`cloud/sleep_arms.rs` layers relaxed shoulders, down-torso elbows and neutral
+wrists onto the actual Sleeping Idle base only. Normalized arm rotations use
+each rig's `RestTransform`/`RestGlobalTransform`, following the VRMA retargeter's
+coordinate conversion. A 300 ms smooth blend eases into the layer; its at-most
+eight raw rotations are restored in PreUpdate before animation evaluation.
+Headpat/reactions, Ride, detachment and character replacement release the layer.
+Spine/breathing and fingers remain authored by the clip. There is no IK, mesh
+deformation, additional entity or idle skeleton scan.
+Closed sleeping eyes require real eyelid morphs: the bundled `nera0.0.vrm`
+contains no mesh morph targets or expression binds, so it remains open-eyed.
+That is an asset limitation, not a general VRM 0.x restriction.
+The debug Cloud smoke accepts `--cloud-smoke-blink-model=<local-vrm0-path>` to
+replace its test character with a Blink-capable legacy reference. It asserts
+the migrated Blink override and actual rendered morph weights, then captures
+the resting face. Alicia Solid passed this check with both eyelids visibly
+closed. This uses existing migration/expression code, adds no runtime fallback
+meshes, and does not transfer incompatible vertex deltas onto Charlotte.
+
+`pet_feedback.rs` bridges headpat messages, real physics falling->support
+touchdown, and resolved animation face intent into semantic events. Paths live
+only in the SFX catalog, not gameplay. Optional `.ogg` files are checked/loaded
+once at startup; missing files are never submitted to AssetServer. Events while
+a cue is missing/not ready are dropped without queuing/retrying or logging.
+Cooldowns are fixed-size arrays; DESPAWN playback and a five-second safety expiry
+bound voice entities. Audio features/dependencies are unchanged.
+
+Particles are unlit, shadow-free shared meshes with desktop-space motion, not
+emitters or a general simulation. Three headpat sparkles, four landing/cloud
+puffs, one anger mark, or one Z are debounced at 250 ms, share a hard 32-entity
+budget, shrink during 0.75-1.8 second real-time lifetimes, and despawn on expiry,
+hide, Attention, or character replacement. No filesystem polling or per-frame
+asset loading is added. Future mood callers can emit `CloudCommand`, `PetSfx`,
+and `PetFx` without implementing mood logic here. See
+[Phase 7 polish validation](PHASE_7_POLISH_VALIDATION.md) for asset expectations
+and native/manual coverage.
 
 | Area | Preserve | What can break |
 |---|---|---|
@@ -931,9 +1050,21 @@ window support, attention entry/exit, settings input gating, tray recovery, and
 multi-monitor/DPI behavior on Windows.
 
 Current validation: `cargo check --all-targets --offline`, the debug build, and
-`cargo test --bin nera --offline` pass (**280 passed, 0 failed, 6 ignored**).
+`cargo test --offline` pass (**320 passed, 0 failed, 6 ignored**).
+`cargo fmt --all -- --check` passes. Nineteen Cloud/SFX/FX regression tests cover
+command/lifecycle ownership, missing audio and cooldowns, particle bounds/expiry,
+seated lower-body preservation, and model-local seat scaling.
+Eleven additional sleep tests cover promotion/protection, lazy/fallback playback,
+reaction/base selection, world-down contact, right-facing reversible rotation,
+arm-layer ownership, retargeted arm geometry and restoration without drift,
+open-eyed ordinary sitting, two stable nonrepeating Rest variations, and every
+body-part/headpat reaction suppressed during sleep with drag/awake/Ride preserved.
 Debug-only bounded smoke runs use separate settings profiles and capture actual
 native screenshots for facial/model previews, companions, limb/alarm controls,
-throw/landing, gravity-OFF motion, and a migrated VRM0 Death01 shadow. Geometry
+and throw Settings ON/OFF and intensity controls at normal/minimum sizes,
+throw/landing, gravity-OFF motion, and a migrated VRM0 Death01 shadow. The Cloud
+smoke passes native Rest/Ride drag/release, no-support floating, dismissal/freefall,
+sleeping touch suppression, right-facing sleep, hand clearance on live VRM1/VRM0
+rigs, VRM0 replacement, Attention, and feedback cleanup. Geometry
 and smoke tests do not establish real mixed-DPI or multi-monitor behavior, native
 focus/tray resilience, gait quality, or long-running resource stability.

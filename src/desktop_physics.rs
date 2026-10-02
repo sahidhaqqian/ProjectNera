@@ -317,6 +317,18 @@ impl DesktopPhysicsState {
 // Main simulation
 // -----------------------------------------------------------------------------
 
+fn throw_launch_velocity(
+    velocity: Vec2,
+    scale: f32,
+    settings: &crate::settings::NeraSettings,
+) -> Option<Vec2> {
+    if !velocity.is_finite() || !scale.is_finite() || settings.throw_strength() <= 0.0 {
+        return None;
+    }
+    let velocity = velocity.clamp_length_max(2200.0 * scale.max(0.25)) * settings.throw_strength();
+    (velocity.length_squared() > 0.0).then_some(velocity)
+}
+
 pub(crate) fn update_desktop_physics(
     time: Res<Time>,
     interaction: Res<DesktopPetInteraction>,
@@ -326,8 +338,27 @@ pub(crate) fn update_desktop_physics(
     clips: Res<NeraAnimationClips>,
     mut animation: ResMut<NeraAnimationState>,
     mut physics: ResMut<DesktopPhysicsState>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
 ) {
-    let launch = throws.read().last().map(|throw| throw.velocity).filter(|velocity| velocity.is_finite() && velocity.length_squared() > 0.0);
+    let launch = throws.read().last().and_then(|throw| {
+        throw_launch_velocity(
+            throw.velocity,
+            environment.nera_scale_factor as f32,
+            &settings,
+        )
+    });
+    if physics.throwing && settings.throw_strength() <= 0.0 {
+        physics.throwing = false;
+        physics.horizontal_velocity = 0.0;
+        physics.vertical_velocity = 0.0;
+        physics.subpixel_x = 0.0;
+        physics.subpixel_y = 0.0;
+    }
+    if cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()) {
+        physics.reset_for_position_recovery();
+        animation.cancel_physics_motion();
+        return;
+    }
     let Some(hwnd) = environment.nera_hwnd else {
         return;
     };
@@ -349,9 +380,10 @@ pub(crate) fn update_desktop_physics(
         reset_freefall(&mut physics, &mut animation);
         return;
     }
-    if let Some(velocity) = launch && !animation.death_active() {
+    if let Some(velocity) = launch
+        && !animation.death_active()
+    {
         physics.reset_for_position_recovery();
-        let velocity = velocity.clamp_length_max(2200.0 * environment.nera_scale_factor.max(0.25) as f32);
         physics.horizontal_velocity = velocity.x;
         physics.vertical_velocity = velocity.y;
         physics.support_anchor_logical = environment.feet_anchor_logical;
@@ -420,7 +452,9 @@ pub(crate) fn update_desktop_physics(
                 &mut environment,
             );
             physics.vertical_velocity = 0.0;
-            physics.horizontal_velocity = 0.0; physics.subpixel_x = 0.0; physics.throwing = false;
+            physics.horizontal_velocity = 0.0;
+            physics.subpixel_x = 0.0;
+            physics.throwing = false;
             physics.subpixel_y = 0.0;
             physics.falling = false;
             physics.landing_latched = true;
@@ -445,7 +479,9 @@ pub(crate) fn update_desktop_physics(
             keep_feet_on_surface(hwnd, rect, feet.y, floor.y, rect.left, &mut environment);
 
             physics.vertical_velocity = 0.0;
-            physics.horizontal_velocity = 0.0; physics.subpixel_x = 0.0; physics.throwing = false;
+            physics.horizontal_velocity = 0.0;
+            physics.subpixel_x = 0.0;
+            physics.throwing = false;
             physics.subpixel_y = 0.0;
             physics.falling = false;
             physics.support = Some(floor.support);
@@ -497,7 +533,11 @@ pub(crate) fn update_desktop_physics(
     }
 
     let dt = time.delta_secs().min(MAX_PHYSICS_DT);
-    let velocity = advance_velocity(Vec2::new(physics.horizontal_velocity, physics.vertical_velocity), dt, settings.gravity_enabled);
+    let velocity = advance_velocity(
+        Vec2::new(physics.horizontal_velocity, physics.vertical_velocity),
+        dt,
+        settings.gravity_enabled,
+    );
     physics.horizontal_velocity = velocity.x;
     physics.vertical_velocity = velocity.y;
     if !settings.gravity_enabled && velocity.length() < 20.0 {
@@ -513,10 +553,20 @@ pub(crate) fn update_desktop_physics(
     if let Some(monitor) = environment.monitor {
         let margin = (20.0 * environment.nera_scale_factor.max(0.25)) as i32;
         let work = monitor.work_area;
-        let next_x = feet.x.saturating_add(delta_x).clamp(work.left + margin, (work.right - margin).max(work.left + margin));
-        if next_x != feet.x.saturating_add(delta_x) { physics.horizontal_velocity = 0.0; physics.subpixel_x = 0.0; }
+        let next_x = feet.x.saturating_add(delta_x).clamp(
+            work.left + margin,
+            (work.right - margin).max(work.left + margin),
+        );
+        if next_x != feet.x.saturating_add(delta_x) {
+            physics.horizontal_velocity = 0.0;
+            physics.subpixel_x = 0.0;
+        }
         delta_x = next_x - feet.x;
-        if feet.y.saturating_add(delta_y) < work.top + margin { delta_y = work.top + margin - feet.y; physics.vertical_velocity = 0.0; physics.subpixel_y = 0.0; }
+        if feet.y.saturating_add(delta_y) < work.top + margin {
+            delta_y = work.top + margin - feet.y;
+            physics.vertical_velocity = 0.0;
+            physics.subpixel_y = 0.0;
+        }
     }
 
     if delta_y == 0 && delta_x == 0 {
@@ -527,7 +577,9 @@ pub(crate) fn update_desktop_physics(
     let next_feet_y = feet.y.saturating_add(delta_y);
 
     let next_feet = PhysicalPoint::new(feet.x.saturating_add(delta_x), feet.y);
-    let hit = if delta_y <= 0 { None } else if physics.startup_monitor.is_some() {
+    let hit = if delta_y <= 0 {
+        None
+    } else if physics.startup_monitor.is_some() {
         floor_surface_for_feet(feet, &environment)
             .filter(|floor| feet.y <= floor.y && next_feet_y >= floor.y)
     } else {
@@ -535,10 +587,17 @@ pub(crate) fn update_desktop_physics(
     };
     if let Some(hit) = hit {
         let desired_top = rect.top + (hit.y - feet.y);
-        move_nera(hwnd, rect.left.saturating_add(delta_x), desired_top, &mut environment);
+        move_nera(
+            hwnd,
+            rect.left.saturating_add(delta_x),
+            desired_top,
+            &mut environment,
+        );
 
         physics.vertical_velocity = 0.0;
-        physics.horizontal_velocity = 0.0; physics.subpixel_x = 0.0; physics.throwing = false;
+        physics.horizontal_velocity = 0.0;
+        physics.subpixel_x = 0.0;
+        physics.throwing = false;
         physics.subpixel_y = 0.0;
         physics.falling = false;
         physics.support = Some(hit.support);
@@ -580,7 +639,14 @@ fn reset_freefall(physics: &mut DesktopPhysicsState, animation: &mut NeraAnimati
 fn advance_velocity(velocity: Vec2, dt: f32, gravity: bool) -> Vec2 {
     let dt = dt.clamp(0.0, MAX_PHYSICS_DT);
     let damping = (-if gravity { 0.8 } else { 3.4 } * dt).exp();
-    Vec2::new(velocity.x * damping, if gravity { (velocity.y + GRAVITY_PX_PER_SEC2 * dt).min(TERMINAL_VELOCITY_PX_PER_SEC) } else { velocity.y * damping })
+    Vec2::new(
+        velocity.x * damping,
+        if gravity {
+            (velocity.y + GRAVITY_PX_PER_SEC2 * dt).min(TERMINAL_VELOCITY_PX_PER_SEC)
+        } else {
+            velocity.y * damping
+        },
+    )
 }
 
 fn keep_feet_on_surface(
@@ -638,16 +704,87 @@ mod startup_tests {
     use super::*;
 
     #[test]
+    fn throw_preferences_scale_launch_once_and_preserve_gravity() {
+        let mut settings = crate::settings::NeraSettings::default();
+        let raw = Vec2::new(1000.0, -800.0);
+        assert_eq!(throw_launch_velocity(raw, 1.0, &settings), Some(raw * 0.5));
+        settings.throw_intensity = 100;
+        assert_eq!(throw_launch_velocity(raw, 1.0, &settings), Some(raw));
+        settings.throw_intensity = 25;
+        assert_eq!(throw_launch_velocity(raw, 1.0, &settings), Some(raw * 0.25));
+        assert!(
+            throw_launch_velocity(Vec2::splat(10000.0), 2.0, &settings)
+                .unwrap()
+                .length()
+                <= 1100.1
+        );
+        settings.throw_intensity = 0;
+        assert!(throw_launch_velocity(raw, 1.0, &settings).is_none());
+        settings.throw_intensity = 50;
+        settings.throw_enabled = false;
+        assert!(throw_launch_velocity(raw, 1.0, &settings).is_none());
+        assert!(settings.gravity_enabled);
+        settings.gravity_enabled = false;
+        settings.throw_enabled = true;
+        assert_eq!(throw_launch_velocity(raw, 1.0, &settings), Some(raw * 0.5));
+        assert!(throw_launch_velocity(Vec2::NAN, 1.0, &settings).is_none());
+    }
+
+    #[test]
+    fn disabling_throws_cancels_momentum_but_does_not_disable_falling() {
+        let mut app = App::new();
+        let mut settings = crate::settings::NeraSettings::default();
+        settings.throw_enabled = false;
+        let physics = DesktopPhysicsState {
+            throwing: true,
+            falling: true,
+            horizontal_velocity: 800.0,
+            vertical_velocity: -500.0,
+            ..default()
+        };
+        app.insert_resource(settings)
+            .insert_resource(physics)
+            .init_resource::<Time>()
+            .init_resource::<DesktopPetInteraction>()
+            .init_resource::<DesktopEnvironment>()
+            .init_resource::<NeraAnimationClips>()
+            .init_resource::<NeraAnimationState>()
+            .add_message::<crate::interaction::NeraThrow>()
+            .add_systems(Update, update_desktop_physics);
+        app.update();
+        let physics = app.world().resource::<DesktopPhysicsState>();
+        assert!(!physics.throwing);
+        assert_eq!(physics.horizontal_velocity, 0.0);
+        assert_eq!(physics.vertical_velocity, 0.0);
+        assert!(physics.falling);
+        assert!(
+            app.world()
+                .resource::<crate::settings::NeraSettings>()
+                .gravity_enabled
+        );
+    }
+
+    #[test]
     fn throws_arc_down_with_gravity_and_coast_to_rest_without_it() {
         let mut on = Vec2::new(1200.0, -900.0);
         let mut off = on;
-        for _ in 0..30 { on = advance_velocity(on, 1.0 / 30.0, true); off = advance_velocity(off, 1.0 / 30.0, false); }
+        for _ in 0..30 {
+            on = advance_velocity(on, 1.0 / 30.0, true);
+            off = advance_velocity(off, 1.0 / 30.0, false);
+        }
         assert!(on.y > 1000.0 && on.x > 400.0);
         assert!(off.length() < 60.0 && off.y < 0.0);
         assert_eq!(advance_velocity(Vec2::ZERO, 0.05, false), Vec2::ZERO);
-        let mut physics = DesktopPhysicsState { throwing: true, horizontal_velocity: 900.0, vertical_velocity: -300.0, ..default() };
+        let mut physics = DesktopPhysicsState {
+            throwing: true,
+            horizontal_velocity: 900.0,
+            vertical_velocity: -300.0,
+            ..default()
+        };
         physics.reset_for_position_recovery();
-        assert!(!physics.throwing); assert_eq!(physics.horizontal_velocity, 0.0); assert_eq!(physics.vertical_velocity, 0.0);
+        assert!(!physics.throwing);
+        assert_eq!(physics.horizontal_velocity, 0.0);
+        assert_eq!(physics.vertical_velocity, 0.0);
     }
 
     #[test]

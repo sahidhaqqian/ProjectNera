@@ -3,6 +3,7 @@ mod animation;
 mod avatar;
 mod benchmark;
 mod character;
+mod cloud;
 mod memory;
 
 mod desktop_physics;
@@ -17,8 +18,11 @@ mod alarm_settings;
 mod animation_manager;
 mod environment;
 mod expression;
+#[cfg(debug_assertions)]
+mod feature_smoke;
 mod interaction;
 mod pet_behavior;
+mod pet_feedback;
 mod platform;
 mod presentation;
 mod rng;
@@ -27,8 +31,6 @@ mod startup_entrance;
 mod utility_window;
 mod vrm0_migration;
 mod walking;
-#[cfg(debug_assertions)]
-mod feature_smoke;
 
 #[cfg(target_os = "windows")]
 mod tray;
@@ -98,6 +100,22 @@ fn nera_asset_path() -> String {
     }
 }
 
+fn nera_asset_directory() -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(nera_asset_path());
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join(&path)))
+            .unwrap_or(path)
+    }
+}
+
+fn nera_asset_file(path: &str) -> std::path::PathBuf {
+    nera_asset_directory().join(path)
+}
+
 fn main() {
     #[cfg(target_os = "windows")]
     if std::env::args().any(|arg| arg == "--animation-manager-worker") {
@@ -127,7 +145,14 @@ fn main() {
         |id| format!("io.github.sahidhaqqi.projectnera.instance.{id}"),
     );
     #[cfg(debug_assertions)]
-    let settings_id = if feature_smoke { format!("io.github.sahidhaqqi.projectnera.smoke.{}", std::process::id()) } else { settings_id };
+    let settings_id = if feature_smoke {
+        format!(
+            "io.github.sahidhaqqi.projectnera.smoke.{}",
+            std::process::id()
+        )
+    } else {
+        settings_id
+    };
     app.add_plugins(SettingsPlugin::new(&settings_id));
     character::library::configure_instance(&mut app.world_mut().resource_mut::<NeraSettings>());
 
@@ -190,6 +215,8 @@ fn main() {
         alarm::AlarmPlugin,
         NeraSettingsPlugin,
         character::CharacterPlugin,
+        cloud::CloudPlugin,
+        pet_feedback::PetFeedbackPlugin,
     ));
 
     #[cfg(target_os = "windows")]
@@ -222,6 +249,7 @@ fn main() {
                 // it is open. Reset Nera capture state first so Settings clicks
                 // cannot become body hits / drags through global ButtonInput.
                 suspend_nera_interaction_for_settings.run_if(nera_utility_input_blocked),
+                cloud::update_cloud,
                 // Native placement changes first, then Phase 5.3 derives the
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
@@ -279,6 +307,9 @@ fn main() {
             (
                 update_avatar_anchors,
                 settle_pending_sit.run_if(presentation::desktop_pet_active),
+                cloud::align_cloud_seat,
+                cloud::animate_cloud_visual,
+                pet_feedback::update_particles,
             )
                 .chain(),
         );
@@ -289,7 +320,9 @@ fn main() {
         });
     }
     #[cfg(debug_assertions)]
-    if feature_smoke { feature_smoke::install(&mut app); }
+    if feature_smoke {
+        feature_smoke::install(&mut app);
+    }
 
     app.run();
 }

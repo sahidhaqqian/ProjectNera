@@ -182,7 +182,9 @@ fn receive_import(
     }
     // Last selection wins. Completed copies are immutable private assets, so
     // cancelling a previous task cannot overwrite a newer character.
-    runtime.label = selected.as_ref().and_then(|path| path.file_stem())
+    runtime.label = selected
+        .as_ref()
+        .and_then(|path| path.file_stem())
         .map(|name| name.to_string_lossy().into_owned());
     runtime.copy = Some(IoTaskPool::get().spawn(async move {
         if restore {
@@ -209,7 +211,10 @@ fn update_import(world: &mut World) {
                 Ok(imported) => {
                     if imported.path != DEFAULT_CHARACTER {
                         let label = runtime.label.take().unwrap_or_else(|| "Character".into());
-                        if let Err(error) = world.resource_mut::<library::CharacterCatalog>().remember(&imported.path, &label) {
+                        if let Err(error) = world
+                            .resource_mut::<library::CharacterCatalog>()
+                            .remember(&imported.path, &label)
+                        {
                             warn!("Character catalog save failed: {error}");
                         }
                     }
@@ -299,6 +304,8 @@ fn commit_character(
     converted: bool,
     migrated_from_vrm0: bool,
 ) {
+    crate::cloud::clear_for_character_change(world);
+    crate::pet_feedback::clear_for_character_change(world);
     let old: Vec<_> = world
         .query_filtered::<Entity, With<NeraAvatar>>()
         .iter(world)

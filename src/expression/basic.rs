@@ -10,8 +10,9 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
     Some(match file {
         "idle.vrma" => (Face::Default, 1.0),
         "Walking.vrma" => (Face::Joy, 0.2),
-        "Sitting_Enter.vrma" | "Sitting_Idle_Loop.vrma" | "Sitting_2.vrma" => (Face::Timid, 0.3),
-        "Sitting_4.vrma" => (Face::Joy, 0.3),
+        "Sitting_Enter.vrma" | "Sitting_Idle_Loop.vrma" | "Sitting_2.vrma" | "Sitting_4.vrma" => {
+            (Face::Default, 1.0)
+        }
         "Sitting_Rubbing_Arm.vrma" => (Face::Embarrassed, 0.45),
         "Dodge_While_Sitting.vrma" | "Hit_Head.vrma" => (Face::Surprised, 0.8),
         "Floating.vrma" => (Face::Surprised, 0.7),
@@ -23,6 +24,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         "LookAround.vrma" => (Face::Surprised, 0.35),
         "Relax.vrma" => (Face::Timid, 0.35),
         "Sleepy.vrma" => (Face::Exhausted, 0.6),
+        "Sleeping_Idle.vrma" => (Face::Exhausted, 1.0),
         "Blush.vrma" => (Face::Embarrassed, 0.75),
         "Catwalk_Idle_Twist_R.vrma" => (Face::Joy, 0.45),
         "Bored.vrma" => (Face::Exhausted, 0.35),
@@ -69,6 +71,27 @@ pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Opt
 mod tests {
     use super::*;
     #[test]
+    fn ordinary_sitting_never_applies_sleep_or_timid_eyelids() {
+        for file in [
+            "Sitting_Enter.vrma",
+            "Sitting_Idle_Loop.vrma",
+            "Sitting_2.vrma",
+            "Sitting_4.vrma",
+        ] {
+            let (face, intensity) = for_clip(&format!("animasi_basic/{file}")).unwrap();
+            assert_eq!(face, Face::Default);
+            assert!(
+                super::super::preset_weights(face, intensity, ["happy", "blink", "relaxed"])
+                    .is_empty()
+            );
+        }
+        let (face, intensity) = for_clip("animasi_basic/Sleeping_Idle.vrma").unwrap();
+        assert!(
+            super::super::preset_weights(face, intensity, ["blink"])
+                .contains(&("blink".into(), 1.0))
+        );
+    }
+    #[test]
     fn every_bundled_basic_clip_has_a_face() {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/animations/animasi_basic");
@@ -82,7 +105,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 24);
+        assert_eq!(count, 25);
     }
     #[test]
     fn requested_pairs_and_unknown_clip_ownership() {
@@ -99,5 +122,9 @@ mod tests {
             Some((Face::Exhausted, 0.6))
         );
         assert_eq!(for_clip("imported/Dance.vrma"), None);
+        assert_eq!(
+            for_clip("animasi_basic/Sleeping_Idle.vrma"),
+            Some((Face::Exhausted, 1.0))
+        );
     }
 }

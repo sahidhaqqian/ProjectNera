@@ -10,19 +10,10 @@ use bevy::{
     input::mouse::{MouseScrollUnit, MouseWheel},
     prelude::*,
     ui::UiTargetCamera,
-    window::{
-        WindowLevel,
-        WindowPosition,
-        WindowRef,
-        WindowResizeConstraints,
-    },
+    window::{WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints},
 };
 
-use crate::settings::{
-    AlarmConfig,
-    NeraSettings,
-    save_settings_deferred,
-};
+use crate::settings::{AlarmConfig, NeraSettings, save_settings_deferred};
 use crate::utility_window::{UtilityWindow, spawn_window_controls};
 
 const MAX_ALARMS: usize = 12;
@@ -217,7 +208,9 @@ fn sync_alarm_window_minimized(
     windows: Query<&UtilityWindow, With<AlarmSettingsWindow>>,
     mut gate: ResMut<AlarmSettingsInputGate>,
 ) {
-    let minimized = windows.single().ok()
+    let minimized = windows
+        .single()
+        .ok()
         .and_then(UtilityWindow::native_handle)
         .is_some_and(crate::platform::is_window_minimized);
     if gate.minimized != minimized {
@@ -338,8 +331,19 @@ fn spawn_alarm_list_ui(
     let enabled = alarms.iter().filter(|alarm| alarm.enabled).count();
 
     spawn_root(commands, window, camera, |panel| {
-        spawn_header(panel, window, "Alarms", Some("Manage your Nera alarms"), false);
-        spawn_setting_row(panel, "Quick alarm sound", crate::alarm::sounds::name(settings.alarm_sound), AlarmSettingsAction::CycleQuickSound);
+        spawn_header(
+            panel,
+            window,
+            "Alarms",
+            Some("Manage your Nera alarms"),
+            false,
+        );
+        spawn_setting_row(
+            panel,
+            "Quick alarm sound",
+            crate::alarm::sounds::name(settings.alarm_sound),
+            AlarmSettingsAction::CycleQuickSound,
+        );
         spawn_small_button(panel, "Play", AlarmSettingsAction::PreviewQuickSound, BLUE);
 
         panel.spawn((
@@ -349,7 +353,10 @@ fn spawn_alarm_list_ui(
                 if alarms.len() == 1 { "" } else { "s" },
                 enabled,
             )),
-            TextFont { font_size: FontSize::Px(14.0), ..default() },
+            TextFont {
+                font_size: FontSize::Px(14.0),
+                ..default()
+            },
             TextColor(MUTED),
         ));
 
@@ -394,7 +401,10 @@ fn spawn_alarm_list_ui(
                     .with_children(|empty| {
                         empty.spawn((
                             Text::new("No alarms yet.\nCreate one with + Add Alarm."),
-                            TextFont { font_size: FontSize::Px(16.0), ..default() },
+                            TextFont {
+                                font_size: FontSize::Px(16.0),
+                                ..default()
+                            },
                             TextColor(BODY),
                         ));
                     });
@@ -407,7 +417,10 @@ fn spawn_alarm_list_ui(
 
         panel.spawn((
             Text::new("Project Nera · alarms are saved automatically"),
-            TextFont { font_size: FontSize::Px(12.0), ..default() },
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
             TextColor(MUTED),
         ));
     });
@@ -443,12 +456,18 @@ fn spawn_alarm_card(parent: &mut ChildSpawnerCommands, alarm: &AlarmConfig) {
                 .with_children(|copy| {
                     copy.spawn((
                         Text::new(format_alarm_time(alarm)),
-                        TextFont { font_size: FontSize::Px(30.0), ..default() },
+                        TextFont {
+                            font_size: FontSize::Px(30.0),
+                            ..default()
+                        },
                         TextColor(if alarm.enabled { PRIMARY } else { MUTED }),
                     ));
                     copy.spawn((
                         Text::new(alarm.label.clone()),
-                        TextFont { font_size: FontSize::Px(15.0), ..default() },
+                        TextFont {
+                            font_size: FontSize::Px(15.0),
+                            ..default()
+                        },
                         TextColor(BODY),
                     ));
                 });
@@ -457,13 +476,20 @@ fn spawn_alarm_card(parent: &mut ChildSpawnerCommands, alarm: &AlarmConfig) {
                     top,
                     if alarm.enabled { "ON" } else { "OFF" },
                     AlarmSettingsAction::Toggle(alarm.id),
-                    if alarm.enabled { BLUE } else { Color::srgb(0.10, 0.12, 0.20) },
+                    if alarm.enabled {
+                        BLUE
+                    } else {
+                        Color::srgb(0.10, 0.12, 0.20)
+                    },
                 );
             });
 
             card.spawn((
                 Text::new(schedule_summary(alarm)),
-                TextFont { font_size: FontSize::Px(13.0), ..default() },
+                TextFont {
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
                 TextColor(MUTED),
             ));
 
@@ -635,7 +661,13 @@ fn spawn_time_picker_ui(
     alarm: &AlarmConfig,
 ) {
     spawn_root(commands, window, camera, |panel| {
-        spawn_header(panel, window, "Set Time", Some("Choose when Nera should ring"), true);
+        spawn_header(
+            panel,
+            window,
+            "Set Time",
+            Some("Choose when Nera should ring"),
+            true,
+        );
 
         panel
             .spawn((
@@ -717,7 +749,13 @@ fn spawn_date_picker_ui(
     alarm: &AlarmConfig,
 ) {
     spawn_root(commands, window, camera, |panel| {
-        spawn_header(panel, window, "Set Date", Some("Choose the one-time alarm date"), true);
+        spawn_header(
+            panel,
+            window,
+            "Set Date",
+            Some("Choose the one-time alarm date"),
+            true,
+        );
 
         panel
             .spawn((
@@ -826,39 +864,30 @@ fn spawn_picker_stepper(
                 ..default()
             })
             .with_children(|controls| {
-                spawn_small_button(
-                    controls,
-                    "-",
-                    down,
-                    Color::srgb(0.095, 0.12, 0.21),
-                );
-                controls.spawn((
-                    Node {
-                        min_width: px(76),
-                        height: px(36),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        border_radius: BorderRadius::all(px(11)),
-                        ..default()
-                    },
-                    BackgroundColor(Color::srgb(0.075, 0.095, 0.17)),
-                ))
-                .with_children(|value_box| {
-                    value_box.spawn((
-                        Text::new(value),
-                        TextFont {
-                            font_size: FontSize::Px(15.0),
+                spawn_small_button(controls, "-", down, Color::srgb(0.095, 0.12, 0.21));
+                controls
+                    .spawn((
+                        Node {
+                            min_width: px(76),
+                            height: px(36),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border_radius: BorderRadius::all(px(11)),
                             ..default()
                         },
-                        TextColor(PRIMARY),
-                    ));
-                });
-                spawn_small_button(
-                    controls,
-                    "+",
-                    up,
-                    Color::srgb(0.095, 0.12, 0.21),
-                );
+                        BackgroundColor(Color::srgb(0.075, 0.095, 0.17)),
+                    ))
+                    .with_children(|value_box| {
+                        value_box.spawn((
+                            Text::new(value),
+                            TextFont {
+                                font_size: FontSize::Px(15.0),
+                                ..default()
+                            },
+                            TextColor(PRIMARY),
+                        ));
+                    });
+                spawn_small_button(controls, "+", up, Color::srgb(0.095, 0.12, 0.21));
             });
         });
 }
@@ -907,13 +936,19 @@ fn spawn_header(
                 .with_children(|drag| {
                     drag.spawn((
                         Text::new(title),
-                        TextFont { font_size: FontSize::Px(25.0), ..default() },
+                        TextFont {
+                            font_size: FontSize::Px(25.0),
+                            ..default()
+                        },
                         TextColor(PRIMARY),
                     ));
                     if let Some(subtitle) = subtitle {
                         drag.spawn((
                             Text::new(subtitle),
-                            TextFont { font_size: FontSize::Px(12.0), ..default() },
+                            TextFont {
+                                font_size: FontSize::Px(12.0),
+                                ..default()
+                            },
                             TextColor(MUTED),
                         ));
                     }
@@ -932,7 +967,10 @@ fn spawn_header(
 fn spawn_section_title(parent: &mut ChildSpawnerCommands, title: &str) {
     parent.spawn((
         Text::new(title),
-        TextFont { font_size: FontSize::Px(13.0), ..default() },
+        TextFont {
+            font_size: FontSize::Px(13.0),
+            ..default()
+        },
         TextColor(Color::srgb(0.50, 0.58, 0.78)),
     ));
 }
@@ -960,15 +998,13 @@ fn spawn_setting_row(
         .with_children(|row| {
             row.spawn((
                 Text::new(label),
-                TextFont { font_size: FontSize::Px(15.0), ..default() },
+                TextFont {
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
                 TextColor(BODY),
             ));
-            spawn_small_button(
-                row,
-                value,
-                action,
-                Color::srgb(0.095, 0.12, 0.21),
-            );
+            spawn_small_button(row, value, action, Color::srgb(0.095, 0.12, 0.21));
         });
 }
 
@@ -1048,7 +1084,10 @@ fn spawn_action_button(
         .with_children(|button| {
             button.spawn((
                 Text::new(label),
-                TextFont { font_size: FontSize::Px(16.0), ..default() },
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
                 TextColor(PRIMARY),
             ));
         });
@@ -1078,7 +1117,10 @@ fn spawn_small_button(
         .with_children(|button| {
             button.spawn((
                 Text::new(label),
-                TextFont { font_size: FontSize::Px(13.0), ..default() },
+                TextFont {
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
                 TextColor(PRIMARY),
             ));
         });
@@ -1096,11 +1138,7 @@ fn handle_alarm_settings_actions(
     mut previews: MessageWriter<crate::alarm::sounds::PreviewAlarmSound>,
 ) {
     for (interaction, action, mut background) in &mut interactions {
-        *background = BackgroundColor(action_color(
-            *action,
-            *interaction,
-            ui.draft.as_ref(),
-        ));
+        *background = BackgroundColor(action_color(*action, *interaction, ui.draft.as_ref()));
 
         if *interaction != Interaction::Pressed {
             continue;
@@ -1108,13 +1146,20 @@ fn handle_alarm_settings_actions(
 
         match *action {
             AlarmSettingsAction::CycleQuickSound => {
-                settings.alarm_sound = (settings.alarm_sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8;
+                settings.alarm_sound =
+                    (settings.alarm_sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8;
                 save_settings_deferred(&mut commands);
                 ui.rebuild = true;
             }
-            AlarmSettingsAction::PreviewQuickSound => { previews.write(crate::alarm::sounds::PreviewAlarmSound(settings.alarm_sound)); }
+            AlarmSettingsAction::PreviewQuickSound => {
+                previews.write(crate::alarm::sounds::PreviewAlarmSound(
+                    settings.alarm_sound,
+                ));
+            }
             AlarmSettingsAction::PreviewDraftSound => {
-                if let Some(draft) = &ui.draft { previews.write(crate::alarm::sounds::PreviewAlarmSound(draft.sound)); }
+                if let Some(draft) = &ui.draft {
+                    previews.write(crate::alarm::sounds::PreviewAlarmSound(draft.sound));
+                }
             }
             AlarmSettingsAction::Close => {
                 gate.close_requested = true;
@@ -1221,14 +1266,20 @@ pub(crate) fn smoke_action(world: &mut World, action: &str) {
         "save" => AlarmSettingsAction::Save,
         _ => panic!("unknown alarm smoke action"),
     };
-    let button = world.spawn((Button, action, Interaction::Pressed, BackgroundColor(BLUE))).id();
-    world.run_system_once(handle_alarm_settings_actions).unwrap();
+    let button = world
+        .spawn((Button, action, Interaction::Pressed, BackgroundColor(BLUE)))
+        .id();
+    world
+        .run_system_once(handle_alarm_settings_actions)
+        .unwrap();
     world.despawn(button);
 }
 
 fn mutate_draft(draft: &mut AlarmConfig, action: AlarmSettingsAction) {
     match action {
-        AlarmSettingsAction::DraftCycleSound => { draft.sound = (draft.sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8; }
+        AlarmSettingsAction::DraftCycleSound => {
+            draft.sound = (draft.sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8;
+        }
         AlarmSettingsAction::DraftToggleEnabled => draft.enabled = !draft.enabled,
         AlarmSettingsAction::DraftCycleLabel => draft.cycle_label(),
         AlarmSettingsAction::DraftCycleMode => {
@@ -1318,10 +1369,7 @@ fn action_color(
 
 fn drag_alarm_settings_window(
     mouse: Res<ButtonInput<MouseButton>>,
-    drag_regions: Query<
-        &Interaction,
-        (Changed<Interaction>, With<AlarmSettingsDragRegion>),
-    >,
+    drag_regions: Query<&Interaction, (Changed<Interaction>, With<AlarmSettingsDragRegion>)>,
     mut windows: Query<&mut Window, With<AlarmSettingsWindow>>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -1352,8 +1400,7 @@ fn scroll_alarm_settings_window(
         return;
     };
 
-    let max_y = ((computed.content_size().y - computed.size().y)
-        * computed.inverse_scale_factor())
+    let max_y = ((computed.content_size().y - computed.size().y) * computed.inverse_scale_factor())
         .max(0.0);
 
     for event in wheel.read() {
@@ -1479,10 +1526,16 @@ mod tests {
         })
         .add_message::<OpenAlarmSettingsWindow>()
         .add_systems(Update, open_alarm_settings_window);
-        let window = app.world_mut().spawn((
-            AlarmSettingsWindow,
-            Window { focused: false, ..default() },
-        )).id();
+        let window = app
+            .world_mut()
+            .spawn((
+                AlarmSettingsWindow,
+                Window {
+                    focused: false,
+                    ..default()
+                },
+            ))
+            .id();
         app.world_mut().write_message(OpenAlarmSettingsWindow);
         app.update();
 

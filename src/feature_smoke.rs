@@ -16,12 +16,108 @@ struct Smoke {
 }
 
 pub(crate) fn install(app: &mut App) {
-    if std::env::args().any(|arg| arg == "--motion-smoke") {
+    if std::env::args().any(|arg| arg == "--cloud-smoke") {
+        crate::cloud::install_smoke(app);
+    } else if std::env::args().any(|arg| arg == "--motion-smoke") {
         app.init_resource::<MotionSmoke>()
             .add_systems(Last, motion_run);
+    } else if std::env::args().any(|arg| arg == "--throw-settings-smoke") {
+        app.init_resource::<ThrowSettingsSmoke>()
+            .add_systems(Last, throw_settings_run);
     } else {
         app.init_resource::<Smoke>().add_systems(Last, run);
     }
+}
+
+#[derive(Resource, Default)]
+struct ThrowSettingsSmoke(u8);
+
+fn throw_settings_run(world: &mut World) {
+    let elapsed = world.resource::<Time<Real>>().elapsed_secs();
+    let directory = std::env::temp_dir().join("nera-feature-smoke");
+    let _ = std::fs::create_dir_all(&directory);
+    match world.resource::<ThrowSettingsSmoke>().0 {
+        0 if elapsed > 2.0 => {
+            let settings = world.resource::<crate::settings::NeraSettings>();
+            assert!(settings.throw_enabled && settings.gravity_enabled);
+            assert_eq!(settings.throw_intensity, 50);
+            world.write_message(crate::settings::OpenSettingsWindow);
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 1;
+        }
+        1 if elapsed > 4.0 => {
+            scroll_throw_settings(world, 425.0);
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 2;
+        }
+        2 if elapsed > 5.0 => {
+            screenshot_throw_settings(world, "settings-throw-default.png");
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 3;
+        }
+        3 if elapsed > 6.0 => {
+            crate::settings::smoke_throw_controls(world, 25);
+            let settings = world.resource::<crate::settings::NeraSettings>();
+            assert!(!settings.throw_enabled && settings.gravity_enabled);
+            assert_eq!(settings.throw_intensity, 25);
+            assert_eq!(settings.throw_strength(), 0.0);
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 4;
+        }
+        4 if elapsed > 7.0 => {
+            screenshot_throw_settings(world, "settings-throw-off.png");
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 5;
+        }
+        5 if elapsed > 8.0 => {
+            crate::settings::smoke_throw_controls(world, 100);
+            let settings = world.resource::<crate::settings::NeraSettings>();
+            assert!(settings.throw_enabled && settings.gravity_enabled);
+            assert_eq!(settings.throw_intensity, 100);
+            let window = throw_settings_window(world);
+            world
+                .get_mut::<Window>(window)
+                .unwrap()
+                .resolution
+                .set(560.0, 520.0);
+            scroll_throw_settings(world, 500.0);
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 6;
+        }
+        6 if elapsed > 10.0 => {
+            screenshot_throw_settings(world, "settings-throw-compact.png");
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 7;
+        }
+        7 if elapsed > 12.0 => {
+            world.write_message(AppExit::Success);
+            world.resource_mut::<ThrowSettingsSmoke>().0 = 8;
+        }
+        _ => {}
+    }
+    assert!(elapsed < 25.0, "throw settings smoke timed out");
+}
+
+fn throw_settings_window(world: &mut World) -> Entity {
+    world
+        .query::<(Entity, &Window)>()
+        .iter(world)
+        .find_map(|(entity, window)| (window.title == "Nera Settings").then_some(entity))
+        .unwrap()
+}
+
+fn scroll_throw_settings(world: &mut World, y: f32) {
+    for (name, mut scroll) in world
+        .query::<(&Name, &mut ScrollPosition)>()
+        .iter_mut(world)
+    {
+        if name.as_str() == "Nera Settings Scroll Area" {
+            scroll.0.y = y;
+        }
+    }
+}
+
+fn screenshot_throw_settings(world: &mut World, name: &str) {
+    let window = throw_settings_window(world);
+    world
+        .commands()
+        .spawn(Screenshot::window(window))
+        .observe(save_to_disk(
+            std::env::temp_dir().join("nera-feature-smoke").join(name),
+        ));
 }
 
 #[derive(Resource, Default)]
@@ -46,6 +142,8 @@ fn motion_run(world: &mut World) {
     match stage {
         0 if elapsed > 8.0 && world.resource::<DesktopPhysicsState>().support.is_some() => {
             world.resource_mut::<NeraSettings>().audio_muted = true;
+            world.resource_mut::<NeraSettings>().throw_enabled = true;
+            world.resource_mut::<NeraSettings>().throw_intensity = 100;
             world
                 .resource_mut::<NeraAnimationState>()
                 .cancel_startup_greeting();

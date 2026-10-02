@@ -41,11 +41,10 @@ pub struct TrayPlugin;
 
 impl Plugin for TrayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, start_system_tray)
-            .add_systems(
-                Update,
-                process_tray_commands.before(crate::startup_entrance::prepare_startup_entrance),
-            );
+        app.add_systems(Startup, start_system_tray).add_systems(
+            Update,
+            process_tray_commands.before(crate::startup_entrance::prepare_startup_entrance),
+        );
     }
 }
 
@@ -244,6 +243,9 @@ fn process_tray_commands(
     mut animation: ResMut<NeraAnimationState>,
 
     mut entrance: ResMut<crate::startup_entrance::StartupEntrance>,
+    mut cloud: ResMut<crate::cloud::CloudRuntime>,
+    mut sfx: MessageWriter<crate::pet_feedback::PetSfx>,
+    mut fx: MessageWriter<crate::pet_feedback::PetFx>,
 ) {
     let Some(runtime) = runtime else {
         return;
@@ -285,6 +287,14 @@ fn process_tray_commands(
             // RESET POSITION
             // =============================================================
             TrayCommand::ResetPosition => {
+                crate::cloud::dismiss_cloud(
+                    &mut cloud,
+                    &mut environment,
+                    &mut physics,
+                    &mut animation,
+                    &mut sfx,
+                    &mut fx,
+                );
                 let Some(hwnd) = environment.nera_hwnd else {
                     warn!("Tray: Reset Position ignored because Nera HWND is not ready");
                     continue;
