@@ -145,8 +145,16 @@ mod tests {
             .collect();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].kind, PetFxKind::HeadPatSparkle);
+        let sounds: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<PetSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(sounds[0].0, PetSfxKind::HeadPat);
         app.update();
         assert!(app.world().resource::<Messages<PetFx>>().is_empty());
+        assert!(app.world().resource::<Messages<PetSfx>>().is_empty());
     }
     #[test]
     fn real_support_touchdown_emits_once_but_drag_cancellation_does_not() {

@@ -35,6 +35,52 @@ fn button(
         .with_children(|button| label(button, value, 13.0, ui::PRIMARY));
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn remove_button_is_import_only_and_never_nested_in_assign_button() {
+        let mut app = App::new();
+        let mut state = ManagerState::for_test();
+        state.characters.models.truncate(1);
+        state
+            .characters
+            .models
+            .push(crate::character::library::CharacterEntry {
+                path: "characters://model-card-test.vrm".into(),
+                name: "Test".into(),
+                facial_targets: 0,
+            });
+        app.insert_resource(state).add_systems(
+            Update,
+            |mut commands: Commands, state: Res<ManagerState>| {
+                commands.spawn(Node::default()).with_children(|parent| {
+                    card(parent, 0, &state);
+                    card(parent, 1, &state);
+                });
+            },
+        );
+        app.update();
+        let world = app.world_mut();
+        let removes: Vec<_> = world
+            .query::<(&ManagerAction, &ChildOf)>()
+            .iter(world)
+            .filter_map(|(action, parent)| {
+                matches!(action, ManagerAction::RemoveCharacter(_)).then_some(parent.parent())
+            })
+            .collect();
+        assert_eq!(removes.len(), 1);
+        assert!(world.get::<Button>(removes[0]).is_none());
+        let keys: Vec<_> = world
+            .query::<&PreviewSlot>()
+            .iter(world)
+            .map(|slot| slot.key.clone())
+            .collect();
+        assert!(keys.contains(&"model/characters://model-card-test.vrm".into()));
+        assert!(keys.contains(&format!("model/{}", crate::character::DEFAULT_CHARACTER)));
+    }
+}
+
 pub(super) fn panel(parent: &mut ChildSpawnerCommands, state: &ManagerState) {
     parent
         .spawn(Node {
@@ -106,6 +152,9 @@ pub(super) fn panel(parent: &mut ChildSpawnerCommands, state: &ManagerState) {
                         percent(100),
                         state,
                     );
+                    if !state.characters.status.is_empty() {
+                        label(rail, &state.characters.status, 12.0, ui::MUTED);
+                    }
                 });
             content
                 .spawn((
@@ -145,15 +194,11 @@ pub(super) fn card(parent: &mut ChildSpawnerCommands, index: usize, state: &Mana
         == Some(&model.path);
     parent
         .spawn((
-            Button,
-            ManagerAction::AssignCharacter(model.path.clone()),
             Node {
                 width: percent(32),
                 min_width: px(0),
                 height: percent(100),
-                padding: UiRect::all(px(8)),
                 flex_direction: FlexDirection::Column,
-                row_gap: px(8),
                 border_radius: BorderRadius::all(px(8)),
                 overflow: Overflow::clip(),
                 ..default()
@@ -162,21 +207,56 @@ pub(super) fn card(parent: &mut ChildSpawnerCommands, index: usize, state: &Mana
         ))
         .with_children(|card| {
             card.spawn((
-                PreviewSlot {
-                    key: format!("model/{index}"),
-                    index,
-                },
-                ImageNode::default(),
+                Button,
+                ManagerAction::AssignCharacter(model.path.clone()),
                 Node {
                     width: percent(100),
-                    height: px(236),
-                    flex_shrink: 0.0,
+                    height: percent(100),
+                    padding: UiRect::all(px(8)),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(8),
                     ..default()
                 },
-            ));
-            label(card, &model.name, 14.0, ui::PRIMARY);
-            if model.facial_targets == 0 {
-                label(card, "No facial blendshapes", 12.0, ui::MUTED);
+                BackgroundColor(if selected { ui::BLUE } else { ui::CARD }),
+            ))
+            .with_children(|body| {
+                body.spawn((
+                    PreviewSlot {
+                        key: format!("model/{}", model.path),
+                        index,
+                    },
+                    ImageNode::default(),
+                    Node {
+                        width: percent(100),
+                        height: px(236),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                ));
+                label(body, &model.name, 14.0, ui::PRIMARY);
+                if model.facial_targets == 0 {
+                    label(body, "No facial blendshapes", 12.0, ui::MUTED);
+                }
+            });
+            if model.removable() {
+                card.spawn((
+                    Button,
+                    ManagerAction::RemoveCharacter(model.path.clone()),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        top: px(8),
+                        right: px(8),
+                        width: px(32),
+                        height: px(32),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border_radius: BorderRadius::all(px(6)),
+                        ..default()
+                    },
+                    BackgroundColor(ui::BUTTON),
+                    ZIndex(1),
+                ))
+                .with_children(|close| label(close, "X", 14.0, ui::PRIMARY));
             }
         });
 }

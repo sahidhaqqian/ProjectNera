@@ -143,7 +143,9 @@ pub(super) fn button_color(action: &ManagerAction, state: &ManagerState) -> Colo
         ManagerAction::Expressions if state.tab == GalleryTab::Expressions => BLUE,
         ManagerAction::Expression(preset) if state.expression == *preset => BLUE,
         ManagerAction::Intensity(value) if state.intensity == *value => BLUE,
-        ManagerAction::ConfirmDelete => Color::srgb(0.58, 0.13, 0.18),
+        ManagerAction::ConfirmDelete | ManagerAction::ConfirmRemoveCharacter => {
+            Color::srgb(0.58, 0.13, 0.18)
+        }
         _ => BUTTON,
     }
 }
@@ -405,6 +407,8 @@ pub(super) fn rebuild_ui(
                                     ManagerDragRegion,
                                     Node {
                                         flex_grow: 1.0,
+                                        min_width: px(0),
+                                        height: percent(100),
                                         flex_direction: FlexDirection::Column,
                                         row_gap: px(3),
                                         ..default()
@@ -412,13 +416,13 @@ pub(super) fn rebuild_ui(
                                     BackgroundColor(Color::NONE),
                                 ))
                                 .with_children(|title| {
-                                    label(title, if state.tab == GalleryTab::Characters { "MULTI CHARACTER" } else { "ANIMATIONS" }, 27.0, PRIMARY);
-                                    label(
-                                        title,
-                                        "Drag title to move / edges to resize",
-                                        13.0,
-                                        MUTED,
-                                    );
+                                    for (value, size, color) in [
+                                        (if state.tab == GalleryTab::Characters { "MULTI CHARACTER" } else { "ANIMATIONS" }, 27.0, PRIMARY),
+                                        ("Drag title to move / edges to resize", 13.0, MUTED),
+                                    ] {
+                                        title.spawn((Text::new(value), TextFont { font_size: FontSize::Px(size), ..default() },
+                                            TextColor(color), bevy::ui::FocusPolicy::Pass));
+                                    }
                                 });
                             header
                                 .spawn(Node {
@@ -1120,6 +1124,21 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                                         state,
                                     );
                                 });
+                        }
+                        Dialog::RemoveCharacter(path) => {
+                            label(modal, "Remove character?", 22.0, PRIMARY);
+                            if let Some(model) = state.characters.models.iter().find(|model| model.path == *path) {
+                                label(modal, &model.name, 15.0, MUTED);
+                            }
+                            label(modal, "Active copies will switch to Nera or close. The original VRM is kept; you can import it again.", 13.0, MUTED);
+                            modal.spawn(Node {
+                                width: percent(100),
+                                column_gap: px(10),
+                                ..default()
+                            }).with_children(|row| {
+                                button(row, "Cancel", ManagerAction::CancelDialog, px(180), state);
+                                button(row, "Remove", ManagerAction::ConfirmRemoveCharacter, px(180), state);
+                            });
                         }
                     }
                 });

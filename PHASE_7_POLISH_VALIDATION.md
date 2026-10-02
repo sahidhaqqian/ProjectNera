@@ -40,7 +40,7 @@ freefall after dismissal and support after touchdown; attachment cleanup during
 replacement and Attention; and bounded/expired particles. Its lifetime is bounded.
 Screenshots are in `%TEMP%\nera-feature-smoke`.
 
-Verified on 2026-10-02:
+Earlier Cloud/Sleep verification on 2026-10-02:
 
 - `cargo fmt --all -- --check`: PASS.
 - `cargo check --all-targets --offline`: PASS (existing dead-code warnings).
@@ -79,6 +79,120 @@ pre-existing files; it did not refactor those unrelated systems.
 Smoke inputs are synthetic, not a completed manual pointer/DPI/soak run. Initial
 rig loading/replacement emitted existing unavailable-Idle fallback warnings;
 Winit emitted its existing unknown-Destroyed-window warning during shutdown.
+
+## Multi Character / Headpat / Roaming Polish
+
+The measurements below record the earlier two-rig implementation. The subsequent
+[Multi Character memory audit](MULTI_CHARACTER_MEMORY_AUDIT.md) supersedes its
+preview architecture and memory figures with one render slot and cached thumbnails.
+
+Verified on 2026-10-02 after the focused follow-up:
+
+- `cargo fmt --all` and `cargo fmt --all -- --check`: PASS.
+- `cargo check`: PASS, with existing dead-code warnings.
+- `cargo test`: **337 passed, 0 failed, 6 ignored**. Seventeen new regressions
+  cover delayed title press/one-shot drag requests, import-card removal isolation
+  and default protection, confirmation/IPC validation, two-rig preview budgeting,
+  thumbnail freezing/thawing, hidden/remove/close cleanup, layout-gap cache reuse,
+  worker-only 15 FPS and unchanged main 24/30 FPS settings, source-preserving
+  remove/reimport, atomic-save rollback, active replacement safety, companion
+  release/load/generation checks, and immediate use of the existing roaming option.
+  The headpat feedback regression additionally verifies the retained semantic SFX.
+- `cargo build --bin nera`: PASS.
+- Native `--animation-manager-worker --roster-smoke`: PASS, exit 0. Desktop
+  and 720x640 screenshots have nonblank model thumbnails and import-only X buttons.
+  Seven cached cards settle to one live selected rig; update rate measured **15.0 FPS**.
+  Real minimize clears previews, restore recreates bounded state, and closing
+  leaves zero preview roots/window/preview state before worker exit.
+- Native `--feature-smoke --cloud-smoke`: PASS, exit 0, with isolated AppData.
+  Actual HeadStroke playback uses ShakeHeadNo1, the independent automatic face
+  selects Joy 100%, and all three sparkles render while Ride remains attached.
+  Rest touch suppression, dragging, freefall/landing, model replacement, Attention,
+  and particle expiry remain functional. Optional pet SFX files are absent, so
+  audible playback was not manually verified; semantic dispatch and missing-file
+  safety are covered by tests. `headpat-ride.png` was visually inspected.
+- Native companion stdin/stdout release checks: PASS for used and unrelated
+  models, each exit 0. The used copy exits safely; the unrelated default copy
+  stays alive and acknowledges its real model, rejects selection during the
+  release guard, resumes after RELEASE_DONE, and can subsequently switch models.
+  These tests use the private temporary import, not the user's character catalog.
+
+### Drag and Memory Findings
+
+Title dragging formerly required `MouseButton::Left.just_pressed` and a changed
+UI `Interaction::Pressed` on the same update. Delayed UI input could miss that
+coincidence. The new held-button check still requires a changed UI press, avoiding
+repeated drag requests. Title labels pass focus and the drag region fills the header.
+Physical-pointer title dragging remains a manual check below.
+
+Previously up to twelve model cards each retained an animated VRM hierarchy,
+retarget data, camera and 384x512 target. The follow-up admits at most two live
+model rigs, retains only visible-card thumbnails after warmup, and uses 256x320
+targets (58% fewer target pixels). Stable path keys and the UI-layout-gap guard
+avoid accidental re-creation or misbinding when the registry/selection changes.
+
+Same catalog, debug renderer, process samples at 12 seconds after launch:
+
+| Worker memory | Before | Final |
+|---|---:|---:|
+| Private bytes | 2052.7 MiB | 1166.5 MiB |
+| Working set | 1466.2 MiB | 1275.5 MiB |
+
+Private bytes declined about **43%**; working set declined about **13%**.
+After warmup the native worker reported 918.1 MiB private bytes. These samples
+include loading/renderer allocations, are machine/model dependent, and are not
+GPU-memory measurements. The 15 FPS cap reduces update/render frequency (half as
+many opportunities as 30 FPS); CPU percentages were not profiled. Most memory
+improvement comes from fewer live scenes/cameras and smaller targets, not FPS alone.
+Main pet/companion FPS application is unchanged, and no dependencies/features changed.
+
+Remaining limitation: large custom VRMs, shared source data, morph/retarget caches,
+and renderer/driver high-water allocations can still dominate RAM until worker
+exit. No aggressive asset purge was added. Each live desktop companion still has
+its own renderer. The removal handshake adds one blocking pipe reader per companion
+and a bounded 16-reply channel; it does not poll the filesystem each frame.
+
+### Changed Files
+
+Modified:
+
+- `src/action_menu.rs`
+- `src/animation/playback.rs`
+- `src/animation_manager.rs`
+- `src/animation_manager/characters.rs`
+- `src/animation_manager/preview.rs`
+- `src/animation_manager/process.rs`
+- `src/animation_manager/ui.rs`
+- `src/character.rs`
+- `src/character/library.rs`
+- `src/character/roster.rs`
+- `src/cloud/smoke.rs` (debug native headpat regression only)
+- `src/expression/basic.rs`
+- `src/pet_feedback.rs` (retained SFX assertion only)
+- `src/settings/ui.rs` (existing roaming-control regression only)
+- `README.md`
+- `ARCHITECTURE.md`
+- `PHASE_7_POLISH_VALIDATION.md`
+
+Added:
+
+- `src/character/library/removal.rs`
+- `src/character/library/release.rs`
+
+### Remaining Manual Checks
+
+1. Drag the Multi Character title using a real pointer, including first click on
+   an unfocused window, and resize/move across monitors at 125%/150% DPI.
+2. Use card X/Cancel/Remove on inactive, primary-active and companion-active
+   imports; default Nera must have no card X. Verify the original source remains.
+3. Reimport through the real file picker, restart, and verify library/selected
+   configuration; also test failure/cancellation during a slow model load.
+4. Toggle Allow Roaming on/off and restart. Off must retain idle/headpat behavior
+   and cancel locomotion, matching the former Stay Here action.
+5. Compare main Nera at 24/30 FPS with the 15 FPS manager open; test normal headpat
+   with no manual face override, and audible HeadPat only when an optional cue exists.
+6. Repeatedly open/scroll/minimize/restore/remove/close and perform a longer soak
+   with custom large models. Live rigs must remain bounded and disappear on close.
 
 ## Private Eyelid Reference Follow-up
 

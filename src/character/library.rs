@@ -1,4 +1,6 @@
 //! Persistent model catalog and independently controlled desktop companions.
+pub(crate) mod release;
+mod removal;
 use super::roster::{CharacterRoster, MAX_CHARACTERS, RosterRequest, SlotView};
 use super::{DEFAULT_CHARACTER, character_directory, saved_filename};
 use crate::settings::NeraSettings;
@@ -20,6 +22,12 @@ pub(crate) struct CharacterEntry {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) facial_targets: usize,
+}
+
+impl CharacterEntry {
+    pub(crate) fn removable(&self) -> bool {
+        saved_filename(&self.path).is_some()
+    }
 }
 
 #[derive(Resource)]
@@ -87,13 +95,16 @@ impl CharacterCatalog {
 
     pub(super) fn remember(&mut self, path: &str, name: &str) -> Result<(), String> {
         self.insert(path, name);
+        self.persist(&character_directory())
+    }
+
+    fn persist(&self, directory: &std::path::Path) -> Result<(), String> {
         let value: Vec<_> = self
             .0
             .iter()
             .skip(1)
             .map(|entry| serde_json::json!({ "path": entry.path, "name": entry.name }))
             .collect();
-        let directory = character_directory();
         std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
         let temporary = directory.join(format!("catalog-{}.tmp", std::process::id()));
         std::fs::write(
@@ -280,15 +291,57 @@ pub(crate) fn configure_instance(settings: &mut NeraSettings) {
 }
 
 #[derive(Resource)]
-struct OwnerPipe(Mutex<mpsc::Receiver<Option<String>>>);
+struct OwnerPipe(Mutex<mpsc::Receiver<OwnerCommand>>);
+
+#[derive(Debug, PartialEq)]
+enum OwnerCommand {
+    Model(String),
+    Release(String, u128),
+    ReleaseDone(String, u128),
+    Exit,
+}
+
+fn decode_owner_command(line: &str) -> Option<OwnerCommand> {
+    if let Some(json) = line.strip_prefix("MODEL\t") {
+        let path: String = serde_json::from_str(json).ok()?;
+        return (path == DEFAULT_CHARACTER || saved_filename(&path).is_some())
+            .then_some(OwnerCommand::Model(path));
+    }
+    for (prefix, kind) in [
+        (
+            "RELEASE\t",
+            OwnerCommand::Release as fn(String, u128) -> OwnerCommand,
+        ),
+        ("RELEASE_DONE\t", OwnerCommand::ReleaseDone),
+    ] {
+        if let Some(json) = line.strip_prefix(prefix) {
+            let (path, token): (String, u128) = serde_json::from_str(json).ok()?;
+            return saved_filename(&path).is_some().then_some(kind(path, token));
+        }
+    }
+    None
+}
 
 pub(super) fn install(app: &mut App) {
     app.init_resource::<CharacterCatalog>()
         .init_resource::<CharacterInstances>()
         .init_resource::<LibraryImport>()
+        .init_resource::<removal::PendingRemoval>()
+        .init_resource::<release::ReleaseAcks>()
+        .init_resource::<release::ReleaseGuard>()
         .add_message::<CharacterLibraryRequest>()
         .add_message::<RosterRequest>()
-        .add_systems(Update, (poll_library_import, handle_requests).chain());
+        .add_systems(
+            Update,
+            (
+                poll_library_import,
+                handle_requests,
+                removal::request_remove,
+            )
+                .chain()
+                .before(super::receive_import),
+        )
+        .add_systems(Update, removal::finish_remove.after(super::update_import));
     if instance_id().is_some() {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -298,16 +351,21 @@ pub(super) fn install(app: &mut App) {
                     break;
                 }
                 if let Ok(line) = line
-                    && let Some(json) = line.strip_prefix("MODEL\t")
-                    && let Ok(path) = serde_json::from_str::<String>(json)
+                    && let Some(command) = decode_owner_command(&line)
                 {
-                    let _ = sender.send(Some(path));
+                    let _ = sender.send(command);
                 }
             }
-            let _ = sender.send(None);
+            let _ = sender.send(OwnerCommand::Exit);
         });
         app.insert_resource(OwnerPipe(Mutex::new(receiver)))
-            .add_systems(Update, exit_with_owner);
+            .add_systems(
+                Update,
+                exit_with_owner
+                    .before(handle_requests)
+                    .before(super::receive_import),
+            )
+            .add_systems(Update, release::finish_release.after(super::update_import));
         #[cfg(debug_assertions)]
         if std::env::var_os("NERA_COMPANION_SMOKE").is_some() {
             app.add_systems(Last, report_companion_smoke);
@@ -351,16 +409,30 @@ fn report_companion_smoke(
 
 fn exit_with_owner(
     pipe: Res<OwnerPipe>,
+    mut guard: ResMut<release::ReleaseGuard>,
+    mut catalog: ResMut<CharacterCatalog>,
     mut requests: MessageWriter<CharacterLibraryRequest>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if let Ok(receiver) = pipe.0.lock() {
         for event in receiver.try_iter() {
             match event {
-                Some(path) => {
+                OwnerCommand::Model(path) => {
                     requests.write(CharacterLibraryRequest::Select(path));
                 }
-                None => {
+                OwnerCommand::Release(path, token) => {
+                    catalog.0.retain(|entry| entry.path != path);
+                    guard.0 = Some((path, token, false));
+                }
+                OwnerCommand::ReleaseDone(path, token) => {
+                    if guard.0.as_ref().is_some_and(|(pending, generation, _)| {
+                        *pending == path && *generation == token
+                    }) {
+                        guard.0 = None;
+                        *catalog = CharacterCatalog::default();
+                    }
+                }
+                OwnerCommand::Exit => {
                     exit.write(AppExit::Success);
                 }
             }
@@ -407,6 +479,9 @@ fn handle_requests(
     mut imports: MessageWriter<super::ImportCharacter>,
     mut restore: MessageWriter<super::RestoreDefaultCharacter>,
     mut status: ResMut<super::CharacterImportStatus>,
+    removal: Option<Res<removal::PendingRemoval>>,
+    release_guard: Option<Res<release::ReleaseGuard>>,
+    acks: Option<Res<release::ReleaseAcks>>,
 ) {
     let mut changed = false;
     instances
@@ -425,6 +500,13 @@ fn handle_requests(
             }
         }
         instances.set_changed();
+    }
+    if removal.as_ref().is_some_and(|removal| removal.busy())
+        || release_guard.as_ref().is_some_and(|guard| guard.busy())
+    {
+        requests.clear();
+        roster.clear();
+        return;
     }
     let mut pending: Vec<_> = requests.read().cloned().collect();
     for request in roster.read().filter(|request| request.valid()) {
@@ -572,7 +654,7 @@ fn handle_requests(
                         )
                         .env("NERA_INSTANCE_SETTINGS", snapshot.to_string())
                         .stdin(Stdio::piped())
-                        .stdout(Stdio::null())
+                        .stdout(Stdio::piped())
                         .stderr(Stdio::null());
                     #[cfg(debug_assertions)]
                     if std::env::args().any(|arg| arg == "--feature-smoke") {
@@ -586,7 +668,10 @@ fn handle_requests(
                     command.spawn()
                 });
                 match result {
-                    Ok(child) => {
+                    Ok(mut child) => {
+                        if let Some(acks) = &acks {
+                            acks.listen(&mut child, id);
+                        }
                         instances.companions.push(Companion {
                             id,
                             name: entry.name.clone(),
@@ -606,6 +691,40 @@ fn handle_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owner_removal_protocol_round_trips_generations_and_rejects_builtin_or_external_removal() {
+        let path = "characters://model-protocol.vrm";
+        let encoded = serde_json::to_string(&(path, 9_u128)).unwrap();
+        assert_eq!(
+            decode_owner_command(&format!("RELEASE\t{encoded}")),
+            Some(OwnerCommand::Release(path.into(), 9))
+        );
+        assert_eq!(
+            decode_owner_command(&format!("RELEASE_DONE\t{encoded}")),
+            Some(OwnerCommand::ReleaseDone(path.into(), 9))
+        );
+        assert_eq!(
+            decode_owner_command(&format!(
+                "MODEL\t{}",
+                serde_json::to_string(DEFAULT_CHARACTER).unwrap()
+            )),
+            Some(OwnerCommand::Model(DEFAULT_CHARACTER.into()))
+        );
+        for path in [
+            DEFAULT_CHARACTER,
+            "C:/source.vrm",
+            "characters://../source.vrm",
+        ] {
+            assert_eq!(
+                decode_owner_command(&format!(
+                    "RELEASE\t{}",
+                    serde_json::to_string(&(path, 9_u128)).unwrap()
+                )),
+                None
+            );
+        }
+        assert_eq!(decode_owner_command("RELEASE\tbad-json"), None);
+    }
     #[test]
     fn slots_start_with_two_stop_at_eight_and_primary_clear_is_local() {
         let mut app = App::new();

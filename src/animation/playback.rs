@@ -71,6 +71,12 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    #[cfg(debug_assertions)]
+    pub(crate) fn head_stroke_playing(&self, playback: &NeraAnimationPlayback) -> bool {
+        self.head_stroke
+            .is_some_and(|clip| playback.current_clip == Some(clip.entity))
+    }
+
     pub(crate) fn sleeping_idle_entity(&self) -> Option<Entity> {
         self.sleeping_idle
             .filter(|clip| !clip.duration.is_zero())
@@ -252,7 +258,7 @@ const ALARM_WAVE_VRMA_PATH: &str = "animations/animasi_basic/161_Waving.vrma";
 const HIT_HEAD_VRMA_PATH: &str = "animations/animasi_basic/Hit_Head.vrma";
 const HIT_CHEST_VRMA_PATH: &str = "animations/animasi_basic/Hit_Chest.vrma";
 const SITTING_DODGE_VRMA_PATH: &str = "animations/animasi_basic/Dodge_While_Sitting.vrma";
-const HEAD_STROKE_VRMA_PATH: &str = "animations/animasi_basic/Blush.vrma";
+const HEAD_STROKE_VRMA_PATH: &str = "animations/animasi_basic/ShakeHeadNo1.vrma";
 const PRAYING_VRMA_PATH: &str = "animations/animasi_basic/Praying.vrma";
 const SITTING_ENTER_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Enter.vrma";
 const SITTING_LOOP_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Idle_Loop.vrma";
@@ -791,6 +797,31 @@ pub(crate) fn apply_animation_state(
 mod cloud_sleep_tests {
     use super::*;
     use crate::{animation::TemporaryAction, cloud::RestPose};
+
+    #[test]
+    fn headpat_body_remains_distinct_from_idle_blush() {
+        assert_eq!(
+            HEAD_STROKE_VRMA_PATH,
+            "animations/animasi_basic/ShakeHeadNo1.vrma"
+        );
+        assert_ne!(HEAD_STROKE_VRMA_PATH, IDLE_BLUSH_VRMA_PATH);
+        assert!(crate::nera_asset_file(HEAD_STROKE_VRMA_PATH).is_file());
+        let mut world = World::new();
+        let headpat = ClipSlot {
+            entity: world.spawn_empty().id(),
+            duration: Duration::from_secs(2),
+        };
+        let clips = NeraAnimationClips {
+            head_stroke: Some(headpat),
+            ..default()
+        };
+        let mut state = NeraAnimationState::default();
+        state.request_one_shot(TemporaryAction::HeadStroke, headpat.duration);
+        let (clip, repeat, label) = clip_for_state(&state, &clips);
+        assert_eq!(clip.unwrap().entity, headpat.entity);
+        assert_eq!(repeat, RepeatAnimation::Count(1));
+        assert_eq!(label, "ShakeHeadNo1");
+    }
 
     #[test]
     fn rest_loops_sleep_but_ride_support_reactions_and_detach_keep_their_own_clips() {

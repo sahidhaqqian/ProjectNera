@@ -19,7 +19,7 @@ use std::{
     mem::size_of,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicIsize, Ordering},
+        atomic::{AtomicIsize, Ordering},
     },
 };
 
@@ -50,7 +50,7 @@ use crate::{
     animation::NeraAnimationState,
     environment::{DesktopEnvironment, PlacementState},
     interaction::NeraRightClicked,
-    settings::{NeraSettings, OpenSettingsWindow, ReturnToActionMenu, save_settings_deferred},
+    settings::{OpenSettingsWindow, ReturnToActionMenu},
     tray::{TrayRuntime, send_action_menu_result},
 };
 
@@ -91,8 +91,6 @@ pub(crate) enum NeraActionMenuCommand {
     Alarm(AlarmMenuChoice),
     AlarmSettings,
     Settings,
-    ToggleRoaming,
-    StayHere,
 }
 
 /// Posted to the existing tray HWND. The tray thread creates the radial popup,
@@ -135,7 +133,6 @@ fn rgb(value: (u8, u8, u8)) -> COLORREF {
 enum RadialPage {
     Root,
     Cloud,
-    Roaming,
     Alarm,
     /// Longer presets + "Test Now", reached from the Alarm page. Replaces the
     /// old `Custom` slot, which was an enabled menu item that did nothing but
@@ -164,7 +161,7 @@ impl RadialItem {
     }
 }
 
-const ROOT_ITEMS: [RadialItem; 6] = [
+const ROOT_ITEMS: [RadialItem; 5] = [
     RadialItem {
         glyph: "☁",
         label: "Cloud",
@@ -186,32 +183,9 @@ const ROOT_ITEMS: [RadialItem; 6] = [
         action: RadialItemAction::Open(RadialPage::Alarm),
     },
     RadialItem {
-        glyph: "✓",
-        label: "Roaming",
-        action: RadialItemAction::Open(RadialPage::Roaming),
-    },
-    RadialItem {
         glyph: "◆",
         label: "Games",
         action: RadialItemAction::Disabled,
-    },
-];
-
-const ROAMING_ITEMS: [RadialItem; 3] = [
-    RadialItem {
-        glyph: "○",
-        label: "Allow Roaming",
-        action: RadialItemAction::Command(NeraActionMenuCommand::ToggleRoaming),
-    },
-    RadialItem {
-        glyph: "⌂",
-        label: "Stay Here",
-        action: RadialItemAction::Command(NeraActionMenuCommand::StayHere),
-    },
-    RadialItem {
-        glyph: "<",
-        label: "Back",
-        action: RadialItemAction::Back,
     },
 ];
 
@@ -329,7 +303,6 @@ fn items_for(page: RadialPage) -> &'static [RadialItem] {
     match page {
         RadialPage::Root => &ROOT_ITEMS,
         RadialPage::Cloud => &CLOUD_ITEMS,
-        RadialPage::Roaming => &ROAMING_ITEMS,
         RadialPage::Alarm => &ALARM_ITEMS,
         RadialPage::AlarmMore => &ALARM_MORE_ITEMS,
     }
@@ -345,7 +318,6 @@ fn parent_page(page: RadialPage) -> Option<RadialPage> {
     match page {
         RadialPage::Root => None,
         RadialPage::Cloud => Some(RadialPage::Root),
-        RadialPage::Roaming => Some(RadialPage::Root),
         RadialPage::Alarm => Some(RadialPage::Root),
         RadialPage::AlarmMore => Some(RadialPage::Alarm),
     }
@@ -381,7 +353,6 @@ impl Default for NativeRadialState {
 
 static NATIVE_STATE: OnceLock<Mutex<NativeRadialState>> = OnceLock::new();
 static RADIAL_HWND: AtomicIsize = AtomicIsize::new(0);
-static ROAMING_ENABLED: AtomicBool = AtomicBool::new(false);
 static CLASS_READY: OnceLock<()> = OnceLock::new();
 
 fn native_state() -> &'static Mutex<NativeRadialState> {
@@ -429,7 +400,6 @@ impl Plugin for ActionMenuPlugin {
             .add_systems(
                 Update,
                 (
-                    sync_roaming_menu_state,
                     open_action_menu,
                     reopen_action_menu_from_settings,
                     poll_action_menu_result,
@@ -437,16 +407,6 @@ impl Plugin for ActionMenuPlugin {
                 )
                     .chain(),
             );
-    }
-}
-
-fn sync_roaming_menu_state(settings: Res<NeraSettings>) {
-    let previous = ROAMING_ENABLED.swap(settings.walking_enabled, Ordering::AcqRel);
-    if previous != settings.walking_enabled {
-        let hwnd_raw = RADIAL_HWND.load(Ordering::Acquire);
-        if hwnd_raw != 0 {
-            let _ = unsafe { InvalidateRect(Some(HWND(hwnd_raw as *mut c_void)), None, false) };
-        }
     }
 }
 
@@ -578,8 +538,6 @@ pub(crate) fn poll_action_menu_result(
     mut open_settings: MessageWriter<OpenSettingsWindow>,
     mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
     mut open_animation_manager: MessageWriter<crate::animation_manager::OpenAnimationManager>,
-    mut settings: ResMut<NeraSettings>,
-    mut deferred: Commands,
 ) {
     let Some(tray) = tray else {
         return;
@@ -615,19 +573,6 @@ pub(crate) fn poll_action_menu_result(
             NeraActionMenuCommand::Settings => {
                 info!("Nera radial menu -> Settings");
                 open_settings.write(OpenSettingsWindow);
-            }
-            NeraActionMenuCommand::ToggleRoaming => {
-                settings.walking_enabled = !settings.walking_enabled;
-                save_settings_deferred(&mut deferred);
-                info!(
-                    "Nera radial menu -> Allow Roaming {}",
-                    settings.walking_enabled
-                );
-            }
-            NeraActionMenuCommand::StayHere => {
-                settings.walking_enabled = false;
-                save_settings_deferred(&mut deferred);
-                info!("Nera radial menu -> Stay Here");
             }
         }
 
@@ -831,15 +776,7 @@ unsafe fn paint_wheel(hwnd: HWND) {
 
         let _ = unsafe { SetTextColor(hdc, color) };
 
-        let glyph_text = if matches!(
-            item.action,
-            RadialItemAction::Command(NeraActionMenuCommand::ToggleRoaming)
-        ) && ROAMING_ENABLED.load(Ordering::Acquire)
-        {
-            "✓"
-        } else {
-            item.glyph
-        };
+        let glyph_text = item.glyph;
         let glyph = wide(glyph_text);
         let label = wide(item.label);
 
@@ -1194,27 +1131,17 @@ mod tests {
     }
 
     #[test]
-    fn root_has_six_wheel_segments() {
-        assert_eq!(items_for(RadialPage::Root).len(), 6);
+    fn root_has_five_wheel_segments() {
+        assert_eq!(items_for(RadialPage::Root).len(), 5);
     }
 
     #[test]
-    fn roaming_controls_are_reachable_and_keep_typed_commands() {
-        assert!(
-            ROOT_ITEMS
-                .iter()
-                .any(|item| matches!(item.action, RadialItemAction::Open(RadialPage::Roaming)))
-        );
-        assert!(matches!(
-            ROAMING_ITEMS[0].action,
-            RadialItemAction::Command(NeraActionMenuCommand::ToggleRoaming)
-        ));
-        assert!(matches!(
-            ROAMING_ITEMS[1].action,
-            RadialItemAction::Command(NeraActionMenuCommand::StayHere)
-        ));
-        assert_eq!(parent_page(RadialPage::Roaming), Some(RadialPage::Root));
-        assert!(ROAMING_ITEMS.iter().all(|item| item.enabled()));
+    fn settings_remains_reachable_without_a_duplicate_roaming_page() {
+        assert!(ROOT_ITEMS.iter().any(|item| matches!(
+            item.action,
+            RadialItemAction::Command(NeraActionMenuCommand::Settings)
+        )));
+        assert!(!ROOT_ITEMS.iter().any(|item| item.label == "Roaming"));
     }
 
     #[test]
@@ -1255,7 +1182,6 @@ mod tests {
         for page in [
             RadialPage::Root,
             RadialPage::Cloud,
-            RadialPage::Roaming,
             RadialPage::Alarm,
             RadialPage::AlarmMore,
         ] {

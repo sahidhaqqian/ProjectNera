@@ -20,6 +20,7 @@ use super::{GalleryScroll, ManagerState, PreviewSlot};
 const PREVIEW_COLUMNS: usize = 3;
 const MAX_ACTIVE_PREVIEWS: usize = 12;
 const MAX_ACTIVE_ROWS: usize = MAX_ACTIVE_PREVIEWS / PREVIEW_COLUMNS;
+const MAX_LIVE_MODEL_PREVIEWS: usize = 1;
 
 // Allow the dependency's deferred animation-graph bake to complete.
 const PREVIEW_PLAYBACK_WARMUP_FRAMES: u8 = 2;
@@ -48,6 +49,9 @@ struct PreviewScene {
     prepared: bool,
     started: bool,
     warmup_frames: u8,
+    rendered_frames: u8,
+    captured: bool,
+    frozen: bool,
 }
 
 #[derive(Resource)]
@@ -57,6 +61,8 @@ pub(super) struct PreviewRuntime {
     light: Option<Entity>,
     requested: HashSet<String>,
     changed_at: Option<std::time::Instant>,
+    thumbnails: super::thumbnails::ThumbnailIo,
+    model_release_frames: u8,
 }
 
 impl Default for PreviewRuntime {
@@ -66,6 +72,19 @@ impl Default for PreviewRuntime {
 }
 
 impl PreviewRuntime {
+    #[cfg(any(debug_assertions, test))]
+    pub(super) fn model_counts(&self) -> (usize, usize) {
+        (
+            self.active
+                .keys()
+                .filter(|key| key.starts_with("model/"))
+                .count(),
+            self.active
+                .iter()
+                .filter(|(key, scene)| key.starts_with("model/") && !scene.frozen)
+                .count(),
+        )
+    }
     pub(super) fn for_character(character_path: String) -> Self {
         Self {
             character_path,
@@ -73,6 +92,8 @@ impl PreviewRuntime {
             light: None,
             requested: HashSet::new(),
             changed_at: None,
+            thumbnails: default(),
+            model_release_frames: 0,
         }
     }
 
@@ -110,6 +131,9 @@ impl PreviewRuntime {
 
     pub fn remove(&mut self, key: &str, commands: &mut Commands, images: &mut Assets<Image>) {
         if let Some(scene) = self.active.remove(key) {
+            if key.starts_with("model/") && !scene.frozen {
+                self.model_release_frames = 3;
+            }
             commands.entity(scene.root).try_despawn();
             commands.entity(scene.camera).try_despawn();
             images.remove(&scene.image);
@@ -127,6 +151,8 @@ impl PreviewRuntime {
         }
         self.requested = HashSet::new();
         self.changed_at = None;
+        self.thumbnails.clear();
+        self.model_release_frames = 3;
     }
 
     pub fn restart(
@@ -278,6 +304,7 @@ pub(super) fn start_ready_previews(
 
 pub(super) fn sync_visible_previews(
     state: Res<ManagerState>,
+    windows: Query<(&Window, &crate::utility_window::UtilityWindow), With<super::ManagerWindow>>,
     scroll: Query<&ComputedNode, With<GalleryScroll>>,
     slots: Query<(&PreviewSlot, &mut ImageNode)>,
     mut runtime: ResMut<PreviewRuntime>,
@@ -285,9 +312,19 @@ pub(super) fn sync_visible_previews(
     assets: Res<AssetServer>,
     mut commands: Commands,
 ) {
+    if windows.iter().any(|(window, utility)| {
+        !window.visible
+            || utility
+                .native_handle()
+                .is_some_and(crate::platform::is_window_minimized)
+    }) {
+        runtime.clear(&mut commands, &mut images);
+        return;
+    }
     let facial = state.tab == super::GalleryTab::Expressions;
     let computed = scroll.single().ok();
-    if !facial && computed.is_none() {
+    // A UI rebuild has no layout until PostUpdate; keep cached previews during that gap.
+    if !facial && computed.is_none_or(|node| node.size().y <= 0.0) {
         return;
     }
     let viewport_height = computed.map_or(0.0, |node| node.size().y * node.inverse_scale_factor());
@@ -321,6 +358,101 @@ pub(super) fn sync_visible_previews(
     for key in stale {
         runtime.remove(&key, &mut commands, &mut images);
     }
+    let selected = selected_model(&state);
+    let models = state.tab == super::GalleryTab::Characters;
+    if models {
+        runtime.thumbnails.retain(&needed);
+        if let Some((key, Some(image))) = runtime.thumbnails.poll() {
+            if needed.contains(&key) && !runtime.active.contains_key(&key) {
+                runtime.active.insert(
+                    key,
+                    PreviewScene {
+                        root: Entity::PLACEHOLDER,
+                        camera: Entity::PLACEHOLDER,
+                        clip: Entity::PLACEHOLDER,
+                        image: images.add(image),
+                        slot: 0,
+                        prepared: true,
+                        started: true,
+                        warmup_frames: 0,
+                        rendered_frames: 3,
+                        captured: true,
+                        frozen: true,
+                    },
+                );
+            }
+        }
+        for (slot, _) in &slots {
+            if needed.contains(&slot.key) && !runtime.active.contains_key(&slot.key) {
+                runtime.thumbnails.request(&slot.key);
+            }
+        }
+    }
+    // Missing thumbnails borrow the single render slot, then the selected card resumes.
+    let pending_thumbnail = models
+        .then(|| {
+            runtime
+                .active
+                .iter()
+                .find_map(|(key, scene)| {
+                    (!scene.frozen && key.strip_prefix("model/") != selected).then(|| key.clone())
+                })
+                .or_else(|| {
+                    slots.iter().find_map(|(slot, _)| {
+                        (needed.contains(&slot.key)
+                            && !runtime.active.contains_key(&slot.key)
+                            && runtime.thumbnails.attempted(&slot.key)
+                            && slot.key.strip_prefix("model/") != selected)
+                            .then(|| slot.key.clone())
+                    })
+                })
+        })
+        .flatten();
+    let waiting_for_thumbnail = models
+        && needed
+            .iter()
+            .any(|key| !runtime.active.contains_key(key) && !runtime.thumbnails.attempted(key));
+    let desired_model = pending_thumbnail.as_deref().or_else(|| {
+        if waiting_for_thumbnail
+            && !runtime
+                .active
+                .iter()
+                .any(|(key, scene)| !scene.frozen && key.strip_prefix("model/") == selected)
+        {
+            return None;
+        }
+        selected
+            .and_then(|path| needed.get(&format!("model/{path}")))
+            .map(String::as_str)
+    });
+    let release: Vec<_> = runtime
+        .active
+        .iter()
+        .filter(|(key, scene)| {
+            models && !scene.frozen && key.as_str() != desired_model.unwrap_or_default()
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in release {
+        let scene = runtime.active.get_mut(&key).unwrap();
+        if scene.started && scene.captured {
+            commands.entity(scene.root).try_despawn();
+            commands.entity(scene.camera).try_despawn();
+            scene.frozen = true;
+        } else {
+            runtime.remove(&key, &mut commands, &mut images);
+        }
+        runtime.model_release_frames = 3;
+    }
+    let thaw: Vec<_> = runtime
+        .active
+        .iter()
+        .filter(|(key, scene)| {
+            scene.frozen && key.starts_with("model/") && Some(key.as_str()) == desired_model
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    // Keep the static image displayed until the next live scene is admitted.
 
     if runtime.requested != needed {
         runtime.requested = needed.clone();
@@ -330,22 +462,53 @@ pub(super) fn sync_visible_previews(
         .changed_at
         .is_none_or(|at| at.elapsed() >= Duration::from_millis(120));
 
-    let mut occupied: HashSet<_> = runtime.active.values().map(|scene| scene.slot).collect();
+    let mut occupied: HashSet<_> = runtime
+        .active
+        .values()
+        .filter(|scene| !scene.frozen)
+        .map(|scene| scene.slot)
+        .collect();
+    let releasing = runtime.model_release_frames > 0;
+    runtime.model_release_frames = runtime.model_release_frames.saturating_sub(1);
     for (slot, mut image_node) in slots {
         if !needed.contains(&slot.key) {
             continue;
         }
         if let Some(scene) = runtime.active.get(&slot.key) {
             image_node.image = scene.image.clone();
-            continue;
+            if !thaw.contains(&slot.key) || releasing {
+                continue;
+            }
         }
         if !settled {
+            continue;
+        }
+        let model_preview = slot.key.starts_with("model/");
+        if model_preview
+            && (releasing
+                || Some(slot.key.as_str()) != desired_model
+                || !runtime.thumbnails.attempted(&slot.key))
+        {
+            continue;
+        }
+        if model_preview
+            && runtime
+                .active
+                .values()
+                .filter(|scene| !scene.frozen)
+                .count()
+                >= MAX_LIVE_MODEL_PREVIEWS
+        {
             continue;
         }
         let Some(index) = (0..MAX_ACTIVE_PREVIEWS).find(|index| !occupied.contains(index)) else {
             break;
         };
         occupied.insert(index);
+        // Release the old static target only when its live replacement is ready to load.
+        if thaw.contains(&slot.key) {
+            runtime.remove(&slot.key, &mut commands, &mut images);
+        }
 
         if runtime.light.is_none() {
             runtime.light = Some(
@@ -367,13 +530,16 @@ pub(super) fn sync_visible_previews(
 
         // Render layers isolate unit-scale rigs without offsetting their rest pose.
         let layer = RenderLayers::layer(index + 1);
-        let model_preview = slot.key.starts_with("model/");
-        let image = images.add(Image::new_target_texture(
-            if model_preview { 384 } else { 512 },
-            if model_preview { 512 } else { 420 },
+        let mut target = Image::new_target_texture(
+            if model_preview { 256 } else { 512 },
+            if model_preview { 320 } else { 420 },
             TextureFormat::Rgba8Unorm,
             Some(TextureFormat::Rgba8UnormSrgb),
-        ));
+        );
+        if model_preview {
+            target.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
+        }
+        let image = images.add(target);
         let camera = commands
             .spawn((
                 Name::new("Nera Gallery Preview Camera"),
@@ -403,9 +569,7 @@ pub(super) fn sync_visible_previews(
                     assets.load(
                         slot.key
                             .strip_prefix("model/")
-                            .and_then(|index| index.parse::<usize>().ok())
-                            .and_then(|index| state.characters.models.get(index))
-                            .map(|model| model.path.clone())
+                            .map(str::to_owned)
                             .unwrap_or_else(|| runtime.character_path.clone()),
                     ),
                 ),
@@ -433,6 +597,69 @@ pub(super) fn sync_visible_previews(
                 prepared: false,
                 started: false,
                 warmup_frames: 0,
+                rendered_frames: 0,
+                captured: false,
+                frozen: false,
+            },
+        );
+    }
+}
+
+fn selected_model(state: &ManagerState) -> Option<&str> {
+    (state.tab == super::GalleryTab::Characters)
+        .then(|| {
+            state
+                .characters
+                .slots
+                .get(state.character_slot)
+                .and_then(|slot| slot.path.as_deref())
+        })
+        .flatten()
+}
+
+/// Keep card textures, not a full animated skeleton for every catalog entry.
+pub(super) fn retire_model_previews(
+    state: Res<ManagerState>,
+    mut runtime: ResMut<PreviewRuntime>,
+    mut commands: Commands,
+) {
+    use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+    let selected = selected_model(&state);
+    let mut captures = Vec::new();
+    let mut retired = false;
+    for (key, scene) in &mut runtime.active {
+        if !key.starts_with("model/") || scene.frozen || !scene.started {
+            continue;
+        }
+        scene.rendered_frames = scene.rendered_frames.saturating_add(1);
+        if scene.rendered_frames == 3 {
+            captures.push((key.clone(), scene.root, scene.image.clone()));
+        }
+        // Screenshot capture redirects this frame's render target. Keep the camera
+        // alive through readback; bound the wait if the renderer cannot deliver it.
+        if (scene.captured || scene.rendered_frames >= 60) && key.strip_prefix("model/") != selected
+        {
+            commands.entity(scene.root).try_despawn();
+            commands.entity(scene.camera).try_despawn();
+            scene.frozen = true;
+            retired = true;
+        }
+    }
+    if retired {
+        runtime.model_release_frames = 3;
+    }
+    for (key, root, image) in captures {
+        let id = image.id();
+        commands.spawn(Screenshot::image(image)).observe(
+            move |event: On<ScreenshotCaptured>, mut runtime: ResMut<PreviewRuntime>| {
+                let Some(scene) = runtime.active.get_mut(&key) else {
+                    return;
+                };
+                if scene.root != root || scene.image.id() != id {
+                    return;
+                }
+                scene.captured = true;
+                runtime.thumbnails.store(&key, event.image.clone());
             },
         );
     }
@@ -522,6 +749,281 @@ pub(super) fn frame_expression_heads(
 mod tests {
     use super::*;
 
+    fn model_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<VrmAsset>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<PreviewRuntime>()
+            .insert_resource(ManagerState::for_test())
+            .add_systems(Update, sync_visible_previews)
+            .add_systems(Last, retire_model_previews);
+        app.world_mut().resource_mut::<ManagerState>().tab = super::super::GalleryTab::Characters;
+        app.world_mut().spawn((
+            super::super::ManagerWindow,
+            Window::default(),
+            crate::utility_window::UtilityWindow::new(16.0),
+        ));
+        app.world_mut().spawn((
+            GalleryScroll,
+            ComputedNode {
+                size: Vec2::new(900.0, 1440.0),
+                content_size: Vec2::new(900.0, 1600.0),
+                inverse_scale_factor: 1.0,
+                ..default()
+            },
+        ));
+        let mut runtime = app.world_mut().resource_mut::<PreviewRuntime>();
+        for index in 0..12 {
+            runtime
+                .thumbnails
+                .missing_for_test(format!("model/characters://model-test-{index}.vrm"));
+            runtime
+                .requested
+                .insert(format!("model/characters://model-test-{index}.vrm"));
+        }
+        // Skip the real scroll debounce in this deterministic logic test.
+        runtime.changed_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+        for index in 0..12 {
+            app.world_mut().spawn((
+                PreviewSlot {
+                    key: format!("model/characters://model-test-{index}.vrm"),
+                    index,
+                },
+                ImageNode::default(),
+            ));
+        }
+        app
+    }
+
+    #[test]
+    fn thumbnail_capture_keeps_camera_alive_until_gpu_readback_completes() {
+        use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+        let mut app = model_test_app();
+        app.update();
+        let (key, root, camera) = {
+            let mut runtime = app.world_mut().resource_mut::<PreviewRuntime>();
+            let (key, scene) = runtime.active.iter_mut().next().unwrap();
+            scene.prepared = true;
+            scene.started = true;
+            (key.clone(), scene.root, scene.camera)
+        };
+        for _ in 0..4 {
+            app.update();
+        }
+        assert!(app.world().get_entity(root).is_ok());
+        assert!(app.world().get_entity(camera).is_ok());
+        assert!(!app.world().resource::<PreviewRuntime>().active[&key].frozen);
+        let world = app.world_mut();
+        let capture = world
+            .query_filtered::<Entity, With<Screenshot>>()
+            .single(world)
+            .unwrap();
+        world.trigger(ScreenshotCaptured {
+            entity: capture,
+            image: Image::default(),
+        });
+        app.update();
+        assert!(app.world().resource::<PreviewRuntime>().active[&key].frozen);
+        assert!(app.world().get_entity(root).is_err());
+        assert!(app.world().get_entity(camera).is_err());
+    }
+
+    #[test]
+    fn model_preview_budget_freezes_thumbnails_and_reclaims_removed_or_hidden_state() {
+        let mut app = model_test_app();
+        app.update();
+        assert_eq!(
+            app.world().resource::<PreviewRuntime>().model_counts(),
+            (1, 1)
+        );
+        let live: Vec<_> = app
+            .world()
+            .resource::<PreviewRuntime>()
+            .active
+            .iter()
+            .map(|(key, scene)| {
+                (
+                    key.clone(),
+                    scene.root,
+                    scene.clip,
+                    scene.camera,
+                    scene.image.id(),
+                )
+            })
+            .collect();
+        for scene in app
+            .world_mut()
+            .resource_mut::<PreviewRuntime>()
+            .active
+            .values_mut()
+        {
+            scene.prepared = true;
+            scene.started = true;
+            scene.captured = true;
+        }
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<PreviewRuntime>().model_counts(),
+            (1, 0)
+        );
+        let frozen = live
+            .iter()
+            .find(|(key, ..)| app.world().resource::<PreviewRuntime>().active[key].frozen)
+            .unwrap();
+        for entity in [frozen.1, frozen.2, frozen.3] {
+            assert!(app.world().get_entity(entity).is_err());
+        }
+        assert!(app.world().resource::<Assets<Image>>().contains(frozen.4));
+        for _ in 0..4 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<PreviewRuntime>().model_counts(),
+            (2, 1)
+        );
+        let key = &frozen.0;
+        let world = app.world_mut();
+        let slot = world
+            .query::<(Entity, &PreviewSlot)>()
+            .iter(world)
+            .find(|(_, slot)| &slot.key == key)
+            .unwrap()
+            .0;
+        world.despawn(slot);
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<PreviewRuntime>()
+                .active
+                .contains_key(key)
+        );
+        assert!(!app.world().resource::<Assets<Image>>().contains(frozen.4));
+        let world = app.world_mut();
+        world
+            .query_filtered::<&mut Window, With<super::super::ManagerWindow>>()
+            .single_mut(world)
+            .unwrap()
+            .visible = false;
+        app.update();
+        assert!(app.world().resource::<PreviewRuntime>().is_empty());
+        assert!(app.world().resource::<Assets<Image>>().is_empty());
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<PreviewAvatarRoot>>()
+                .iter(world)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn selecting_a_frozen_card_rebuilds_only_that_preview() {
+        let mut app = model_test_app();
+        // Finish the visible thumbnail queue without a renderer or asynchronous model IO.
+        for _ in 0..100 {
+            for scene in app
+                .world_mut()
+                .resource_mut::<PreviewRuntime>()
+                .active
+                .values_mut()
+            {
+                scene.prepared = true;
+                scene.started = true;
+                scene.captured = true;
+            }
+            app.update();
+            assert!(app.world().resource::<PreviewRuntime>().model_counts().1 <= 1);
+        }
+        let (key, old_image) = app
+            .world()
+            .resource::<PreviewRuntime>()
+            .active
+            .iter()
+            .find(|(_, scene)| scene.frozen)
+            .map(|(key, scene)| (key.clone(), scene.image.id()))
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<ManagerState>()
+            .characters
+            .slots[0]
+            .path = key.strip_prefix("model/").map(str::to_owned);
+        app.update();
+        assert!(!app.world().resource::<Assets<Image>>().contains(old_image));
+        assert!(app.world().resource::<PreviewRuntime>().model_counts().1 <= 1);
+        // Other rigs may be occupying the budget; the selected card starts as soon as one retires.
+        for scene in app
+            .world_mut()
+            .resource_mut::<PreviewRuntime>()
+            .active
+            .values_mut()
+        {
+            scene.prepared = true;
+            scene.started = true;
+            scene.captured = true;
+        }
+        for _ in 0..4 {
+            app.update();
+        }
+        let runtime = app.world().resource::<PreviewRuntime>();
+        let scene = &runtime.active[&key];
+        assert!(!scene.frozen);
+        assert_ne!(scene.image.id(), old_image);
+        assert!(app.world().get_entity(scene.root).is_ok());
+        assert!(runtime.model_counts().1 <= 1);
+        let old_root = scene.root;
+        let next_key = runtime
+            .active
+            .keys()
+            .find(|other| **other != key)
+            .unwrap()
+            .clone();
+        app.world_mut()
+            .resource_mut::<ManagerState>()
+            .characters
+            .slots[0]
+            .path = next_key.strip_prefix("model/").map(str::to_owned);
+        app.update();
+        assert!(app.world().get_entity(old_root).is_err());
+        for _ in 0..5 {
+            app.update();
+        }
+        let runtime = app.world().resource::<PreviewRuntime>();
+        assert!(!runtime.active[&next_key].frozen);
+        assert_eq!(runtime.model_counts().1, 1);
+    }
+
+    #[test]
+    fn layout_gap_during_panel_rebuild_does_not_destroy_cached_model_assets() {
+        let mut app = model_test_app();
+        app.update();
+        let before: Vec<_> = app
+            .world()
+            .resource::<PreviewRuntime>()
+            .active
+            .values()
+            .map(|scene| (scene.root, scene.image.id()))
+            .collect();
+        let world = app.world_mut();
+        world
+            .query_filtered::<&mut ComputedNode, With<GalleryScroll>>()
+            .single_mut(world)
+            .unwrap()
+            .size = Vec2::ZERO;
+        app.update();
+        assert_eq!(
+            app.world().resource::<PreviewRuntime>().model_counts(),
+            (1, 1)
+        );
+        for (root, image) in before {
+            assert!(app.world().get_entity(root).is_ok());
+            assert!(app.world().resource::<Assets<Image>>().contains(image));
+        }
+    }
+
     #[test]
     fn face_previews_push_only_on_selection_or_binding_changes_and_release_at_zero() {
         #[derive(Resource, Default)]
@@ -552,6 +1054,9 @@ mod tests {
                     prepared: true,
                     started: true,
                     warmup_frames: 0,
+                    rendered_frames: 0,
+                    captured: false,
+                    frozen: false,
                 },
             );
         app.update();
@@ -674,6 +1179,9 @@ mod tests {
                     prepared: true,
                     started: true,
                     warmup_frames: PREVIEW_PLAYBACK_WARMUP_FRAMES,
+                    rendered_frames: 0,
+                    captured: false,
+                    frozen: false,
                 },
             );
         }
@@ -904,6 +1412,9 @@ mod tests {
                         prepared: false,
                         started: false,
                         warmup_frames: 0,
+                        rendered_frames: 0,
+                        captured: false,
+                        frozen: false,
                     },
                 );
             app.world_mut()
@@ -1003,6 +1514,9 @@ mod tests {
                         prepared: false,
                         started: false,
                         warmup_frames: 0,
+                        rendered_frames: 0,
+                        captured: false,
+                        frozen: false,
                     },
                 );
             (root, clip)

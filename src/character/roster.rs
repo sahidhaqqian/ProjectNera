@@ -12,6 +12,7 @@ pub(crate) enum RosterRequest {
     Assign { slot: usize, path: String },
     Clear { slot: usize },
     Import { slot: usize, path: PathBuf },
+    Remove { path: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,6 +61,7 @@ impl RosterRequest {
                     && (path == super::DEFAULT_CHARACTER || super::saved_filename(path).is_some())
             }
             Self::Clear { slot } => *slot < MAX_CHARACTERS,
+            Self::Remove { path } => super::saved_filename(path).is_some(),
             Self::Import { slot, path } => {
                 *slot < MAX_CHARACTERS
                     && path.is_absolute()
@@ -74,6 +76,23 @@ impl RosterRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remove_protocol_round_trips_owned_imports_but_rejects_builtin_and_source_paths() {
+        let request = RosterRequest::Remove {
+            path: "characters://model-abc123.vrm".into(),
+        };
+        let decoded: RosterRequest =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert_eq!(decoded, request);
+        assert!(decoded.valid());
+        for path in [
+            super::super::DEFAULT_CHARACTER,
+            "C:/original.vrm",
+            "characters://../original.vrm",
+        ] {
+            assert!(!RosterRequest::Remove { path: path.into() }.valid());
+        }
+    }
     #[test]
     fn slot_commands_round_trip_and_reject_out_of_range_or_external_assets() {
         let request = RosterRequest::Assign {

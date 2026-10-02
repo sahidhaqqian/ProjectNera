@@ -95,7 +95,11 @@ impl ManagerProcess {
             .stderr(Stdio::inherit())
             .creation_flags(0x0800_0000); // No console; the manager owns its own Bevy window.
         if smoke_test {
-            command.env("NERA_GALLERY_SMOKE_TEST", "1");
+            if std::env::var_os("NERA_GALLERY_HOST_CHARACTERS").is_some() {
+                command.arg("--roster-smoke");
+            } else {
+                command.env("NERA_GALLERY_SMOKE_TEST", "1");
+            }
         }
         let mut child = command.spawn()?;
         crate::platform::set_animation_manager_process_id(Some(child.id()));
@@ -387,6 +391,7 @@ pub(crate) fn run_worker() {
     let character_path = std::env::var("NERA_GALLERY_CHARACTER")
         .unwrap_or_else(|_| crate::character::DEFAULT_CHARACTER.to_owned());
     app.add_plugins((
+        bevy_framepace::FramepacePlugin,
         VrmPlugin,
         VrmaPlugin,
         crate::memory::AvatarMemoryPlugin,
@@ -405,6 +410,7 @@ pub(crate) fn run_worker() {
     .add_systems(
         Update,
         (
+            apply_worker_preview_rate.after(receive_controls),
             receive_controls.before(super::preview::sync_visible_previews),
             forward_play.after(super::handle_actions),
             forward_back.after(super::close_after_release),
@@ -421,10 +427,36 @@ pub(crate) fn run_worker() {
         app.add_systems(Update, expression_smoke.before(super::ui::rebuild_ui));
     }
     #[cfg(debug_assertions)]
+    if std::env::args().any(|arg| arg == "--manager-memory-audit") {
+        super::memory_audit::install(&mut app);
+    }
+    #[cfg(debug_assertions)]
     if std::env::args().any(|arg| arg == "--roster-smoke") {
+        app.init_resource::<RosterSmokeClosing>()
+            .add_systems(Last, verify_roster_close);
         app.add_systems(Update, roster_smoke.before(super::ui::rebuild_ui));
     }
     app.run();
+}
+
+fn apply_worker_preview_rate(
+    state: Res<super::ManagerState>,
+    mut framepace: ResMut<bevy_framepace::FramepaceSettings>,
+    mut previous: Local<Option<u32>>,
+) {
+    let fps = if state.tab == super::GalleryTab::Characters {
+        15
+    } else {
+        0
+    };
+    if *previous != Some(fps) {
+        framepace.limiter = if fps == 0 {
+            bevy_framepace::Limiter::Off
+        } else {
+            bevy_framepace::Limiter::from_framerate(f64::from(fps))
+        };
+        *previous = Some(fps);
+    }
 }
 
 fn receive_controls(
@@ -480,15 +512,23 @@ fn receive_controls(
             }
             Ok(Control::Roster(roster)) => {
                 if state.characters != roster {
+                    for old in &state.characters.models {
+                        if !roster.models.iter().any(|model| model.path == old.path) {
+                            super::thumbnails::remove_cached_model(&old.path);
+                        }
+                    }
                     state.characters = roster;
                     state.dirty = true;
                 }
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 #[cfg(debug_assertions)]
-                if std::env::args()
-                    .any(|arg| arg == "--expression-smoke" || arg == "--roster-smoke")
-                {
+                if std::env::args().any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "--expression-smoke" | "--roster-smoke" | "--manager-memory-audit"
+                    )
+                }) {
                     break;
                 }
                 exit.write(AppExit::Success);
@@ -551,23 +591,62 @@ fn send_event(message: &str) {
 }
 
 #[cfg(debug_assertions)]
+#[derive(Resource, Default)]
+struct RosterSmokeClosing(bool);
+
+#[cfg(debug_assertions)]
+fn verify_roster_close(
+    closing: Res<RosterSmokeClosing>,
+    previews: Res<super::preview::PreviewRuntime>,
+    roots: Query<Entity, With<super::preview::PreviewAvatarRoot>>,
+    windows: Query<Entity, With<ManagerWindow>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if closing.0 {
+        assert!(previews.is_empty() && roots.is_empty() && windows.is_empty());
+        eprintln!("ROSTER_SMOKE_PASS minimized/restored/close_cleanup");
+        exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(debug_assertions)]
 fn roster_smoke(
     time: Res<Time>,
+    real: Res<Time<Real>>,
+    previews: Res<super::preview::PreviewRuntime>,
+    mut sample: Local<Option<(std::time::Duration, u32)>>,
+    mut closing: ResMut<RosterSmokeClosing>,
     mut stage: Local<u8>,
     mut state: ResMut<super::ManagerState>,
     windows: Query<Entity, With<ManagerWindow>>,
+    mut window_state: Query<&mut Window, With<ManagerWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     let folder = std::env::temp_dir().join("nera-feature-smoke");
     let _ = std::fs::create_dir_all(&folder);
+    if real.elapsed_secs() > 8.0 {
+        if let Some((_, frames)) = sample.as_mut() {
+            *frames += 1;
+        } else {
+            *sample = Some((real.elapsed(), 0));
+        }
+    }
     if *stage == 0 && time.elapsed_secs() > 0.5 {
         state.tab = super::GalleryTab::Characters;
         state.dirty = true;
         *stage = 1;
     }
     if *stage == 1 && time.elapsed_secs() > 12.0 {
+        let (cached, live) = previews.model_counts();
+        assert!(live <= 1, "model rig budget exceeded");
+        let (start, frames) = sample.unwrap();
+        eprintln!(
+            "ROSTER_SMOKE cached={cached} live={live} fps={:.1} private_mib={:.1}",
+            f64::from(frames) / (real.elapsed() - start).as_secs_f64(),
+            private_memory_bytes() as f64 / 1048576.0
+        );
         commands
             .spawn(Screenshot::window(windows.single().unwrap()))
             .observe(save_to_disk(folder.join("roster-desktop.png")));
@@ -598,8 +677,31 @@ fn roster_smoke(
             .observe(save_to_disk(folder.join("roster-compact.png")));
         *stage = 4;
     }
-    if time.elapsed_secs() > 22.0 {
+    if *stage == 4 && time.elapsed_secs() > 20.0 {
+        window_state.single_mut().unwrap().set_minimized(true);
+        *stage = 5;
+    }
+    if *stage == 5 && time.elapsed_secs() > 21.0 {
+        assert!(
+            previews.is_empty(),
+            "minimized manager must release previews"
+        );
+        window_state.single_mut().unwrap().set_minimized(false);
+        *stage = 6;
+    }
+    if *stage == 6 && time.elapsed_secs() > 25.0 {
+        assert!(previews.model_counts().0 > 0);
+        assert!(previews.model_counts().1 <= 1);
+        *stage = 7;
+    }
+    if *stage == 7 && time.elapsed_secs() > 27.0 {
+        state.close_requested = true;
+        closing.0 = true;
+        *stage = 8;
+    }
+    if time.elapsed_secs() > 35.0 {
         exit.write(AppExit::Success);
+        panic!("roster smoke did not complete cleanup");
     }
 }
 fn forward_play(mut play: MessageReader<crate::animation::PlayLibraryAnimation>) {
@@ -644,7 +746,12 @@ fn forward_expression(mut requests: MessageReader<crate::expression::ExpressionP
 }
 
 #[cfg(debug_assertions)]
-fn private_memory_bytes() -> usize {
+pub(super) fn private_memory_bytes() -> usize {
+    memory_usage().0
+}
+
+#[cfg(debug_assertions)]
+pub(super) fn memory_usage() -> (usize, usize, usize) {
     #[repr(C)]
     #[derive(Default)]
     struct Memory {
@@ -670,7 +777,7 @@ fn private_memory_bytes() -> usize {
         unsafe { GetProcessMemoryInfo(-1, &mut memory, std::mem::size_of::<Memory>() as u32) },
         0
     );
-    memory.private
+    (memory.private, memory.ws, memory.peak_pagefile)
 }
 
 #[cfg(debug_assertions)]
@@ -688,13 +795,18 @@ fn host_smoke_test(
     process: Res<ManagerProcess>,
     mut state: Local<HostSmoke>,
     mut open: MessageWriter<OpenAnimationManager>,
+    mut characters: MessageWriter<super::OpenCharacterManager>,
     mut exit: MessageWriter<AppExit>,
 ) {
     match state.phase {
         0 if time.elapsed_secs_f64() > 8.0 => {
             state.baseline = private_memory_bytes();
             eprintln!("HOST_MEMORY baseline={} KiB", state.baseline / 1024);
-            open.write_default();
+            if std::env::var_os("NERA_GALLERY_HOST_CHARACTERS").is_some() {
+                characters.write_default();
+            } else {
+                open.write_default();
+            }
             state.phase = 1;
         }
         1 if process.child.is_some() => state.phase = 2,
@@ -719,7 +831,11 @@ fn host_smoke_test(
                 exit.write(AppExit::Success);
                 state.phase = 4;
             } else {
-                open.write_default();
+                if std::env::var_os("NERA_GALLERY_HOST_CHARACTERS").is_some() {
+                    characters.write_default();
+                } else {
+                    open.write_default();
+                }
                 state.phase = 1;
             }
         }
@@ -757,6 +873,49 @@ fn smoke_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_preview_cap_is_local_to_worker_and_leaves_main_fps_unchanged() {
+        for main_fps in [24, 30] {
+            let mut app = App::new();
+            let mut state = super::super::ManagerState::for_test();
+            state.tab = super::super::GalleryTab::Characters;
+            app.insert_resource(state)
+                .insert_resource(crate::settings::NeraSettings {
+                    fps_limit: main_fps,
+                    ..default()
+                })
+                .init_resource::<bevy_framepace::FramepaceSettings>()
+                .add_systems(Update, apply_worker_preview_rate);
+            app.update();
+            assert!(
+                matches!(app.world().resource::<bevy_framepace::FramepaceSettings>().limiter,
+                bevy_framepace::Limiter::Manual(duration) if duration == std::time::Duration::from_secs_f64(1.0 / 15.0))
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<crate::settings::NeraSettings>()
+                    .fps_limit,
+                main_fps
+            );
+            app.world_mut()
+                .resource_mut::<super::super::ManagerState>()
+                .tab = super::super::GalleryTab::All;
+            app.update();
+            assert!(matches!(
+                app.world()
+                    .resource::<bevy_framepace::FramepaceSettings>()
+                    .limiter,
+                bevy_framepace::Limiter::Off
+            ));
+            assert_eq!(
+                app.world()
+                    .resource::<crate::settings::NeraSettings>()
+                    .fps_limit,
+                main_fps
+            );
+        }
+    }
 
     #[test]
     fn expression_protocol_accepts_only_known_presets_and_valid_intensity() {

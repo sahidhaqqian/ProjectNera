@@ -368,6 +368,40 @@ fn run(world: &mut World) {
         10 if since > 1.0 => {
             assert!(world.resource::<CloudRuntime>().is_riding());
             screenshot(world, "cloud-ride-moved.png");
+            world.write_message(crate::interaction::NeraHeadPatted {
+                pointer: NeraPointerPosition {
+                    screen: IVec2::ZERO,
+                    local: Vec2::ZERO,
+                },
+            });
+            advance(world, 18);
+        }
+        18 if since > 0.35 => {
+            assert_eq!(
+                world.resource::<NeraAnimationState>().visual_state(),
+                crate::animation::VisualState::HeadStroke
+            );
+            assert!(
+                world
+                    .resource::<crate::animation::NeraAnimationClips>()
+                    .head_stroke_playing(
+                        world.resource::<crate::animation::NeraAnimationPlayback>()
+                    )
+            );
+            let face = world
+                .query_filtered::<&crate::expression::face::AutomaticFace, With<NeraAvatar>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(
+                face.current,
+                Some((crate::expression::NeraExpressionPreset::Joy, 1.0))
+            );
+            assert_eq!(count, 3, "headpat must emit its three sparkles");
+            assert!(world.resource::<CloudRuntime>().is_riding());
+            screenshot(world, "headpat-ride.png");
+            eprintln!(
+                "HEADPAT_SMOKE_PASS ShakeHeadNo1/Joy/sparkles (optional SFX dispatch covered by unit tests)"
+            );
             world.write_message(CloudCommand::Dismiss);
             advance(world, 11);
         }

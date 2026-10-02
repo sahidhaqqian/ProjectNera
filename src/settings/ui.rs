@@ -1907,6 +1907,40 @@ mod walking_checkbox_tests {
     use super::*;
 
     #[test]
+    fn allow_roaming_checkbox_changes_the_existing_preference_immediately_without_touching_fps() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<StartupRuntime>()
+            .init_resource::<PositionRuntime>()
+            .init_resource::<SettingsInputGate>()
+            .add_message::<AppExit>()
+            .add_message::<crate::character::RestoreDefaultCharacter>()
+            .add_message::<crate::animation_manager::OpenCharacterManager>()
+            .add_systems(Update, handle_settings_buttons);
+        let button = app
+            .world_mut()
+            .spawn((
+                Button,
+                Interaction::Pressed,
+                SettingsButtonAction::ToggleWalking,
+                BackgroundColor::default(),
+            ))
+            .id();
+        app.update();
+        assert!(app.world().resource::<NeraSettings>().walking_enabled);
+        app.update();
+        assert!(app.world().resource::<NeraSettings>().walking_enabled);
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::None;
+        app.update();
+        *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Pressed;
+        app.update();
+        let settings = app.world().resource::<NeraSettings>();
+        assert!(!settings.walking_enabled);
+        assert_eq!(settings.fps_limit, 24);
+        assert_eq!(settings.roaming_radius_px, 400);
+    }
+
+    #[test]
     fn throw_controls_refresh_and_reset_without_changing_gravity() {
         let mut app = App::new();
         app.init_resource::<NeraSettings>()

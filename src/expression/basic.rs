@@ -18,7 +18,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         "Floating.vrma" => (Face::Surprised, 0.7),
         "Falling_To_Landing.vrma" => (Face::Surprised, 0.5),
         "Hit_Chest.vrma" | "Angry_Gesture.vrma" => (Face::Angry, 0.9),
-        "ShakeHeadNo1.vrma" => (Face::Sad, 0.5),
+        "ShakeHeadNo1.vrma" => (Face::Joy, 1.0),
         "Death01.vrma" => (Face::Sad, 0.9),
         "Praying.vrma" => (Face::Timid, 0.4),
         "LookAround.vrma" => (Face::Surprised, 0.35),
@@ -37,7 +37,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
 pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Option<(Face, f32)> {
     use VisualState as Body;
     let file = match visual {
-        Body::HeadStroke => "Blush.vrma",
+        Body::HeadStroke => "ShakeHeadNo1.vrma",
         Body::HitChest => "Hit_Chest.vrma",
         Body::HitHead => "Hit_Head.vrma",
         Body::Death => "Death01.vrma",
@@ -111,6 +111,10 @@ mod tests {
     fn requested_pairs_and_unknown_clip_ownership() {
         assert_eq!(
             for_visual(VisualState::HeadStroke, None),
+            Some((Face::Joy, 1.0))
+        );
+        assert_eq!(
+            for_visual(VisualState::IdleMicro(IdleMicroAction::Blush), None),
             Some((Face::Embarrassed, 0.75))
         );
         assert_eq!(

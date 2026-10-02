@@ -95,6 +95,15 @@ fn character_directory() -> PathBuf {
         .join("characters")
 }
 
+/// Resolve only catalog-owned models and the built-in avatar for preview metadata.
+pub(crate) fn preview_model_file(asset_path: &str) -> Option<PathBuf> {
+    if asset_path == DEFAULT_CHARACTER {
+        Some(crate::nera_asset_file(asset_path))
+    } else {
+        saved_filename(asset_path).map(|name| character_directory().join(name))
+    }
+}
+
 /// Register before AssetPlugin, including in the Animation Manager worker.
 pub(crate) fn register_asset_source(app: &mut App) {
     let directory = character_directory();
@@ -168,8 +177,12 @@ fn receive_import(
     mut restore: MessageReader<RestoreDefaultCharacter>,
     mut runtime: ResMut<CharacterImport>,
     mut status: ResMut<CharacterImportStatus>,
+    release: Option<Res<library::release::ReleaseGuard>>,
     mut commands: Commands,
 ) {
+    if release.as_ref().is_some_and(|guard| guard.busy()) {
+        imports.clear();
+    }
     let selected = imports.read().last().map(|request| request.0.clone());
     let restore = restore.read().next().is_some();
     if selected.is_none() && !restore {

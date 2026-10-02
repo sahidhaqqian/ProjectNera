@@ -188,7 +188,9 @@ Dragging, hover/press, reactions, falling, alarm presentation, menu/Settings,
 an open Animation Manager, hidden state, and fullscreen pause stop autonomy.
 Fullscreen is sampled on the pet's monitor; it does not hide Nera or disable alarm
 scheduling. `Allow Roaming` defaults off and gates locomotion;
-existing idle variations remain available. `Stay Here` persists that switch off.
+existing idle variations remain available. Settings' `Allow Roaming` checkbox
+persists that same switch; Off retains the former Stay Here semantics. The radial
+menu has no separate roaming page or preference owner.
 Standing and seated gestures use separate pose-matched candidate sets, sharing
 the same controller, cooldown, and history. Sitting_2 and Sitting_4 are base
 positions, not periodic gestures: each new attachment chooses one loaded position
@@ -235,7 +237,9 @@ actually active library clip entity, never a pending selection. `AutomaticFace`
 crossfades the outgoing and incoming detailed recipes over 180 ms, replacing
 aggregate facial emotions but preserving natural blink. Gallery clips use the
 same table; unknown custom clips keep their own facial animation. Headpat loads
-Blush and selects Embarrassed at 75%. A manual preview takes precedence and
+`animations/animasi_basic/ShakeHeadNo1.vrma` and independently selects Joy at 100%.
+HeadPat SFX/sparkles are event driven; Blush remains an embarrassed idle clip.
+A manual preview takes precedence and
 survives gallery animation playback; only a release action or closing its owner
 ends it. Preview rigs cache their last selection and resend it only when that
 selection or the expression-entity map changes, including late initialization.
@@ -250,7 +254,7 @@ with each preview's render layer preserved.
 content-addressed in `%APPDATA%/io.github.sahidhaqqi.projectnera/characters`.
 `catalog.json` preserves display names; directory discovery recovers older models.
 Importing identical bytes adds no duplicate catalog entry. `character/roster.rs`
-defines validated AddSlot/Assign/Clear/Import commands and serializable slot/model
+defines validated AddSlot/Assign/Clear/Import/Remove commands and serializable slot/model
 snapshots. The owner starts with two slots and caps the roster at eight, including
 the primary avatar. Settings' fixed bottom navigation opens a temporary, separate
 Multi Character panel;
@@ -261,6 +265,48 @@ picker. Done/X emits SETTINGS rather than BACK, closes the worker window, and
 reopens Settings. Opening animations again restores the ordinary gallery surface.
 Metadata reports facial morph capacity; VRM0 migration repairs supported legacy
 names and missing named bindings without fabricating targets in baked meshes.
+
+Character-card work is paced at 15 FPS by the worker's existing Framepace plugin,
+not the desktop settings FPS owner. At most one character rig/camera is live.
+`animation_manager/thumbnails.rs` reads a bounded JSON/embedded-image range rather
+than loading the whole VRM for each card. It checks a versioned, source-stamped
+PNG cache first. A model without a usable thumbnail borrows the single live slot;
+after warmup, the camera remains alive through screenshot readback, then retires.
+The selected card resumes after missing thumbnails finish. A three-update release
+gap lets dropped handles propagate before loading another model. Stable path keys
+prevent index reuse after deletion; switching selection releases the old rig.
+Thumbnails are at most 256x320, GPU-only after upload. IO is bounded to one read and
+two small writes. There is no idle filesystem polling. PNG/JPEG decoding uses the
+existing `image` dependency with explicit dimensions/allocation limits. No codecs,
+Bevy features, or new transitive packages are introduced.
+Offscreen cards and hidden/minimized windows release owned preview state; closing
+the utility exits its process. Animation/expression preview pooling is unchanged.
+AssetServer paths remain shared; no global asset purge touches desktop/shared data.
+Only small derived PNG files persist under LocalAppData `thumbnails-v1`; removing a
+registry entry invalidates that model's cache. Source VRMs are never rewritten.
+Renderer allocations and a selected full-quality large model can still dominate RAM.
+See `MULTI_CHARACTER_MEMORY_AUDIT.md` for measured limits and opt-in instrumentation.
+
+`character/library/removal.rs` owns one pending removal. It accepts only registered
+owned imports, rejects concurrent imports, asks the existing replacement pipeline
+to restore default if needed, and closes companions using the model. Deletion waits
+for replacement/reveal and companion exit, with a bounded timeout that retains the
+model on failure. The owned copy is staged outside `.vrm` discovery before an atomic
+catalog save; save failure rolls back the registry and copy. Original source paths
+are never deleted, default Nera is protected, and reimport restores the same content
+address. The card's remove button is a sibling of selection, with confirmation.
+Title drag accepts a changed UI Pressed state while the mouse remains held, instead
+of requiring `just_pressed` in the same frame; passive labels do not capture it.
+
+Companion removal uses `character/library/release.rs` and a generation-tagged
+stdin/stdout handshake. Each companion checks its own committed model after pending
+loads settle, because its Settings can change models independently of the parent.
+Copies actually using the removed model clear their saved reference and exit;
+unrelated copies acknowledge their real model and stay alive. Their imports and
+selections are temporarily gated until RELEASE_DONE. The owner waits for these
+acknowledgements or process exit, updates stale slot metadata, and ignores old
+generation replies. A 16-message bounded channel and one blocking pipe reader per
+companion replace filesystem polling; all readers end when their pipe closes.
 
 Spawn launches the current executable with `--character-instance <session-id>`
 and a validated asset path. Each process keeps the existing single-avatar ECS

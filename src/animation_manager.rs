@@ -5,9 +5,12 @@ mod characters;
 mod combine;
 #[cfg(test)]
 mod combine_loader_tests;
+#[cfg(debug_assertions)]
+mod memory_audit;
 mod preview;
 pub(crate) mod process;
 mod registry;
+mod thumbnails;
 mod ui;
 
 use std::{
@@ -114,6 +117,7 @@ enum TextFocus {
 enum Dialog {
     Rename(String),
     Delete(String),
+    RemoveCharacter(String),
     Combine,
 }
 
@@ -138,6 +142,8 @@ enum ManagerAction {
     ClearCharacter(usize),
     AddCharacterSlot,
     ImportCharacter,
+    RemoveCharacter(String),
+    ConfirmRemoveCharacter,
     Expression(crate::expression::NeraExpressionPreset),
     Intensity(u8),
     Search,
@@ -301,7 +307,8 @@ impl Plugin for AnimationManagerPlugin {
             .add_systems(
                 PostUpdate,
                 preview::frame_expression_heads.after(bevy::transform::TransformSystems::Propagate),
-            );
+            )
+            .add_systems(Last, preview::retire_model_previews);
     }
 }
 
@@ -633,6 +640,30 @@ fn handle_actions(
             }
             ManagerAction::ClearCharacter(slot) => {
                 roster.write(crate::character::roster::RosterRequest::Clear { slot: *slot });
+            }
+            ManagerAction::RemoveCharacter(path) => {
+                if state
+                    .characters
+                    .models
+                    .iter()
+                    .any(|model| model.path == *path && model.removable())
+                {
+                    state.dialog = Some(Dialog::RemoveCharacter(path.clone()));
+                    state.focus = TextFocus::None;
+                    state.dirty = true;
+                }
+            }
+            ManagerAction::ConfirmRemoveCharacter => {
+                if let Some(Dialog::RemoveCharacter(path)) = state.dialog.take()
+                    && state
+                        .characters
+                        .models
+                        .iter()
+                        .any(|model| model.path == path && model.removable())
+                {
+                    roster.write(crate::character::roster::RosterRequest::Remove { path });
+                }
+                state.dirty = true;
             }
             ManagerAction::AddCharacterSlot => {
                 roster.write(crate::character::roster::RosterRequest::AddSlot);
@@ -1033,7 +1064,7 @@ fn drag_window(
     regions: Query<&Interaction, (Changed<Interaction>, With<ManagerDragRegion>)>,
     mut windows: Query<&mut Window, With<ManagerWindow>>,
 ) {
-    if !mouse.just_pressed(MouseButton::Left)
+    if !mouse.pressed(MouseButton::Left)
         || !regions
             .iter()
             .any(|interaction| *interaction == Interaction::Pressed)
@@ -1113,6 +1144,112 @@ fn cleanup_closed_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_drag_accepts_delayed_ui_press_but_does_not_repeat_or_drag_after_release() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(Update, drag_window);
+        let window = app
+            .world_mut()
+            .spawn((ManagerWindow, Window::default()))
+            .id();
+        let region = app
+            .world_mut()
+            .spawn((ManagerDragRegion, Interaction::None))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        *app.world_mut().get_mut::<Interaction>(region).unwrap() = Interaction::Pressed;
+        app.update();
+        assert!(
+            app.world_mut()
+                .get_mut::<Window>(window)
+                .unwrap()
+                .internal
+                .take_move_request()
+        );
+        app.update();
+        assert!(
+            !app.world_mut()
+                .get_mut::<Window>(window)
+                .unwrap()
+                .internal
+                .take_move_request()
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        *app.world_mut().get_mut::<Interaction>(region).unwrap() = Interaction::None;
+        app.update();
+        *app.world_mut().get_mut::<Interaction>(region).unwrap() = Interaction::Pressed;
+        app.update();
+        assert!(
+            !app.world_mut()
+                .get_mut::<Window>(window)
+                .unwrap()
+                .internal
+                .take_move_request()
+        );
+    }
+
+    #[test]
+    fn imported_character_remove_requires_confirmation_and_cannot_remove_default() {
+        use crate::character::{DEFAULT_CHARACTER, library::CharacterEntry, roster::RosterRequest};
+        let mut app = action_test_app();
+        let path = "characters://model-confirm-test.vrm";
+        app.world_mut()
+            .resource_mut::<ManagerState>()
+            .characters
+            .models
+            .push(CharacterEntry {
+                path: path.into(),
+                name: "Test".into(),
+                facial_targets: 0,
+            });
+        let button = app
+            .world_mut()
+            .spawn((
+                Interaction::Pressed,
+                ManagerAction::RemoveCharacter(path.into()),
+                BackgroundColor::default(),
+            ))
+            .id();
+        app.update();
+        assert!(matches!(&app.world().resource::<ManagerState>().dialog,
+            Some(Dialog::RemoveCharacter(value)) if value == path));
+        assert!(app.world().resource::<Messages<RosterRequest>>().is_empty());
+        app.world_mut().entity_mut(button).despawn();
+        let confirm = app
+            .world_mut()
+            .spawn((
+                Interaction::Pressed,
+                ManagerAction::ConfirmRemoveCharacter,
+                BackgroundColor::default(),
+            ))
+            .id();
+        app.update();
+        let requests: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<RosterRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(requests, vec![RosterRequest::Remove { path: path.into() }]);
+        app.world_mut().entity_mut(confirm).despawn();
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            ManagerAction::RemoveCharacter(DEFAULT_CHARACTER.into()),
+            BackgroundColor::default(),
+        ));
+        app.update();
+        assert!(app.world().resource::<ManagerState>().dialog.is_none());
+        assert!(app.world().resource::<Messages<RosterRequest>>().is_empty());
+    }
 
     fn action_test_app() -> App {
         let mut app = App::new();

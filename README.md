@@ -87,7 +87,11 @@ The application uses Bevy resources, components, messages, and systems for behav
 
 - Import VRM 0.x or 1.0 characters into a persistent local library. **Multi Character**
   in Settings' sticky bottom navigation opens a temporary, separate panel with slots
-  and live model previews. Select a slot,
+  and model previews capped at **15 FPS**. The selected model stays live; other
+  cards use cached static thumbnails, with at most **one live rig**. Embedded VRM
+  thumbnails avoid loading the model; missing thumbnails briefly borrow that
+  single slot and are cached on disk for future visits.
+  Main Nera's 24/30 FPS policy is unchanged. Select a slot,
   then a model to use it. Character 1 starts Used and Character 2 starts Not Used.
   **Add More Character** adds slots up to eight total, including the main avatar.
   The same model can be assigned to multiple slots.
@@ -98,6 +102,14 @@ The application uses Bevy resources, components, messages, and systems for behav
   Character 1 hides the main pet while the owner and remaining slots stay alive.
   Closing the main Nera process closes its companions and their gallery workers.
   Active companions are session-only; the model library persists across launches.
+- Imported model cards have a separate **X** removal control with confirmation.
+  Removal switches the main avatar to default first, closes copies using that
+  model, and updates the library. Only the owned AppData import copy is removed;
+  the original VRM is preserved and can be imported again. Default Nera cannot
+  be removed. Hidden/minimized previews release their rigs and render targets;
+  closing the manager also terminates its isolated renderer worker.
+  The [manager memory audit](MULTI_CHARACTER_MEMORY_AUDIT.md) documents measurements,
+  cache ownership, and the remaining cost of selecting a large full-quality VRM.
 - Each companion runs a renderer, so practical capacity depends on available RAM
   and GPU memory. The main window owns additions; companions can change their
   own model and settings without spawning nested groups.
@@ -122,9 +134,11 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.
 - Facial expression crossfades derived from the resolved body-animation state.
 - All 25 basic clips have facial intent, shared by gallery previews and desktop
-  playback. Headpat now plays **Blush + Embarrassed 75%**, Angry Gesture uses
+  playback. Headpat plays **ShakeHeadNo1 + Joy 100%**, Angry Gesture uses
   **Angry 90%**, Sleepy uses **Exhausted 60%**, and LookAround uses **Surprised 35%**.
   Expressions fade over 180 ms and return to the active base pose afterward.
+  HeadPat SFX and sparkles remain independent of the body clip; Blush is still
+  available for embarrassed idle reactions, not the dedicated headpat animation.
 - Animation Manager **Expressions** shows eight live head-only previews of the
   current character, with selectable intensity. Nera uses independent eyebrow,
   eyelid, and mouth morphs for Default, Joy, Sad, Angry, Embarrassed, Timid,
@@ -149,8 +163,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 
 - Native Windows radial action menu opened by right-clicking Nera.
 - The menu's Praying pose runs only while standing; opening it while seated keeps Nera seated.
-- Animation Manager gallery, quick alarms, custom alarm editor, Settings, and a
-  Roaming submenu with **Allow Roaming** and **Stay Here**.
+- Animation Manager gallery, quick alarms, custom alarm editor, Cloud, and Settings.
+  Roaming is controlled only by the persistent **Allow Roaming** checkbox in Settings.
 - Animation Manager with live per-card VRM previews, search, persistent bookmarks, and physical VRMA import/rename/delete.
 - Protected basic animations retain previews and hide their card action menus.
 - Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
@@ -189,7 +203,7 @@ Nera can walk on a supported desktop/taskbar floor or a visible window top where
 she is already standing. Window-top movement updates the standing support offset;
 it does not walk while seated or jump between windows. Dragging, hovering, falls,
 alarms, selected animations, menu/Settings, and an open Animation Manager interrupt
-autonomy. **Stay Here** turns roaming off while keeping Nera's interactions and
+autonomy. **Allow Roaming: Off** replaces Stay Here and keeps Nera's interactions and
 idle behavior available. Fullscreen pause keeps autonomy idle on the pet's monitor
 without disabling alarms or hiding Nera. Support and monitor changes are
 revalidated before another journey.
