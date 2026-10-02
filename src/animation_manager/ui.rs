@@ -120,13 +120,7 @@ pub(super) const BUTTON: Color = Color::srgb(0.095, 0.12, 0.21);
 pub(super) fn button_color(action: &ManagerAction, state: &ManagerState) -> Color {
     match action {
         ManagerAction::AssignCharacter(path) => {
-            if state
-                .characters
-                .slots
-                .get(state.character_slot)
-                .and_then(|slot| slot.path.as_ref())
-                == Some(path)
-            {
+            if state.selected_character == *path {
                 BLUE
             } else {
                 CARD

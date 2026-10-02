@@ -5,12 +5,14 @@ mod characters;
 mod combine;
 #[cfg(test)]
 mod combine_loader_tests;
+mod generation;
+mod idle_cache;
 #[cfg(debug_assertions)]
 mod memory_audit;
 mod preview;
 pub(crate) mod process;
 mod registry;
-mod thumbnails;
+pub(crate) mod thumbnails;
 mod ui;
 
 use std::{
@@ -139,6 +141,7 @@ enum ManagerAction {
     Expressions,
     CharacterSlot(usize),
     AssignCharacter(String),
+    UseCharacter,
     ClearCharacter(usize),
     AddCharacterSlot,
     ImportCharacter,
@@ -171,6 +174,7 @@ enum ManagerAction {
 struct ManagerState {
     characters: crate::character::roster::CharacterRoster,
     character_slot: usize,
+    selected_character: String,
     character_scroll_y: f32,
     character_path: String,
     registry: AnimationRegistry,
@@ -207,11 +211,20 @@ impl ManagerState {
         Self {
             characters: Default::default(),
             character_slot: 0,
+            selected_character: crate::character::DEFAULT_CHARACTER.into(),
             character_scroll_y: 0.0,
             character_path: std::env::var("NERA_GALLERY_CHARACTER")
                 .unwrap_or_else(|_| crate::character::DEFAULT_CHARACTER.into()),
             registry,
-            tab: GalleryTab::All,
+            tab: if std::env::var_os("NERA_GALLERY_CHARACTERS").is_some()
+                || std::env::args().any(|arg| {
+                    matches!(arg.as_str(), "--roster-smoke" | "--manager-memory-audit")
+                        || arg.starts_with("--generate-character-preview=")
+                }) {
+                GalleryTab::Characters
+            } else {
+                GalleryTab::All
+            },
             expression: crate::expression::NeraExpressionPreset::Default,
             intensity: 100,
             search: String::new(),
@@ -630,12 +643,24 @@ fn handle_actions(
         match action {
             ManagerAction::CharacterSlot(slot) => {
                 state.character_slot = *slot;
+                if let Some(path) = state
+                    .characters
+                    .slots
+                    .get(*slot)
+                    .and_then(|slot| slot.path.clone())
+                {
+                    state.selected_character = path;
+                }
                 state.dirty = true;
             }
             ManagerAction::AssignCharacter(path) => {
+                state.selected_character = path.clone();
+                state.dirty = true;
+            }
+            ManagerAction::UseCharacter => {
                 roster.write(crate::character::roster::RosterRequest::Assign {
                     slot: state.character_slot,
-                    path: path.clone(),
+                    path: state.selected_character.clone(),
                 });
             }
             ManagerAction::ClearCharacter(slot) => {
@@ -1211,6 +1236,7 @@ mod tests {
                 path: path.into(),
                 name: "Test".into(),
                 facial_targets: 0,
+                ..default()
             });
         let button = app
             .world_mut()
@@ -1262,6 +1288,46 @@ mod tests {
             .add_message::<crate::character::roster::RosterRequest>()
             .add_systems(Update, handle_actions);
         app
+    }
+
+    #[test]
+    fn card_selection_only_applies_after_explicit_use() {
+        use crate::character::roster::RosterRequest;
+        let mut app = action_test_app();
+        let path = crate::character::DEFAULT_CHARACTER;
+        let button = app
+            .world_mut()
+            .spawn((
+                Interaction::Pressed,
+                ManagerAction::AssignCharacter(path.into()),
+                BackgroundColor::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<ManagerState>().selected_character,
+            path
+        );
+        assert!(app.world().resource::<Messages<RosterRequest>>().is_empty());
+        app.world_mut().despawn(button);
+        app.world_mut().spawn((
+            Interaction::Pressed,
+            ManagerAction::UseCharacter,
+            BackgroundColor::default(),
+        ));
+        app.update();
+        let requests: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<RosterRequest>>()
+            .drain()
+            .collect();
+        assert_eq!(
+            requests,
+            vec![RosterRequest::Assign {
+                slot: 0,
+                path: path.into()
+            }]
+        );
     }
 
     #[test]

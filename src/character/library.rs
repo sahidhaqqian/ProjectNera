@@ -1,4 +1,6 @@
 //! Persistent model catalog and independently controlled desktop companions.
+mod import;
+mod previews;
 pub(crate) mod release;
 mod removal;
 use super::roster::{CharacterRoster, MAX_CHARACTERS, RosterRequest, SlotView};
@@ -16,12 +18,18 @@ use std::{
     sync::{Mutex, mpsc},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CharacterEntry {
     pub(crate) path: String,
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) facial_targets: usize,
+    #[serde(default)]
+    pub(crate) fingerprint: String,
+    #[serde(default)]
+    pub(crate) stored_fingerprint: String,
+    #[serde(default)]
+    pub(crate) source_path: Option<String>,
 }
 
 impl CharacterEntry {
@@ -39,8 +47,13 @@ impl Default for CharacterCatalog {
             path: DEFAULT_CHARACTER.into(),
             name: "Nera".into(),
             facial_targets: 44,
+            stored_fingerprint: super::preview_model_file(DEFAULT_CHARACTER)
+                .and_then(|path| import::fingerprint(&path).ok())
+                .unwrap_or_default(),
+            ..default()
         }]);
         let directory = character_directory();
+        let mut needs_migration = false;
         if let Ok(bytes) = std::fs::read(directory.join("catalog.json"))
             && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
             && let Some(entries) = value.as_array()
@@ -50,15 +63,30 @@ impl Default for CharacterCatalog {
                     && saved_filename(path).is_some_and(|file| directory.join(file).is_file())
                 {
                     catalog.insert(path, name);
+                    needs_migration |= entry["stored_fingerprint"]
+                        .as_str()
+                        .is_none_or(str::is_empty);
+                    if let Some(model) = catalog.0.iter_mut().find(|model| model.path == path) {
+                        model.fingerprint =
+                            entry["fingerprint"].as_str().unwrap_or_default().into();
+                        if let Some(hash) = entry["stored_fingerprint"]
+                            .as_str()
+                            .filter(|hash| !hash.is_empty())
+                        {
+                            model.stored_fingerprint = hash.into();
+                        }
+                        model.source_path = entry["source_path"].as_str().map(str::to_owned);
+                    }
                 }
             }
         }
         // Recover models imported before the catalog existed, or after a failed catalog save.
-        if let Ok(entries) = std::fs::read_dir(directory) {
+        if let Ok(entries) = std::fs::read_dir(&directory) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let path = format!("characters://{name}");
                 if saved_filename(&path).is_some() && entry.path().is_file() {
+                    needs_migration |= !catalog.0.iter().any(|entry| entry.path == path);
                     let (label, _) = model_metadata(&entry.path());
                     let label = label
                         .filter(|label| label != "Unknown")
@@ -66,6 +94,15 @@ impl Default for CharacterCatalog {
                     catalog.insert(&path, &label);
                 }
             }
+        }
+        // Populate legacy copied-content identities without changing entries/model files.
+        if needs_migration
+            && !cfg!(test)
+            && directory.is_dir()
+            && !std::env::args().any(|arg| arg == "--animation-manager-worker")
+            && let Err(error) = catalog.persist(&directory)
+        {
+            warn!("Character fingerprint migration: {error}");
         }
         catalog
     }
@@ -89,6 +126,10 @@ impl CharacterCatalog {
                 path: path.into(),
                 name: name.chars().take(48).collect(),
                 facial_targets: metadata.map_or(44, |(_, targets)| targets),
+                stored_fingerprint: super::preview_model_file(path)
+                    .and_then(|path| import::fingerprint(&path).ok())
+                    .unwrap_or_default(),
+                ..default()
             });
         }
     }
@@ -99,12 +140,7 @@ impl CharacterCatalog {
     }
 
     fn persist(&self, directory: &std::path::Path) -> Result<(), String> {
-        let value: Vec<_> = self
-            .0
-            .iter()
-            .skip(1)
-            .map(|entry| serde_json::json!({ "path": entry.path, "name": entry.name }))
-            .collect();
+        let value: Vec<_> = self.0.iter().skip(1).collect();
         std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
         let temporary = directory.join(format!("catalog-{}.tmp", std::process::id()));
         std::fs::write(
@@ -189,6 +225,8 @@ impl CharacterInstances {
             slots,
             can_add: self.slots.len() < MAX_CHARACTERS && instance_id().is_none(),
             status: status.into(),
+            selection_notice: Default::default(),
+            thumbnail_revision: 0,
         }
     }
     #[cfg(debug_assertions)]
@@ -213,7 +251,7 @@ struct LibraryImport(
     Option<(
         usize,
         String,
-        Task<Result<super::ImportedCharacter, String>>,
+        Task<Result<import::RegisteredImport, String>>,
     )>,
 );
 
@@ -323,6 +361,7 @@ fn decode_owner_command(line: &str) -> Option<OwnerCommand> {
 }
 
 pub(super) fn install(app: &mut App) {
+    previews::install(app);
     app.init_resource::<CharacterCatalog>()
         .init_resource::<CharacterInstances>()
         .init_resource::<LibraryImport>()
@@ -444,7 +483,7 @@ fn poll_library_import(
     mut job: ResMut<LibraryImport>,
     mut catalog: ResMut<CharacterCatalog>,
     mut status: ResMut<super::CharacterImportStatus>,
-    mut requests: MessageWriter<RosterRequest>,
+    mut previews: Option<ResMut<previews::PreviewJobs>>,
 ) {
     let Some((_, _, task)) = job.0.as_mut() else {
         return;
@@ -452,17 +491,36 @@ fn poll_library_import(
     let Some(result) = bevy::tasks::block_on(poll_once(task)) else {
         return;
     };
-    let (slot, name, _) = job.0.take().unwrap();
+    let (_, name, _) = job.0.take().unwrap();
     status.loading = false;
     match result {
         Ok(imported) => {
-            if let Err(error) = catalog.remember(&imported.path, &name) {
+            if let Some(previews) = previews.as_mut() {
+                previews.forget(&imported.path);
+            }
+            catalog.insert(&imported.path, &name);
+            if let Some(entry) = catalog
+                .0
+                .iter_mut()
+                .find(|entry| entry.path == imported.path)
+            {
+                if !imported.duplicate || entry.fingerprint.is_empty() {
+                    entry.fingerprint = imported.fingerprint;
+                    entry.stored_fingerprint = imported.stored_fingerprint;
+                    entry.source_path = Some(imported.source_path);
+                }
+            }
+            if let Err(error) = catalog.persist(&character_directory()) {
                 warn!("Catalog save: {error}");
             }
-            requests.write(RosterRequest::Assign {
-                slot,
-                path: imported.path,
-            });
+            status.selection_notice.0 = status.selection_notice.0.wrapping_add(1);
+            status.selection_notice.1 = imported.path;
+            status.message = if imported.duplicate {
+                "Character already imported"
+            } else {
+                "Character imported"
+            }
+            .into();
         }
         Err(error) => status.message = error,
     }
@@ -565,11 +623,15 @@ fn handle_requests(
                     .to_string_lossy()
                     .into_owned();
                 let source = path.clone();
+                let entries = catalog.0.clone();
                 job.0 = Some((
                     *slot,
                     name,
-                    IoTaskPool::get()
-                        .spawn(async move { super::import_model(&source, &character_directory()) }),
+                    IoTaskPool::get().spawn(async move {
+                        let imported =
+                            import::import_registered(&source, &character_directory(), &entries)?;
+                        Ok(imported)
+                    }),
                 ));
                 status.message = "Importing character...".into();
                 status.loading = true;
@@ -691,6 +753,33 @@ fn handle_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_registry_entries_accept_missing_fingerprints_and_new_hashes_persist() {
+        let mut entry: CharacterEntry =
+            serde_json::from_str(r#"{"path":"characters://model-legacy.vrm","name":"Legacy"}"#)
+                .unwrap();
+        assert!(entry.fingerprint.is_empty());
+        assert!(entry.stored_fingerprint.is_empty());
+        assert!(entry.source_path.is_none());
+        entry.stored_fingerprint = blake3::hash(b"stored bytes").to_hex().to_string();
+        let directory =
+            std::env::temp_dir().join(format!("nera-hash-catalog-{}", std::process::id()));
+        let catalog = CharacterCatalog(vec![
+            CharacterEntry {
+                path: DEFAULT_CHARACTER.into(),
+                ..default()
+            },
+            entry.clone(),
+        ]);
+        catalog.persist(&directory).unwrap();
+        let loaded: Vec<CharacterEntry> =
+            serde_json::from_slice(&std::fs::read(directory.join("catalog.json")).unwrap())
+                .unwrap();
+        assert_eq!(loaded, vec![entry]);
+        std::fs::remove_file(directory.join("catalog.json")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
     #[test]
     fn owner_removal_protocol_round_trips_generations_and_rejects_builtin_or_external_removal() {
         let path = "characters://model-protocol.vrm";
@@ -735,6 +824,7 @@ mod tests {
                 path: DEFAULT_CHARACTER.into(),
                 name: "Nera".into(),
                 facial_targets: 44,
+                ..default()
             }]))
             .init_resource::<super::super::CharacterImportStatus>()
             .add_message::<CharacterLibraryRequest>()
@@ -775,6 +865,7 @@ mod tests {
             path: DEFAULT_CHARACTER.into(),
             name: "Nera".into(),
             facial_targets: 44,
+            ..default()
         }]);
         catalog.insert("characters://model-abc.vrm", "Alice");
         catalog.insert("characters://model-abc.vrm", "Alice again");

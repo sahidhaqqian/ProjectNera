@@ -9,6 +9,8 @@ use bevy::{
 
 use crate::platform::{self, NativeWindowHandle};
 
+pub(crate) mod font_cache;
+
 #[derive(Component)]
 #[require(CursorIcon)]
 pub(crate) struct UtilityWindow {
@@ -45,8 +47,10 @@ pub(crate) struct UtilityWindowPlugin;
 
 impl Plugin for UtilityWindowPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(First, acquire_native_handles)
-            .add_systems(Update, (handle_window_controls, resize_windows).chain());
+        app.init_resource::<font_cache::UtilityFontCache>()
+            .add_systems(First, acquire_native_handles)
+            .add_systems(Update, (handle_window_controls, resize_windows).chain())
+            .add_systems(Last, font_cache::release);
     }
 }
 

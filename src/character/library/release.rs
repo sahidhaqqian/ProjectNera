@@ -120,12 +120,14 @@ mod tests {
             .insert_resource(CharacterImportStatus {
                 loading: true,
                 message: String::new(),
+                ..default()
             })
             .init_resource::<LibraryImport>()
             .insert_resource(CharacterCatalog(vec![CharacterEntry {
                 path: path.into(),
                 name: "Test".into(),
                 facial_targets: 0,
+                ..default()
             }]))
             .add_message::<AppExit>()
             .add_systems(Update, finish_release);

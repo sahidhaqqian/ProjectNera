@@ -30,6 +30,7 @@ pub(super) fn request_remove(
     active: Res<ActiveCharacter>,
     settings: Res<NeraSettings>,
     job: Res<LibraryImport>,
+    previews: Option<Res<super::previews::PreviewJobs>>,
     time: Res<Time<Real>>,
     mut instances: ResMut<CharacterInstances>,
     mut restore: MessageWriter<RestoreDefaultCharacter>,
@@ -42,7 +43,11 @@ pub(super) fn request_remove(
         if !request.valid() || !catalog.0.iter().any(|entry| entry.path == *path) {
             continue;
         }
-        if pending.busy() || job.0.is_some() || status.loading {
+        if pending.busy()
+            || job.0.is_some()
+            || status.loading
+            || previews.as_ref().is_some_and(|jobs| jobs.busy_for(path))
+        {
             status.message = "Wait for the current character operation to finish.".into();
             continue;
         }
@@ -85,6 +90,7 @@ pub(super) fn finish_remove(
     time: Res<Time<Real>>,
     mut catalog: ResMut<CharacterCatalog>,
     mut status: ResMut<CharacterImportStatus>,
+    mut previews: Option<ResMut<super::previews::PreviewJobs>>,
 ) {
     let Some(removal) = pending.0.as_mut() else {
         return;
@@ -140,7 +146,13 @@ pub(super) fn finish_remove(
         return;
     }
     status.message = match remove_owned(&mut catalog, &removal.directory, &removal.path) {
-        Ok(()) => "Character removed. Import the original VRM to add it again.".into(),
+        Ok(()) => {
+            if let Some(previews) = previews.as_mut() {
+                previews.forget(&removal.path);
+            }
+            crate::animation_manager::thumbnails::remove_cached_model(&removal.path);
+            "Character removed. Import the original VRM to add it again.".into()
+        }
         Err(reason) => format!("Could not remove character: {reason}"),
     };
     release::resume(&mut instances, &removal.path, removal.token);
@@ -210,6 +222,7 @@ mod tests {
         .insert_resource(CharacterImportStatus {
             loading: true,
             message: String::new(),
+            ..default()
         })
         .init_resource::<CharacterInstances>()
         .init_resource::<Time<Real>>()
@@ -218,11 +231,13 @@ mod tests {
                 path: DEFAULT_CHARACTER.into(),
                 name: "Nera".into(),
                 facial_targets: 44,
+                ..default()
             },
             CharacterEntry {
                 path: path.into(),
                 name: "Test".into(),
                 facial_targets: 0,
+                ..default()
             },
         ]))
         .add_systems(Update, finish_remove);
@@ -268,11 +283,13 @@ mod tests {
                 path: DEFAULT_CHARACTER.into(),
                 name: "Nera".into(),
                 facial_targets: 44,
+                ..default()
             },
             CharacterEntry {
                 path: path.into(),
                 name: "Test".into(),
                 facial_targets: 0,
+                ..default()
             },
         ]);
         assert!(remove_owned(&mut catalog, &root, path).is_err());
@@ -296,11 +313,13 @@ mod tests {
                 path: DEFAULT_CHARACTER.into(),
                 name: "Nera".into(),
                 facial_targets: 44,
+                ..default()
             },
             CharacterEntry {
                 path: imported.path.clone(),
                 name: "Test".into(),
                 facial_targets: 44,
+                ..default()
             },
         ]);
         catalog.persist(&owned).unwrap();
@@ -341,6 +360,7 @@ mod tests {
                 path: path.into(),
                 name: "Test".into(),
                 facial_targets: 0,
+                ..default()
             }]))
             .add_message::<RosterRequest>()
             .add_message::<RestoreDefaultCharacter>()

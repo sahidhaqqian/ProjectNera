@@ -7,6 +7,9 @@
 //! - FPS cap via WinitSettings
 //! - synchronous settings save before Exit
 
+mod memory;
+#[cfg(all(debug_assertions, target_os = "windows"))]
+mod memory_audit;
 mod model;
 mod runtime;
 mod shadow;
@@ -35,12 +38,17 @@ pub(crate) struct NeraSettingsPlugin;
 
 impl Plugin for NeraSettingsPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(all(debug_assertions, target_os = "windows"))]
+        if std::env::args().any(|arg| arg == "--settings-memory-audit") {
+            memory_audit::install(app);
+        }
         // Keep the frame-pacing plugin next to the FPS system that depends on
         // FramepaceSettings. This guarantees the resource exists before
         // apply_fps_limit is initialized/run.
         app.add_plugins(bevy_framepace::FramepacePlugin)
             .add_plugins(shadow::NeraShadowPlugin)
             .init_resource::<SettingsInputGate>()
+            .init_resource::<memory::SettingsFontCache>()
             .init_resource::<StartupRuntime>()
             .init_resource::<AppliedRuntimeSettings>()
             .init_resource::<PositionRuntime>()
@@ -56,7 +64,7 @@ impl Plugin for NeraSettingsPlugin {
                         .before(crate::startup_entrance::prepare_startup_entrance),
                     record_primary_window_position,
                     flush_position_save,
-                    open_settings_window,
+                    (memory::begin, open_settings_window).chain(),
                     (handle_settings_buttons, import_character_from_settings).chain(),
                     handle_roaming_radius_slider,
                     handle_throw_intensity_slider,

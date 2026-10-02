@@ -87,14 +87,21 @@ The application uses Bevy resources, components, messages, and systems for behav
 
 - Import VRM 0.x or 1.0 characters into a persistent local library. **Multi Character**
   in Settings' sticky bottom navigation opens a temporary, separate panel with slots
-  and model previews capped at **15 FPS**. The selected model stays live; other
-  cards use cached static thumbnails, with at most **one live rig**. Embedded VRM
-  thumbnails avoid loading the model; missing thumbnails briefly borrow that
-  single slot and are cached on disk for future visits.
+  and cached animated idle cards, with **zero live VRM rigs while browsing**.
+  A serial background worker records whole idle cycles covering at least 30 seconds
+  per model (about 39.67 seconds / 318 frames for the supplied idle), then exits.
+  Cards loop 256x320 compressed JPEG frames at **8 FPS**; only visible cards decode,
+  keeping the current/next frame rather than a long uncompressed atlas in memory.
+  Legacy static/short previews remain available while their caches are upgraded.
+  The manager UI remains capped at **15 FPS**.
   Main Nera's 24/30 FPS policy is unchanged. Select a slot,
-  then a model to use it. Character 1 starts Used and Character 2 starts Not Used.
+  then a model, then **Use Character** to apply it. Import never applies automatically.
+  Character 1 starts Used and Character 2 starts Not Used.
   **Add More Character** adds slots up to eight total, including the main avatar.
   The same model can be assigned to multiple slots.
+- Identical VRMs, including renamed copies, reuse and highlight their existing entry
+  with **Character already imported**. Streamed BLAKE3 fingerprints are persisted;
+  older libraries gain stored-content identities without rewriting source files.
 - The character panel is hidden until opened from Settings. **Done** or the panel's
   close control closes it and returns to Settings; it is not an animation tab.
 - Each additional character has its own window, animation, physics, gaze, settings,
@@ -106,10 +113,11 @@ The application uses Bevy resources, components, messages, and systems for behav
   Removal switches the main avatar to default first, closes copies using that
   model, and updates the library. Only the owned AppData import copy is removed;
   the original VRM is preserved and can be imported again. Default Nera cannot
-  be removed. Hidden/minimized previews release their rigs and render targets;
+  be removed. Hidden/minimized panels release their cached card textures;
   closing the manager also terminates its isolated renderer worker.
   The [manager memory audit](MULTI_CHARACTER_MEMORY_AUDIT.md) documents measurements,
-  cache ownership, and the remaining cost of selecting a large full-quality VRM.
+  cache ownership, and the remaining renderer baseline. Full VRMs are loaded only
+  when applied to a desktop character, not when a gallery card is selected.
 - Each companion runs a renderer, so practical capacity depends on available RAM
   and GPU memory. The main window owns additions; companions can change their
   own model and settings without spawning nested groups.
@@ -170,6 +178,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
 - Persistent one-time and weekly alarms, with enable/disable, edit, and delete controls for up to 12 entries.
 - Alarm attention mode with a reframed upper-body presentation, looping sound, intro/loop animation, dismiss, and five-minute snooze.
+- Alarm portrait framing includes hair/headwear and animated forward depth so
+  JumpHappy does not cut off the top of Nera's head. Normal desktop framing is unchanged.
 - Choose **Classic**, **Gentle**, **Chime**, **Digital**, or **Siren** in the alarm
   editor and play a preview before saving. Quick alarms have a separate default
   sound selector. Snoozing and queued reminders preserve their selected sound.
@@ -188,6 +198,13 @@ The application uses Bevy resources, components, messages, and systems for behav
   - reset defaults, return to the action menu, exit, and application information.
 - System tray commands for Show, Hide, Reset Position, Always On Top, and Exit.
 - Saved settings, position recovery, deferred persistence during editing, and synchronous save on controlled exit paths.
+- Settings and alarm utility windows share scoped glyph-cache cleanup after the
+  last owned window/camera/UI tree disappears. Their UI cameras do not allocate
+  4x MSAA targets; the main pet renderer/FPS policy is unchanged. Closing the
+  alarm editor also stops its sound preview, without stopping a ringing alarm.
+  See the [Settings memory audit](SETTINGS_MEMORY_AUDIT.md) and
+  [alarm memory audit](ALARM_MEMORY_AUDIT.md) for measured retention and remaining
+  shared-renderer cache costs.
 
 The radial menu currently shows **Games** as a disabled placeholder.
 It is not an implemented feature. The former disabled Chat slot now opens Cloud.
@@ -467,10 +484,10 @@ and its manager process are excluded from support/fullscreen detection, and ligh
 settings affect only the desktop key light.
 
 Validation: `cargo check --all-targets --offline` and the debug build pass;
-`cargo fmt --all -- --check` passes; `cargo test --offline` reports
-**320 passed, 0 failed, 6 ignored**, including 19 Cloud/SFX/FX milestone tests
+`cargo fmt --all -- --check` passes; `cargo test --quiet -- --test-threads=1` reports
+**354 passed, 0 failed, 6 ignored**, including 19 Cloud/SFX/FX milestone tests
 and eleven sleeping-loop/pose regressions.
-Bounded native smoke runs verify live face/model previews at desktop and compact
+Bounded native smoke runs verify live face previews/cached character cards at desktop and compact
 sizes, initialized companions and selective close, procedural limb reactions,
 alarm sound save, throw checkbox/slider controls, throw/landing, gravity-OFF coasting, and legacy Death01 shadow
 contact. The Cloud native smoke also verifies resting/riding ownership, stable
@@ -480,6 +497,10 @@ VRM 0.x replacement, Attention cleanup, and particle expiry. The debug executabl
 is `target/debug/nera.exe`. Real multi-monitor,
 mixed-DPI, focus/tray, and extended-use checks remain necessary; the smoke runs
 do not establish those behaviors. See [PHASE_7_PLAN.md](PHASE_7_PLAN.md).
+The cached Character Manager follow-up verifies seven complete 318-frame idle loops
+at 15 FPS UI pacing, zero browsing rigs, and about 328 MiB private memory. Source
+models remain unchanged. See [the memory audit](MULTI_CHARACTER_MEMORY_AUDIT.md)
+for per-card memory, temporary generation peaks and remaining manual checks.
 
 Phase 5.9 completed the architecture-focused refactor without intentionally changing application behavior.
 

@@ -50,6 +50,7 @@ mod tests {
                 path: "characters://model-card-test.vrm".into(),
                 name: "Test".into(),
                 facial_targets: 0,
+                ..default()
             });
         app.insert_resource(state).add_systems(
             Update,
@@ -109,6 +110,13 @@ pub(super) fn panel(parent: &mut ChildSpawnerCommands, state: &ManagerState) {
                 ))
                 .with_children(|rail| {
                     label(rail, "Multi Character", 18.0, ui::PRIMARY);
+                    button(
+                        rail,
+                        "Use Character",
+                        ManagerAction::UseCharacter,
+                        percent(100),
+                        state,
+                    );
                     for (index, slot) in state.characters.slots.iter().enumerate() {
                         rail.spawn(Node {
                             width: percent(100),
@@ -186,12 +194,7 @@ pub(super) fn panel(parent: &mut ChildSpawnerCommands, state: &ManagerState) {
 
 pub(super) fn card(parent: &mut ChildSpawnerCommands, index: usize, state: &ManagerState) {
     let model = &state.characters.models[index];
-    let selected = state
-        .characters
-        .slots
-        .get(state.character_slot)
-        .and_then(|slot| slot.path.as_ref())
-        == Some(&model.path);
+    let selected = state.selected_character == model.path;
     parent
         .spawn((
             Node {

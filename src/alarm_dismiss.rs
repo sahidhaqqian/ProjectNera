@@ -26,6 +26,7 @@ use bevy::{
     },
 };
 
+use crate::utility_window::font_cache::{FontCacheOwner, UtilityFontCache};
 use crate::{
     alarm::{AlarmControlCommand, AlarmDisplayInfo, DEFAULT_SNOOZE_DURATION},
     environment::DesktopEnvironment,
@@ -142,6 +143,7 @@ pub(crate) struct AlarmDismissPlugin;
 impl Plugin for AlarmDismissPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AlarmDismissRuntime>()
+            .init_resource::<UtilityFontCache>()
             // HWND lookup goes through winit's thread-local window map, so it
             // must run on the main thread.
             .add_systems(First, acquire_dismiss_hwnd)
@@ -203,6 +205,8 @@ fn spawn_dismiss_panel(
     mut runtime: ResMut<AlarmDismissRuntime>,
     windows: Query<Entity, With<AlarmDismissWindow>>,
     alarm: Res<AlarmDisplayInfo>,
+    fonts: Option<Res<bevy::text::FontAtlasSet>>,
+    mut font_cache: ResMut<UtilityFontCache>,
     mut commands: Commands,
 ) {
     if !entered
@@ -219,11 +223,13 @@ fn spawn_dismiss_panel(
 
     runtime.reset();
     runtime.requested_at = Some(Instant::now());
+    font_cache.begin(fonts.as_deref());
 
     let window_entity = commands
         .spawn((
             Name::new("Nera Alarm Dismiss Window"),
             AlarmDismissWindow,
+            FontCacheOwner,
             UtilityWindow::new(14.0),
             Window {
                 title: "Nera Alarm".into(),
@@ -254,10 +260,12 @@ fn spawn_dismiss_panel(
     let camera_entity = commands
         .spawn((
             Name::new("Nera Alarm Dismiss Camera"),
+            FontCacheOwner,
             AlarmDismissOwned {
                 window: window_entity,
             },
             Camera2d,
+            Msaa::Off,
             Camera {
                 clear_color: ClearColorConfig::Custom(Color::NONE),
                 ..default()
@@ -287,6 +295,7 @@ fn spawn_alarm_panel_ui(
     commands
         .spawn((
             Name::new("Nera Alarm Dismiss Root"),
+            FontCacheOwner,
             AlarmDismissOwned { window },
             UiTargetCamera(camera),
             Node {
@@ -957,6 +966,13 @@ impl AlarmDismissRuntime {
     }
 }
 
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) fn memory_audit_counts(world: &mut World) -> (usize, usize) {
+    let windows = world.query::<&AlarmDismissWindow>().iter(world).count();
+    let owned = world.query::<&AlarmDismissOwned>().iter(world).count();
+    (windows, owned)
+}
+
 // -----------------------------------------------------------------------------
 // Pure tests
 // -----------------------------------------------------------------------------
@@ -964,6 +980,56 @@ impl AlarmDismissRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_dismiss_panel_lifecycle_releases_owners_and_keeps_main_camera_unchanged() {
+        let mut app = App::new();
+        app.init_resource::<AlarmDismissRuntime>()
+            .init_resource::<UtilityFontCache>()
+            .init_resource::<AlarmDisplayInfo>()
+            .init_resource::<PresentationState>()
+            .add_message::<PresentationEntered>()
+            .add_message::<PresentationExited>()
+            .add_systems(
+                Update,
+                (spawn_dismiss_panel, collect_orphaned_dismiss_entities).chain(),
+            )
+            .add_systems(Last, crate::utility_window::font_cache::release);
+        let main = app
+            .world_mut()
+            .spawn((Camera3d::default(), Msaa::Sample4))
+            .id();
+        for cycle in 0..6 {
+            app.world_mut().write_message(PresentationEntered {
+                kind: AttentionKind::Alarm,
+            });
+            app.update();
+            let world = app.world_mut();
+            let camera = world
+                .query_filtered::<&Msaa, (With<AlarmDismissOwned>, With<Camera>)>()
+                .single(world)
+                .unwrap();
+            assert_eq!(*camera, Msaa::Off);
+            assert_eq!(world.query::<&FontCacheOwner>().iter(world).count(), 3);
+            if cycle == 3 {
+                let window = world.resource::<AlarmDismissRuntime>().window.unwrap();
+                world.despawn(window);
+            }
+            world.write_message(PresentationExited {
+                kind: AttentionKind::Alarm,
+            });
+            world.run_system_cached(cleanup_dismiss_panel).unwrap();
+            app.update();
+            let world = app.world_mut();
+            assert!(world.resource::<AlarmDismissRuntime>().is_closed());
+            assert_eq!(world.query::<&AlarmDismissWindow>().iter(world).count(), 0);
+            assert_eq!(world.query::<&AlarmDismissOwned>().iter(world).count(), 0);
+            assert_eq!(world.query::<&FontCacheOwner>().iter(world).count(), 0);
+            assert_eq!(world.query::<&Node>().iter(world).count(), 0);
+            assert!(!world.resource::<UtilityFontCache>().is_active());
+            assert_eq!(world.get::<Msaa>(main), Some(&Msaa::Sample4));
+        }
+    }
 
     fn dismiss_action_app() -> (App, Entity) {
         let mut app = App::new();

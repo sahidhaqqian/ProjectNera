@@ -39,6 +39,8 @@ pub(crate) struct RestoreDefaultCharacter;
 pub(crate) struct CharacterImportStatus {
     pub(crate) message: String,
     pub(crate) loading: bool,
+    pub(crate) selection_notice: (u64, String),
+    pub(crate) thumbnail_revision: u64,
 }
 
 #[derive(Resource)]
@@ -461,6 +463,13 @@ fn read_valid_model(path: &Path) -> Result<crate::vrm0_migration::MigratedVrm, S
 
 fn import_model(path: &Path, directory: &Path) -> Result<ImportedCharacter, String> {
     let migrated = read_valid_model(path)?;
+    store_imported(migrated, directory)
+}
+
+fn store_imported(
+    migrated: crate::vrm0_migration::MigratedVrm,
+    directory: &Path,
+) -> Result<ImportedCharacter, String> {
     let bytes = migrated.bytes;
     let mut hash = DefaultHasher::new();
     bytes.hash(&mut hash);

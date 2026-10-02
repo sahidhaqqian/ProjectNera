@@ -29,6 +29,9 @@ fn snapshot(world: &mut World, label: &str) {
         .query_filtered::<Entity, With<Camera3d>>()
         .iter(world)
         .count();
+    assert_eq!(live, 0, "gallery must never retain live rigs");
+    assert_eq!(roots, 0, "gallery must not load VRM scenes");
+    assert_eq!(cameras, 0, "cached cards do not need 3D cameras");
     let players = world
         .query_filtered::<Entity, With<AnimationPlayer>>()
         .iter(world)
@@ -92,6 +95,9 @@ fn snapshot(world: &mut World, label: &str) {
         "model_cpu_pixels_mib": model_pixels as f64 / 1048576.0,
         "model_cpu_vertices_morphs_mib": model_geometry as f64 / 1048576.0,
         "cards": cached, "live": live, "entities": entities, "vrm_roots": roots,
+        "animated_cards": world.resource::<PreviewRuntime>().animated_count(),
+        "compressed_frames_mib": world.resource::<PreviewRuntime>().compressed_bytes() as f64 / 1048576.0,
+        "frame_counts": world.resource::<PreviewRuntime>().idle_samples().iter().map(|(_, count)| *count).collect::<Vec<_>>(),
         "cameras_3d": cameras, "skins": skins, "joints": joints, "players": players,
         "images": images.len(), "cpu_pixels_mib": cpu_pixels as f64 / 1048576.0,
         "texture_base_mib_estimate": texture_bytes as f64 / 1048576.0,
@@ -157,6 +163,11 @@ fn advance(world: &mut World) {
         } else if audit.stage == count + 1 {
             let mut state = world.resource_mut::<ManagerState>();
             state.characters.slots[0].path = audit.models.last().map(|m| m.path.clone());
+            state.selected_character = audit
+                .models
+                .last()
+                .map(|m| m.path.clone())
+                .unwrap_or_default();
             state.dirty = true;
             audit.label = "selection_changed".into();
         } else if audit.stage == count + 2 {
@@ -170,12 +181,14 @@ fn advance(world: &mut World) {
                 })
                 .map(|model| model.path.clone());
             let mut state = world.resource_mut::<ManagerState>();
+            state.selected_character = largest.clone().unwrap_or_default();
             state.characters.slots[0].path = largest;
             state.dirty = true;
             audit.label = "largest_model_selected".into();
         } else if audit.stage == count + 3 {
             let mut state = world.resource_mut::<ManagerState>();
             state.characters.models.truncate(1);
+            state.scroll_y = 0.0;
             state.characters.slots[0].path = audit.models.first().map(|m| m.path.clone());
             state.dirty = true;
             audit.label = "cards_removed".into();

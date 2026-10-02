@@ -3265,6 +3265,7 @@ dependencies = [
  "bevy",
  "bevy_framepace",
  "bevy_vrm1",
+ "blake3",
  "image",
  "raw-window-handle",
  "serde",

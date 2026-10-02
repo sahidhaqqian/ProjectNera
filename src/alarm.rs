@@ -260,10 +260,26 @@ impl Plugin for AlarmPlugin {
 
 fn load_alarm_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(AlarmAssets {
-        sounds: std::array::from_fn(|index| asset_server.load(sounds::SOUNDS[index].1)),
+        sounds: std::array::from_fn(|index| asset_server.load(sounds::path(index as u8))),
     });
 
     info!("Nera alarm audio requested | {}", ALARM_SOUND_PATH,);
+}
+
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) fn memory_audit_counts(world: &mut World) -> (usize, usize, usize) {
+    (
+        world.query::<&AlarmAudioPlayback>().iter(world).count(),
+        world
+            .query::<&sounds::AlarmSoundPreview>()
+            .iter(world)
+            .count(),
+        world
+            .resource::<Assets<AudioSource>>()
+            .iter()
+            .map(|(_, audio)| audio.bytes.len())
+            .sum(),
+    )
 }
 
 fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {

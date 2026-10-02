@@ -252,8 +252,11 @@ with each preview's render layer preserved.
 `character/library.rs` owns `CharacterCatalog`, `CharacterInstances`, and the
 `CharacterLibraryRequest` Select/Spawn/Close vocabulary. Validated models are
 content-addressed in `%APPDATA%/io.github.sahidhaqqi.projectnera/characters`.
-`catalog.json` preserves display names; directory discovery recovers older models.
-Importing identical bytes adds no duplicate catalog entry. `character/roster.rs`
+`catalog.json` preserves display names, source/content fingerprints and canonical
+source paths; directory discovery recovers older models. `character/library/import.rs`
+streams BLAKE3 with a 64 KiB buffer before copying. Canonical-path/content matches
+reuse the existing entry; normalized-content matching also covers legacy VRM0 copies.
+Missing hashes are populated safely, not by changing/removing old entries. `character/roster.rs`
 defines validated AddSlot/Assign/Clear/Import/Remove commands and serializable slot/model
 snapshots. The owner starts with two slots and caps the roster at eight, including
 the primary avatar. Settings' fixed bottom navigation opens a temporary, separate
@@ -266,25 +269,42 @@ reopens Settings. Opening animations again restores the ordinary gallery surface
 Metadata reports facial morph capacity; VRM0 migration repairs supported legacy
 names and missing named bindings without fabricating targets in baked meshes.
 
-Character-card work is paced at 15 FPS by the worker's existing Framepace plugin,
-not the desktop settings FPS owner. At most one character rig/camera is live.
-`animation_manager/thumbnails.rs` reads a bounded JSON/embedded-image range rather
-than loading the whole VRM for each card. It checks a versioned, source-stamped
-PNG cache first. A model without a usable thumbnail borrows the single live slot;
-after warmup, the camera remains alive through screenshot readback, then retires.
-The selected card resumes after missing thumbnails finish. A three-update release
-gap lets dropped handles propagate before loading another model. Stable path keys
-prevent index reuse after deletion; switching selection releases the old rig.
-Thumbnails are at most 256x320, GPU-only after upload. IO is bounded to one read and
-two small writes. There is no idle filesystem polling. PNG/JPEG decoding uses the
-existing `image` dependency with explicit dimensions/allocation limits. No codecs,
-Bevy features, or new transitive packages are introduced.
+Character-card UI is paced at 15 FPS by the worker's existing Framepace plugin,
+not the desktop settings FPS owner. Browsing/selection creates zero VRM rigs/cameras.
+Import registers and highlights; only explicit Use Character emits Assign to runtime.
+`character/library/previews.rs` owns one serial background preparation job in the
+main process. Imports and existing entries acquire full idle caches without loading
+rigs in the browsing worker. `animation_manager/generation.rs` uses the established
+renderer for one model in a hidden disposable worker, recording whole idle cycles
+covering at least 30 seconds. The supplied 9.9167-second idle records four cycles,
+318 frames at 8 FPS. Exact animation seek times prevent slow GPU readback from
+skipping poses or shortening the sequence. Generation alone runs at 30 FPS; it
+does not alter the manager's 15 FPS cap or main Nera's 24/30 FPS setting.
+The camera survives all screenshot readbacks, then the rig retires. The worker
+waits for cache publication and exits, releasing renderer/allocator high-water
+marks. Internal and parent deadlines are respectively twice the recording duration
+plus 30/60 seconds. Successful preparation updates the roster's thumbnail revision.
+
+`animation_manager/idle_cache.rs` stores a version-2 JSON manifest and concatenated
+JPEG frame data (`.idle-v2.json` / `.idle-v2.frames`) next to legacy PNGs in the
+source-stamped cache. The manifest includes clip identity, duration, FPS and frame
+lengths; dimensions, counts, byte totals and truncated data are validated.
+Visible cards retain compressed bytes, one current 256x320 image and at most one
+decoded next frame / pending decode task. Playback uploads into the same Image
+handle; Bevy reuses the same GPU texture when its descriptor is unchanged.
+There is no per-frame filesystem access or full-duration decoded atlas. Offscreen
+cards stop work and release their buffers/tasks. `thumbnails.rs` bounds reads to
+one task and writes to two tasks, with embedded/static/legacy-atlas fallbacks while
+background preparation is pending or unavailable. Stable path keys prevent index
+reuse after deletion. PNG/JPEG use the existing image dependency; no video codec,
+Bevy feature or transitive package was added. BLAKE3 was already transitive.
 Offscreen cards and hidden/minimized windows release owned preview state; closing
 the utility exits its process. Animation/expression preview pooling is unchanged.
 AssetServer paths remain shared; no global asset purge touches desktop/shared data.
-Only small derived PNG files persist under LocalAppData `thumbnails-v1`; removing a
+Only derived frame caches/PNGs persist under LocalAppData `thumbnails-v1`; removing a
 registry entry invalidates that model's cache. Source VRMs are never rewritten.
-Renderer allocations and a selected full-quality large model can still dominate RAM.
+The roughly 300 MiB native renderer baseline remains; large VRMs only affect applied
+desktop avatars or the temporary import renderer, never gallery selection.
 See `MULTI_CHARACTER_MEMORY_AUDIT.md` for measured limits and opt-in instrumentation.
 
 `character/library/removal.rs` owns one pending removal. It accepts only registered
@@ -439,6 +459,14 @@ Entering attention deliberately resets active pointer capture and suspends the
 sitting animation/placement state. The saved placement and anchor are restored
 when attention exits.
 
+Attention measures animated upper-body joints with crown/headwear padding and
+fits perspective distance at their nearest depth, rather than assuming z=0.
+This avoids cutting off the head during forward JumpHappy motion while keeping
+the original locked center and monotonic zoom-out behavior. Desktop camera
+framing is unchanged. `--alarm-framing-audit` captures 3/9/29-second native
+portraits and verifies presentation/utility cleanup after dismissal; see
+`ALARM_MEMORY_AUDIT.md` for measurements and remaining renderer retention.
+
 ### `src/alarm.rs` and alarm utility modules
 
 - **Purpose:** Schedule alarms, play/stop alarm audio, request attention, and
@@ -456,10 +484,16 @@ when attention exits.
 Windows-only companion modules:
 
 - `alarm_settings.rs` owns the multi-alarm editor window and draft UI state. It
-  edits `NeraSettings` alarm records and queues persistence.
+  edits `NeraSettings` alarm records and queues persistence. Its Last cleanup
+  stops only `AlarmSoundPreview` entities when the editor no longer exists,
+  including pending/loading previews. Preview players reuse `AlarmAssets`' five
+  startup sound handles; the shared sound assets remain available for ringing.
 - `alarm_dismiss.rs` owns the dismiss/snooze panel, placement, and failsafe UI.
   It reacts to presentation lifecycle messages and sends presentation/alarm
   control commands.
+- Both alarm UI cameras use `Msaa::Off` and join the same font-cache scope as
+  Settings. `alarm_settings/memory_audit.rs` is an opt-in Windows debug native
+  editor/picker/preview and ring/dismiss memory audit, not normal runtime work.
 - `action_menu.rs` owns the native radial menu lifecycle and typed
   `NeraActionMenuCommand` output. It opens settings/alarm settings and keeps the
   standing-only praying animation coupled to the real menu lifetime.
@@ -500,12 +534,34 @@ Submodule boundaries:
 - `runtime.rs`: position recovery/recording, save helpers, and live application
   of always-on-top, size, audio, and FPS settings.
 - `ui.rs`: settings window, controls, labels, scrolling, dragging, and input gate.
+- `memory.rs`: joins `utility_window/font_cache.rs` before Settings opens; keeps
+  the Settings integration tests for scoped font ownership and OS-close ordering.
+- `memory_audit.rs`: Windows debug-only, opt-in six-cycle native open/close audit;
+  reports private/working-set memory, UI/camera counts, glyph atlases, images and
+  animation clips. No measurement polling occurs during normal launches.
 - `shadow.rs`: simple/character shadow entities and setting-driven updates;
   brightness/character-shadow light changes query only `avatar::NeraMainLight`.
 - `startup.rs`: Windows startup registration read/write boundary.
 
 The UI mutates the model; it is not the model. Preserve field meanings and the
 current persistence representation when changing settings.
+
+The Settings-only Camera2d explicitly uses `Msaa::Off`; UI glyph/edge smoothing
+does not require a separate 4x render target. Cleanup does not reset global render
+pipelines, trim the process working set, or unload avatar/shared assets. An OS
+close may remove the window in Last before the UI cleanup in the next Update;
+font reclamation waits for both. See [Settings memory audit](SETTINGS_MEMORY_AUDIT.md)
+for measured retention and validation limits.
+
+`utility_window/font_cache.rs` owns `UtilityFontCache` and `FontCacheOwner` for
+Settings, the alarm editor and alarm dismiss panel. The first open snapshots
+existing font-atlas keys. Each window, camera and UI root has an owner marker;
+rebuilds replace roots without ending the scope while the window still exists.
+Last reclaims newly introduced atlases and their Image assets only after the
+final marked entity disappears. Overlapping opens do not resnapshot Settings
+fonts into a permanent baseline. Existing keys and surviving glyph/image
+references, including hidden text in untracked UI, remain protected. No global
+renderer/AssetServer reset is performed. See [alarm memory audit](ALARM_MEMORY_AUDIT.md).
 
 ### `src/tray.rs` and `src/tray/native.rs`
 

@@ -14,7 +14,11 @@ use bevy::{
 };
 
 use crate::settings::{AlarmConfig, NeraSettings, save_settings_deferred};
+use crate::utility_window::font_cache::{FontCacheOwner, UtilityFontCache};
 use crate::utility_window::{UtilityWindow, spawn_window_controls};
+
+#[cfg(all(debug_assertions, target_os = "windows"))]
+mod memory_audit;
 
 const MAX_ALARMS: usize = 12;
 
@@ -118,7 +122,17 @@ pub(crate) struct AlarmSettingsPlugin;
 
 impl Plugin for AlarmSettingsPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(all(debug_assertions, target_os = "windows"))]
+        if std::env::args().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--alarm-memory-audit" | "--alarm-framing-audit"
+            )
+        }) {
+            memory_audit::install(app);
+        }
         app.init_resource::<AlarmSettingsInputGate>()
+            .init_resource::<UtilityFontCache>()
             .init_resource::<AlarmSettingsUiState>()
             .add_message::<OpenAlarmSettingsWindow>()
             .add_systems(PreUpdate, sync_alarm_window_minimized)
@@ -135,7 +149,8 @@ impl Plugin for AlarmSettingsPlugin {
                     observe_alarm_settings_window_removed,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(Last, cleanup_alarm_sound_preview);
     }
 }
 
@@ -144,6 +159,8 @@ fn open_alarm_settings_window(
     mut existing: Query<&mut Window, With<AlarmSettingsWindow>>,
     mut gate: ResMut<AlarmSettingsInputGate>,
     mut ui: ResMut<AlarmSettingsUiState>,
+    fonts: Option<Res<bevy::text::FontAtlasSet>>,
+    mut font_cache: ResMut<UtilityFontCache>,
     mut commands: Commands,
 ) {
     if open.read().next().is_none() {
@@ -165,10 +182,13 @@ fn open_alarm_settings_window(
     ui.draft = None;
     ui.rebuild = true;
 
+    font_cache.begin(fonts.as_deref());
+
     let window = commands
         .spawn((
             Name::new("Nera Alarm Settings Window"),
             AlarmSettingsWindow,
+            FontCacheOwner,
             UtilityWindow::new(14.0),
             Window {
                 title: "Nera Alarms".into(),
@@ -193,7 +213,9 @@ fn open_alarm_settings_window(
         Name::new("Nera Alarm Settings Camera"),
         AlarmSettingsCamera,
         AlarmSettingsOwned { window },
+        FontCacheOwner,
         Camera2d,
+        Msaa::Off,
         Camera {
             clear_color: ClearColorConfig::Custom(Color::NONE),
             ..default()
@@ -285,6 +307,7 @@ fn spawn_root(
             Name::new("Nera Alarm Settings Root"),
             AlarmSettingsUiRoot,
             AlarmSettingsOwned { window },
+            FontCacheOwner,
             UiTargetCamera(camera),
             Node {
                 width: percent(100),
@@ -1458,6 +1481,18 @@ fn cleanup_alarm_settings_owned(
     }
 }
 
+fn cleanup_alarm_sound_preview(
+    windows: Query<(), With<AlarmSettingsWindow>>,
+    previews: Query<Entity, With<crate::alarm::sounds::AlarmSoundPreview>>,
+    mut commands: Commands,
+) {
+    if windows.is_empty() {
+        for entity in &previews {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 fn observe_alarm_settings_window_removed(
     mut removed: RemovedComponents<AlarmSettingsWindow>,
     mut gate: ResMut<AlarmSettingsInputGate>,
@@ -1512,6 +1547,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn alarm_editor_close_cleans_tree_preview_and_cache_without_changing_main_camera() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<MouseWheel>()
+            .add_message::<crate::alarm::sounds::PreviewAlarmSound>()
+            .add_plugins(AlarmSettingsPlugin)
+            .add_systems(Last, crate::utility_window::font_cache::release);
+        let main = app
+            .world_mut()
+            .spawn((Camera3d::default(), Msaa::Sample4))
+            .id();
+        // An unmarked audio entity models runtime ringing, not an editor preview.
+        let ringing = app
+            .world_mut()
+            .spawn(bevy::audio::AudioPlayer::new(Handle::<
+                bevy::audio::AudioSource,
+            >::default()))
+            .id();
+        for cycle in 0..6 {
+            app.world_mut().write_message(OpenAlarmSettingsWindow);
+            app.update();
+            let world = app.world_mut();
+            let camera = world
+                .query_filtered::<&Msaa, With<AlarmSettingsCamera>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(*camera, Msaa::Off);
+            let preview = world.spawn(crate::alarm::sounds::AlarmSoundPreview).id();
+            if cycle == 3 {
+                let window = world
+                    .query_filtered::<Entity, With<AlarmSettingsWindow>>()
+                    .single(world)
+                    .unwrap();
+                world.despawn(window);
+            } else {
+                world
+                    .resource_mut::<AlarmSettingsInputGate>()
+                    .close_requested = true;
+            }
+            app.update();
+            let world = app.world_mut();
+            assert_eq!(world.query::<&AlarmSettingsOwned>().iter(world).count(), 0);
+            assert_eq!(world.query::<&FontCacheOwner>().iter(world).count(), 0);
+            assert_eq!(world.query::<&Node>().iter(world).count(), 0);
+            assert!(world.get_entity(preview).is_err());
+            assert!(world.get_entity(ringing).is_ok());
+            assert_eq!(world.get::<Msaa>(main), Some(&Msaa::Sample4));
+            assert_eq!(world.resource::<NeraSettings>().fps_limit, 24);
+            assert!(!world.resource::<AlarmSettingsInputGate>().window_open);
+            assert!(!world.resource::<UtilityFontCache>().is_active());
+        }
+    }
+
+    #[test]
+    fn sound_preview_remains_while_editor_is_open_but_late_requests_are_cleaned_after_close() {
+        let mut app = App::new();
+        app.add_systems(Last, cleanup_alarm_sound_preview);
+        let window = app.world_mut().spawn(AlarmSettingsWindow).id();
+        let preview = app
+            .world_mut()
+            .spawn(crate::alarm::sounds::AlarmSoundPreview)
+            .id();
+        app.update();
+        assert!(app.world().get_entity(preview).is_ok());
+        app.world_mut().despawn(window);
+        let late = app
+            .world_mut()
+            .spawn(crate::alarm::sounds::AlarmSoundPreview)
+            .id();
+        app.update();
+        assert!(app.world().get_entity(preview).is_err());
+        assert!(app.world().get_entity(late).is_err());
+    }
+
+    #[test]
     fn reopen_restores_existing_alarm_window_without_discarding_draft() {
         let mut app = App::new();
         app.insert_resource(AlarmSettingsInputGate {
@@ -1524,6 +1635,7 @@ mod tests {
             draft: Some(AlarmConfig::default_new(7)),
             rebuild: false,
         })
+        .init_resource::<UtilityFontCache>()
         .add_message::<OpenAlarmSettingsWindow>()
         .add_systems(Update, open_alarm_settings_window);
         let window = app

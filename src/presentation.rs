@@ -146,7 +146,7 @@ const ATTENTION_WINDOW_MONITOR_HEIGHT_RATIO: f32 = 0.78;
 
 /// Extra space above the head for hair / maid headpiece, expressed relative to
 /// head-to-hips humanoid span.
-const UPPER_BODY_TOP_MARGIN_RATIO: f32 = 0.18;
+const UPPER_BODY_TOP_MARGIN_RATIO: f32 = 0.40;
 
 /// Small crop allowance below the hips so the waist doesn't feel chopped at
 /// exactly the humanoid hips joint.
@@ -462,6 +462,7 @@ struct UpperBodyBounds {
     max_x: f32,
     bottom_y: f32,
     top_y: f32,
+    front_z: f32,
 }
 
 impl UpperBodyBounds {
@@ -484,7 +485,7 @@ impl UpperBodyBounds {
     }
 }
 
-/// Dynamic 2D portrait bounds from the *currently animated* humanoid pose.
+/// Dynamic portrait bounds from the *currently animated* humanoid pose.
 ///
 /// This solves both classes of alarm framing:
 ///
@@ -492,8 +493,8 @@ impl UpperBodyBounds {
 /// - spread arms/hands increase `min_x..max_x`.
 ///
 /// Legs remain excluded so the composition stays half-body.
-fn upper_body_world_metrics(
-    bone_query: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+fn upper_body_world_metrics<'a>(
+    bones: impl IntoIterator<Item = (&'a VrmBone, &'a GlobalTransform)>,
 ) -> Option<UpperBodyBounds> {
     let mut head_y = None;
     let mut hips_y = None;
@@ -501,8 +502,9 @@ fn upper_body_world_metrics(
     let mut min_x: Option<f32> = None;
     let mut max_x: Option<f32> = None;
     let mut animated_top_y: Option<f32> = None;
+    let mut front_z: Option<f32> = None;
 
-    for (bone, transform) in bone_query {
+    for (bone, transform) in bones {
         let position = transform.translation();
 
         let relevant = matches!(
@@ -543,6 +545,7 @@ fn upper_body_world_metrics(
                 .map(|value| value.max(position.y))
                 .unwrap_or(position.y),
         );
+        front_z = Some(front_z.map_or(position.z, |z| z.max(position.z)));
 
         match bone.as_str() {
             "head" => head_y = Some(position.y),
@@ -566,6 +569,8 @@ fn upper_body_world_metrics(
     min_x -= horizontal_margin;
     max_x += horizontal_margin;
 
+    // The head joint is near the skull base, not the crown. Include hair/headwear
+    // before fitting; viewport padding alone cannot compensate for missing bounds.
     let top_y = animated_top + torso_span * UPPER_BODY_TOP_MARGIN_RATIO;
 
     let bottom_y = hips - torso_span * UPPER_BODY_BOTTOM_MARGIN_RATIO;
@@ -575,6 +580,7 @@ fn upper_body_world_metrics(
         max_x,
         bottom_y,
         top_y,
+        front_z: front_z? + horizontal_margin,
     })
 }
 
@@ -621,6 +627,7 @@ fn compute_attention_layout(
         max_x: 0.45,
         bottom_y: 0.55,
         top_y: 1.55,
+        front_z: 0.0,
     });
 
     let vertical_fov = match projection {
@@ -678,7 +685,9 @@ fn compute_attention_layout(
     let horizontal_distance =
         horizontal_half_extent / (ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION * horizontal_half_tan);
 
-    let camera_z = vertical_distance.max(horizontal_distance);
+    // Fit at the nearest animated surface, not the z=0 plane. Forward motion
+    // during JumpHappy otherwise enlarges the head beyond the fitted viewport.
+    let camera_z = bounds.front_z + vertical_distance.max(horizontal_distance);
 
     AttentionLayout {
         window_width: widened_window_width,
@@ -855,6 +864,85 @@ pub(crate) fn desktop_pet_active(state: Res<PresentationState>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn portrait_layout(offset: Vec3, raised_hand: bool, center: Option<Vec2>) -> AttentionLayout {
+        let mut world = World::new();
+        for (name, position) in [
+            ("hips", Vec3::new(0.0, 0.0, 0.0)),
+            ("head", Vec3::new(0.0, 0.45, 0.18)),
+            (
+                "leftHand",
+                Vec3::new(-0.35, if raised_hand { 0.85 } else { 0.2 }, 0.1),
+            ),
+            // Feet must not force full-body framing.
+            ("leftFoot", Vec3::new(0.0, -1.0, 0.0)),
+        ] {
+            world.spawn((
+                VrmBone::from(name),
+                GlobalTransform::from_translation(position + offset),
+                NeraLiveBone,
+            ));
+        }
+        world
+            .run_system_once(
+                move |bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>| {
+                    compute_attention_layout(
+                        crate::platform::PhysicalRect {
+                            left: 0,
+                            top: 0,
+                            right: 1920,
+                            bottom: 1080,
+                        },
+                        600,
+                        950,
+                        &Projection::Perspective(PerspectiveProjection::default()),
+                        &bones,
+                        center,
+                    )
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn alarm_framing_fits_head_crown_at_forward_depth() {
+        let layout = portrait_layout(Vec3::ZERO, false, None);
+        // Hair/headpiece extends above the head joint in the default rig.
+        let crown = Vec3::new(0.0, 0.63, 0.24);
+        let projected_y = (crown.y - layout.camera_y)
+            / ((layout.camera_z - crown.z) * (std::f32::consts::FRAC_PI_4 * 0.5).tan());
+        assert!(projected_y > 0.0 && projected_y <= ATTENTION_UPPER_BODY_VIEW_FRACTION + 0.001);
+        assert!(
+            layout.camera_y < 0.4,
+            "legs should remain outside the portrait crop"
+        );
+    }
+
+    #[test]
+    fn alarm_framing_is_invariant_to_avatar_depth_translation() {
+        let base = portrait_layout(Vec3::ZERO, false, None);
+        for z in [-0.3, 0.8] {
+            let moved = portrait_layout(Vec3::Z * z, false, None);
+            assert!((moved.camera_z - base.camera_z - z).abs() < 0.001);
+            assert!((moved.camera_y - base.camera_y).abs() < 0.001);
+            assert_eq!(moved.window_width, base.window_width);
+        }
+    }
+
+    #[test]
+    fn alarm_jump_and_raised_hands_fit_without_chasing_locked_center() {
+        let initial = portrait_layout(Vec3::ZERO, false, None);
+        let center = Vec2::new(initial.camera_x, initial.camera_y);
+        let moved = portrait_layout(Vec3::new(0.1, 0.25, 0.3), true, Some(center));
+        assert_eq!(Vec2::new(moved.camera_x, moved.camera_y), center);
+        let top = 0.85 + 0.25 + 0.45 * UPPER_BODY_TOP_MARGIN_RATIO;
+        let front = 0.18 + 0.3 + 0.45 * UPPER_BODY_HORIZONTAL_MARGIN_RATIO;
+        let projected_top = (top - center.y)
+            / ((moved.camera_z - front) * (std::f32::consts::FRAC_PI_4 * 0.5).tan());
+        assert!(projected_top <= ATTENTION_UPPER_BODY_VIEW_FRACTION + 0.001);
+        assert!(moved.camera_z > initial.camera_z);
+    }
 
     #[test]
     fn presentation_starts_as_desktop_pet() {
@@ -932,6 +1020,7 @@ mod tests {
             max_x: 0.8,
             bottom_y: 0.5,
             top_y: 1.6,
+            front_z: 0.0,
         };
 
         assert!((bounds.center_x() - 0.2).abs() < 0.001);
@@ -947,6 +1036,7 @@ mod tests {
             max_x: 1.0,
             bottom_y: 0.5,
             top_y: 1.7,
+            front_z: 0.0,
         };
 
         let horizontal_half_extent = (bounds.max_x - locked.x)

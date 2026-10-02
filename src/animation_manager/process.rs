@@ -84,6 +84,7 @@ impl ManagerProcess {
         executable: &std::path::Path,
         smoke_test: bool,
         character_path: &str,
+        character_panel: bool,
     ) -> std::io::Result<()> {
         use std::os::windows::process::CommandExt;
         let mut command = Command::new(executable);
@@ -94,6 +95,9 @@ impl ManagerProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .creation_flags(0x0800_0000); // No console; the manager owns its own Bevy window.
+        if character_panel {
+            command.env("NERA_GALLERY_CHARACTERS", "1");
+        }
         if smoke_test {
             if std::env::var_os("NERA_GALLERY_HOST_CHARACTERS").is_some() {
                 command.arg("--roster-smoke");
@@ -180,7 +184,8 @@ fn open_manager(
         .map_or(crate::character::DEFAULT_CHARACTER, |character| {
             character.asset_path.as_str()
         });
-    let result = std::env::current_exe().and_then(|exe| process.spawn(&exe, smoke, path));
+    let result =
+        std::env::current_exe().and_then(|exe| process.spawn(&exe, smoke, path, character_panel));
     if let Err(error) = result {
         error!("Could not open Animation Manager: {error}");
     }
@@ -206,12 +211,14 @@ fn forward_roster(
     if process.child.is_none() {
         return;
     }
-    let roster = instances.roster(
+    let mut roster = instances.roster(
         &catalog,
         &active,
         windows.single().is_ok_and(|w| w.visible),
         &status.message,
     );
+    roster.selection_notice = status.selection_notice.clone();
+    roster.thumbnail_revision = status.thumbnail_revision;
     let json = serde_json::to_string(&roster).unwrap();
     if json != process.roster_snapshot
         && let Some(input) = process.child.as_mut().and_then(|c| c.stdin.as_mut())
@@ -436,6 +443,12 @@ pub(crate) fn run_worker() {
             .add_systems(Last, verify_roster_close);
         app.add_systems(Update, roster_smoke.before(super::ui::rebuild_ui));
     }
+    if let Some(path) = std::env::args().find_map(|arg| {
+        arg.strip_prefix("--generate-character-preview=")
+            .map(str::to_owned)
+    }) {
+        super::generation::install(&mut app, path);
+    }
     app.run();
 }
 
@@ -443,8 +456,11 @@ fn apply_worker_preview_rate(
     state: Res<super::ManagerState>,
     mut framepace: ResMut<bevy_framepace::FramepaceSettings>,
     mut previous: Local<Option<u32>>,
+    generation: Option<Res<super::generation::ThumbnailGeneration>>,
 ) {
-    let fps = if state.tab == super::GalleryTab::Characters {
+    let fps = if generation.is_some() {
+        30
+    } else if state.tab == super::GalleryTab::Characters {
         15
     } else {
         0
@@ -512,16 +528,43 @@ fn receive_controls(
             }
             Ok(Control::Roster(roster)) => {
                 if state.characters != roster {
-                    for old in &state.characters.models {
-                        if !roster.models.iter().any(|model| model.path == old.path) {
-                            super::thumbnails::remove_cached_model(&old.path);
+                    if state.characters.thumbnail_revision != roster.thumbnail_revision
+                        && state.tab == super::GalleryTab::Characters
+                    {
+                        previews.clear(&mut commands, &mut images);
+                    }
+                    if state.characters.selection_notice != roster.selection_notice
+                        && roster
+                            .models
+                            .iter()
+                            .any(|model| model.path == roster.selection_notice.1)
+                    {
+                        state.selected_character = roster.selection_notice.1.clone();
+                        if let Some(index) = roster
+                            .models
+                            .iter()
+                            .position(|model| model.path == state.selected_character)
+                        {
+                            state.scroll_y =
+                                (index / super::ui::COLUMNS) as f32 * super::ui::ROW_HEIGHT;
                         }
+                    }
+                    if !roster
+                        .models
+                        .iter()
+                        .any(|model| model.path == state.selected_character)
+                    {
+                        state.selected_character = crate::character::DEFAULT_CHARACTER.into();
+                        state.scroll_y = 0.0;
                     }
                     state.characters = roster;
                     state.dirty = true;
                 }
             }
             Err(mpsc::TryRecvError::Disconnected) => {
+                if std::env::args().any(|arg| arg.starts_with("--generate-character-preview=")) {
+                    break;
+                }
                 #[cfg(debug_assertions)]
                 if std::env::args().any(|arg| {
                     matches!(
@@ -622,11 +665,13 @@ fn roster_smoke(
     mut window_state: Query<&mut Window, With<ManagerWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    mut idle_frames: Local<std::collections::HashSet<usize>>,
 ) {
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     let folder = std::env::temp_dir().join("nera-feature-smoke");
     let _ = std::fs::create_dir_all(&folder);
     if real.elapsed_secs() > 8.0 {
+        idle_frames.extend(previews.idle_samples().into_iter().map(|(index, _)| index));
         if let Some((_, frames)) = sample.as_mut() {
             *frames += 1;
         } else {
@@ -638,12 +683,32 @@ fn roster_smoke(
         state.dirty = true;
         *stage = 1;
     }
-    if *stage == 1 && time.elapsed_secs() > 12.0 {
+    if *stage == 1 && time.elapsed_secs() > 60.0 {
         let (cached, live) = previews.model_counts();
-        assert!(live <= 1, "model rig budget exceeded");
+        assert_eq!(live, 0, "character browsing must not create a VRM rig");
+        if previews.animated_count() > 0 {
+            assert!(
+                idle_frames.len()
+                    >= previews
+                        .idle_samples()
+                        .iter()
+                        .map(|(_, count)| *count)
+                        .max()
+                        .unwrap_or(240),
+                "cached idle must play the full sequence including loop wrap"
+            );
+            assert!(
+                previews
+                    .idle_samples()
+                    .iter()
+                    .all(|(_, count)| *count >= 240)
+            );
+        }
         let (start, frames) = sample.unwrap();
         eprintln!(
-            "ROSTER_SMOKE cached={cached} live={live} fps={:.1} private_mib={:.1}",
+            "ROSTER_SMOKE cached={cached} live={live} animated={} frames={} fps={:.1} private_mib={:.1}",
+            previews.animated_count(),
+            idle_frames.len(),
             f64::from(frames) / (real.elapsed() - start).as_secs_f64(),
             private_memory_bytes() as f64 / 1048576.0
         );
@@ -652,7 +717,7 @@ fn roster_smoke(
             .observe(save_to_disk(folder.join("roster-desktop.png")));
         *stage = 2;
     }
-    if *stage == 2 && time.elapsed_secs() > 14.0 {
+    if *stage == 2 && time.elapsed_secs() > 62.0 {
         for _ in 2..8 {
             state
                 .characters
@@ -671,17 +736,17 @@ fn roster_smoke(
         });
         *stage = 3;
     }
-    if *stage == 3 && time.elapsed_secs() > 19.0 {
+    if *stage == 3 && time.elapsed_secs() > 67.0 {
         commands
             .spawn(Screenshot::window(windows.single().unwrap()))
             .observe(save_to_disk(folder.join("roster-compact.png")));
         *stage = 4;
     }
-    if *stage == 4 && time.elapsed_secs() > 20.0 {
+    if *stage == 4 && time.elapsed_secs() > 68.0 {
         window_state.single_mut().unwrap().set_minimized(true);
         *stage = 5;
     }
-    if *stage == 5 && time.elapsed_secs() > 21.0 {
+    if *stage == 5 && time.elapsed_secs() > 69.0 {
         assert!(
             previews.is_empty(),
             "minimized manager must release previews"
@@ -689,17 +754,17 @@ fn roster_smoke(
         window_state.single_mut().unwrap().set_minimized(false);
         *stage = 6;
     }
-    if *stage == 6 && time.elapsed_secs() > 25.0 {
+    if *stage == 6 && time.elapsed_secs() > 73.0 {
         assert!(previews.model_counts().0 > 0);
-        assert!(previews.model_counts().1 <= 1);
+        assert_eq!(previews.model_counts().1, 0);
         *stage = 7;
     }
-    if *stage == 7 && time.elapsed_secs() > 27.0 {
+    if *stage == 7 && time.elapsed_secs() > 75.0 {
         state.close_requested = true;
         closing.0 = true;
         *stage = 8;
     }
-    if time.elapsed_secs() > 35.0 {
+    if time.elapsed_secs() > 85.0 {
         exit.write(AppExit::Success);
         panic!("roster smoke did not complete cleanup");
     }
@@ -751,7 +816,7 @@ pub(super) fn private_memory_bytes() -> usize {
 }
 
 #[cfg(debug_assertions)]
-pub(super) fn memory_usage() -> (usize, usize, usize) {
+pub(crate) fn memory_usage() -> (usize, usize, usize) {
     #[repr(C)]
     #[derive(Default)]
     struct Memory {
@@ -873,6 +938,63 @@ fn smoke_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_notice_highlights_existing_entry_and_removal_resets_selection() {
+        let (send, receive) = mpsc::channel();
+        let mut app = App::new();
+        let state = super::super::ManagerState::for_test();
+        let mut roster = state.characters.clone();
+        let path = "characters://model-selection-test.vrm";
+        roster
+            .models
+            .push(crate::character::library::CharacterEntry {
+                path: path.into(),
+                ..default()
+            });
+        roster.selection_notice = (1, path.into());
+        app.insert_resource(state)
+            .insert_resource(Controls(Mutex::new(receive)))
+            .init_resource::<super::super::preview::PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .add_message::<AppExit>()
+            .add_systems(Update, receive_controls);
+        send.send(Control::Roster(roster.clone())).unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<super::super::ManagerState>()
+                .selected_character,
+            path
+        );
+        // A repeated import of the same entry must re-highlight it after another selection.
+        app.world_mut()
+            .resource_mut::<super::super::ManagerState>()
+            .selected_character = crate::character::DEFAULT_CHARACTER.into();
+        roster.selection_notice.0 = 2;
+        send.send(Control::Roster(roster.clone())).unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<super::super::ManagerState>()
+                .selected_character,
+            path
+        );
+        roster.models.retain(|entry| entry.path != path);
+        send.send(Control::Roster(roster)).unwrap();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<super::super::ManagerState>()
+                .selected_character,
+            crate::character::DEFAULT_CHARACTER
+        );
+        assert!(
+            app.world()
+                .resource::<super::super::preview::PreviewRuntime>()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn character_preview_cap_is_local_to_worker_and_leaves_main_fps_unchanged() {
@@ -1114,7 +1236,12 @@ mod tests {
         for _ in 0..2 {
             let mut process = ManagerProcess::default();
             process
-                .spawn(&executable, true, crate::character::DEFAULT_CHARACTER)
+                .spawn(
+                    &executable,
+                    true,
+                    crate::character::DEFAULT_CHARACTER,
+                    false,
+                )
                 .unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
             let status = loop {

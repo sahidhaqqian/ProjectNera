@@ -28,6 +28,10 @@ pub(crate) struct CharacterRoster {
     pub(crate) slots: Vec<SlotView>,
     pub(crate) can_add: bool,
     pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) selection_notice: (u64, String),
+    #[serde(default)]
+    pub(crate) thumbnail_revision: u64,
 }
 
 impl Default for CharacterRoster {
@@ -48,6 +52,8 @@ impl Default for CharacterRoster {
             ],
             can_add: true,
             status: String::new(),
+            selection_notice: Default::default(),
+            thumbnail_revision: 0,
         }
     }
 }

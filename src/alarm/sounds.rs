@@ -22,11 +22,11 @@ pub(crate) fn path(id: u8) -> &'static str {
 #[derive(Message)]
 pub(crate) struct PreviewAlarmSound(pub(crate) u8);
 #[derive(Component)]
-pub(super) struct AlarmSoundPreview;
+pub(crate) struct AlarmSoundPreview;
 
 pub(super) fn preview_sound(
     mut requests: MessageReader<PreviewAlarmSound>,
-    assets: Res<AssetServer>,
+    assets: Res<super::AlarmAssets>,
     mut commands: Commands,
     previews: Query<Entity, With<AlarmSoundPreview>>,
 ) {
@@ -38,7 +38,14 @@ pub(super) fn preview_sound(
     }
     commands.spawn((
         AlarmSoundPreview,
-        AudioPlayer::new(assets.load(path(request.0))),
+        AudioPlayer::new(
+            assets.sounds[if usize::from(request.0) < SOUNDS.len() {
+                usize::from(request.0)
+            } else {
+                0
+            }]
+            .clone(),
+        ),
         PlaybackSettings::DESPAWN,
     ));
 }
@@ -46,6 +53,41 @@ pub(super) fn preview_sound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_previews_reuse_audio_assets_and_keep_only_the_latest_player() {
+        let mut app = App::new();
+        app.init_resource::<Assets<bevy::audio::AudioSource>>()
+            .add_message::<PreviewAlarmSound>()
+            .add_systems(Update, preview_sound);
+        let sounds = std::array::from_fn(|_| {
+            app.world_mut()
+                .resource_mut::<Assets<bevy::audio::AudioSource>>()
+                .add(bevy::audio::AudioSource {
+                    bytes: vec![0u8].into(),
+                })
+        });
+        let default_sound = sounds[0].id();
+        app.insert_resource(super::super::AlarmAssets { sounds });
+        for _ in 0..6 {
+            for id in 0..100 {
+                app.world_mut().write_message(PreviewAlarmSound(id));
+            }
+            app.world_mut().write_message(PreviewAlarmSound(u8::MAX));
+            app.update();
+            let world = app.world_mut();
+            let player = world
+                .query_filtered::<&AudioPlayer, With<AlarmSoundPreview>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(player.0.id(), default_sound);
+            assert_eq!(
+                world.resource::<Assets<bevy::audio::AudioSource>>().len(),
+                SOUNDS.len()
+            );
+        }
+    }
+
     #[test]
     fn every_bundled_alarm_sound_decodes_to_non_silent_audio() {
         use bevy::audio::{AudioSource, Decodable};

@@ -231,6 +231,7 @@ pub(super) fn open_settings_window(
         .spawn((
             Name::new("Nera Settings Window"),
             SettingsWindow,
+            crate::utility_window::font_cache::FontCacheOwner,
             UtilityWindow::new(14.0),
             Window {
                 title: "Nera Settings".into(),
@@ -258,10 +259,13 @@ pub(super) fn open_settings_window(
     let camera_entity = commands
         .spawn((
             Name::new("Nera Settings Camera"),
+            crate::utility_window::font_cache::FontCacheOwner,
             SettingsOwned {
                 window: window_entity,
             },
             Camera2d,
+            // UI uses analytic edge/glyph smoothing; a separate 4x target is unnecessary.
+            Msaa::Off,
             Camera {
                 clear_color: ClearColorConfig::Custom(Color::NONE),
                 ..default()
@@ -291,6 +295,7 @@ fn spawn_settings_ui(
     commands
         .spawn((
             Name::new("Nera Settings Root"),
+            crate::utility_window::font_cache::FontCacheOwner,
             SettingsOwned { window },
             UiTargetCamera(camera),
             Node {
@@ -1905,6 +1910,61 @@ pub(super) fn observe_settings_window_removed(
 #[cfg(test)]
 mod walking_checkbox_tests {
     use super::*;
+
+    #[test]
+    fn settings_camera_and_tree_are_released_without_touching_main_camera() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<StartupRuntime>()
+            .init_resource::<SettingsInputGate>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<OpenSettingsWindow>()
+            .add_message::<ReturnToActionMenu>()
+            .add_systems(
+                Update,
+                (
+                    open_settings_window,
+                    close_settings_after_mouse_release,
+                    cleanup_settings_window,
+                    observe_settings_window_removed,
+                )
+                    .chain(),
+            );
+        let main_camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), Msaa::Sample4))
+            .id();
+        let baseline = app.world_mut().query::<Entity>().iter(app.world()).count();
+        for cycle in 0..6 {
+            app.world_mut().write_message(OpenSettingsWindow);
+            app.update();
+            let world = app.world_mut();
+            let camera = world
+                .query_filtered::<&Msaa, (With<SettingsOwned>, With<Camera>)>()
+                .single(world)
+                .unwrap();
+            assert_eq!(*camera, Msaa::Off);
+            assert!(world.query::<&Node>().iter(world).count() > 0);
+            if cycle == 3 {
+                let window = world
+                    .query_filtered::<Entity, With<SettingsWindow>>()
+                    .single(world)
+                    .unwrap();
+                world.despawn(window);
+            } else {
+                world.resource_mut::<SettingsInputGate>().close_requested = true;
+            }
+            app.update();
+            let world = app.world_mut();
+            assert_eq!(world.query::<&SettingsOwned>().iter(world).count(), 0);
+            assert_eq!(world.query::<&SettingsWindow>().iter(world).count(), 0);
+            assert_eq!(world.query::<&Node>().iter(world).count(), 0);
+            assert_eq!(world.query::<Entity>().iter(world).count(), baseline);
+            assert_eq!(world.get::<Msaa>(main_camera), Some(&Msaa::Sample4));
+            assert!(!world.resource::<SettingsInputGate>().window_open);
+            assert_eq!(world.resource::<NeraSettings>().fps_limit, 24);
+        }
+    }
 
     #[test]
     fn allow_roaming_checkbox_changes_the_existing_preference_immediately_without_touching_fps() {
