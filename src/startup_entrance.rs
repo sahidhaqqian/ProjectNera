@@ -275,7 +275,10 @@ pub(crate) fn prepare_startup_entrance(
         );
         return;
     }
-    if physics.begin_startup_drop(&mut environment, &mut animation) {
+    if !context.settings.gravity_enabled {
+        entrance.complete();
+        animation.cancel_startup_greeting();
+    } else if physics.begin_startup_drop(&mut environment, &mut animation) {
         entrance.phase = Phase::Falling;
         entrance.elapsed = Duration::ZERO;
         info!("Nera startup entrance: Falling -> Landing -> Greeting");

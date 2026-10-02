@@ -8,7 +8,7 @@
 //!      ↓
 //! Presentation::Attention(Alarm)
 //!      ↓
-//! alarm.mp3 loop
+//! selected bundled alarm sound, repeated until dismissed
 //!      ↓
 //! JumpHappy once
 //!      ↓
@@ -19,6 +19,7 @@
 //! stop sound + stop alarm animation + restore DesktopPet
 
 use std::time::{Duration, Instant};
+pub(crate) mod sounds;
 
 use bevy::{
     audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, PlaybackSettings},
@@ -49,6 +50,7 @@ pub(crate) struct AlarmDisplayInfo {
     pub(crate) label: String,
     pub(crate) hour: u8,
     pub(crate) minute: u8,
+    pub(crate) sound: u8,
 }
 
 impl Default for AlarmDisplayInfo {
@@ -57,6 +59,7 @@ impl Default for AlarmDisplayInfo {
             label: "Alarm".to_string(),
             hour: 7,
             minute: 30,
+            sound: 1,
         }
     }
 }
@@ -170,7 +173,7 @@ impl AlarmState {
 
 #[derive(Resource)]
 struct AlarmAssets {
-    sound: Handle<AudioSource>,
+    sounds: [Handle<AudioSource>; 5],
 }
 
 /// Every alarm audio entity carries this marker.
@@ -179,6 +182,9 @@ struct AlarmAssets {
 /// robust even if a future bug accidentally creates more than one player.
 #[derive(Component)]
 struct AlarmAudioPlayback;
+
+#[derive(Component)]
+struct AlarmRepeatAfter(Instant);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AlarmMinuteKey {
@@ -230,6 +236,8 @@ impl Plugin for AlarmPlugin {
             .init_resource::<CustomAlarmRuntime>()
             .init_resource::<AlarmDisplayInfo>()
             .add_message::<AlarmControlCommand>()
+            .add_message::<sounds::PreviewAlarmSound>()
+            .add_systems(Update, (sounds::preview_sound, repeat_alarm_sound))
             .add_systems(Startup, load_alarm_audio)
             .add_systems(
                 Update,
@@ -252,7 +260,7 @@ impl Plugin for AlarmPlugin {
 
 fn load_alarm_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(AlarmAssets {
-        sound: asset_server.load(ALARM_SOUND_PATH),
+        sounds: std::array::from_fn(|index| asset_server.load(sounds::SOUNDS[index].1)),
     });
 
     info!("Nera alarm audio requested | {}", ALARM_SOUND_PATH,);
@@ -282,6 +290,7 @@ fn consume_alarm_menu_commands(
     mut state: ResMut<AlarmState>,
     mut display: ResMut<AlarmDisplayInfo>,
     mut presentation: MessageWriter<PresentationCommand>,
+    settings: Res<NeraSettings>,
 ) {
     for command in menu_commands.read() {
         let NeraActionMenuCommand::Alarm(choice) = *command else {
@@ -326,6 +335,7 @@ fn consume_alarm_menu_commands(
                     duration,
                 };
                 display.label = "Quick Alarm".to_string();
+                display.sound = settings.alarm_sound;
 
                 info!("Nera alarm armed -> {:?} ({:?})", preset, duration,);
             }
@@ -485,6 +495,7 @@ fn collect_due_alarms(
                 label: due.label.clone(),
                 hour: due.hour,
                 minute: due.minute,
+                sound: due.sound,
             },
         });
         if due.mode == 0 {
@@ -559,8 +570,9 @@ fn tick_alarm_deadline(
     commands.spawn((
         Name::new("Nera Alarm Audio"),
         AlarmAudioPlayback,
-        AudioPlayer::new(assets.sound.clone()),
-        PlaybackSettings::LOOP,
+        AudioPlayer::new(assets.sounds[usize::from(display.sound).min(assets.sounds.len() - 1)].clone()),
+        PlaybackSettings::ONCE,
+        AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
     ));
 
     presentation.write(PresentationCommand::EnterAttention(AttentionKind::Alarm));
@@ -571,6 +583,23 @@ fn tick_alarm_deadline(
         "Nera alarm TRIGGERED | original_duration={:?} | sound=loop",
         duration
     );
+}
+
+fn repeat_alarm_sound(
+    mut commands: Commands,
+    assets: Res<AlarmAssets>,
+    state: Res<AlarmState>,
+    display: Res<AlarmDisplayInfo>,
+    players: Query<(Entity, &AudioSink, &AlarmRepeatAfter), With<AlarmAudioPlayback>>,
+) {
+    if !state.is_ringing() { return; }
+    for (entity, sink, repeat) in &players {
+        if sink.empty() && Instant::now() >= repeat.0 {
+            commands.entity(entity).despawn();
+            commands.spawn((AlarmAudioPlayback, AlarmRepeatAfter(Instant::now() + Duration::from_secs(3)),
+                AudioPlayer::new(assets.sounds[usize::from(display.sound).min(4)].clone()), PlaybackSettings::ONCE));
+        }
+    }
 }
 
 fn cleanup_after_presentation_exit(
@@ -695,6 +724,7 @@ mod tests {
             month: 9,
             day: 23,
             repeat_days: 1 << 2,
+            sound: 0,
         }
     }
 
@@ -779,6 +809,7 @@ mod tests {
         for label in ["Quick Alarm", "Snoozed meeting"] {
             let mut display = AlarmDisplayInfo {
                 label: label.into(),
+                sound: 4,
                 ..default()
             };
             let mut state = AlarmState {
@@ -804,6 +835,7 @@ mod tests {
             state.phase = AlarmPhase::Idle;
             assert_eq!(state.advance_deadline(now, &mut display), None);
             assert_eq!(display.label, label);
+            assert_eq!(display.sound, 4, "a queued quick/snoozed alarm must retain its sound");
             assert!(matches!(state.phase, AlarmPhase::Armed { deadline, .. } if deadline == later));
             assert_eq!(
                 state.advance_deadline(later, &mut display),
@@ -841,7 +873,7 @@ mod tests {
             .init_resource::<AlarmDisplayInfo>()
             .init_resource::<PresentationState>()
             .insert_resource(AlarmAssets {
-                sound: Handle::default(),
+                sounds: std::array::from_fn(|_| Handle::default()),
             })
             .add_message::<AlarmAnimationCommand>()
             .add_message::<AlarmControlCommand>()
@@ -1108,6 +1140,7 @@ mod tests {
             month: 9,
             day: 23,
             repeat_days: 0,
+            sound: 0,
         };
 
         let exact = LocalDateTime {
@@ -1146,6 +1179,7 @@ mod tests {
             month: 9,
             day: 21,
             repeat_days: (1 << 0) | (1 << 4),
+            sound: 0,
         };
 
         let monday = LocalDateTime {

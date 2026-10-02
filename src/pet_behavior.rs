@@ -502,6 +502,7 @@ mod tests {
     }
     fn behavior_test_app() -> App {
         let mut app = App::new();
+        app.add_plugins((bevy::app::TaskPoolPlugin::default(), bevy::asset::AssetPlugin::default()));
         app.init_resource::<Time>()
             .init_resource::<Time<Real>>()
             .init_resource::<NeraSettings>()

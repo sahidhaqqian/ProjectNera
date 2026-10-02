@@ -235,7 +235,7 @@ const ALARM_WAVE_VRMA_PATH: &str = "animations/animasi_basic/161_Waving.vrma";
 const HIT_HEAD_VRMA_PATH: &str = "animations/animasi_basic/Hit_Head.vrma";
 const HIT_CHEST_VRMA_PATH: &str = "animations/animasi_basic/Hit_Chest.vrma";
 const SITTING_DODGE_VRMA_PATH: &str = "animations/animasi_basic/Dodge_While_Sitting.vrma";
-const HEAD_STROKE_VRMA_PATH: &str = "animations/animasi_basic/ShakeHeadNo1.vrma";
+const HEAD_STROKE_VRMA_PATH: &str = "animations/animasi_basic/Blush.vrma";
 const PRAYING_VRMA_PATH: &str = "animations/animasi_basic/Praying.vrma";
 const SITTING_ENTER_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Enter.vrma";
 const SITTING_LOOP_VRMA_PATH: &str = "animations/animasi_basic/Sitting_Idle_Loop.vrma";
@@ -576,6 +576,7 @@ pub(super) fn clip_for_visual(
             AnimationMenuChoice::ResetBasePose => (None, RepeatAnimation::Forever, "Menu/Reset"),
         },
         VisualState::Praying => (clips.praying, RepeatAnimation::Forever, "Praying"),
+        VisualState::LimbReaction(_) => (None, RepeatAnimation::Forever, "LimbReaction"),
         VisualState::IdleMicro(action) => (
             clips.idle_micro(action),
             RepeatAnimation::Count(1),
@@ -616,6 +617,7 @@ fn base_fallback(state: &NeraAnimationState, clips: &NeraAnimationClips) -> Opti
 
 pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
     match visual {
+        VisualState::LimbReaction(_) => REACTION_BLEND,
         VisualState::LibraryAnimation(_) => REACTION_BLEND,
         VisualState::HeadStroke => HEAD_STROKE_BLEND,
         VisualState::Falling | VisualState::Landing => SUPPORT_BLEND,
@@ -669,7 +671,7 @@ pub(crate) fn apply_animation_state(
     let (clip, repeat, label, using_requested) = if let Some(clip) = requested {
         (clip, requested_repeat, requested_label, true)
     } else {
-        if visual_changed {
+        if visual_changed && !matches!(visual, VisualState::LimbReaction(_)) {
             warn!(
                 "Nera clip unavailable for {:?}; using base fallback",
                 visual

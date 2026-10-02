@@ -12,6 +12,8 @@ mod runtime;
 mod shadow;
 mod startup;
 mod ui;
+#[cfg(debug_assertions)]
+pub(crate) use shadow::assert_smoke_shadow_ground;
 
 pub(crate) use model::{ActivityLevel, AlarmConfig, NeraSettings};
 pub(crate) use runtime::{save_settings_before_exit, save_settings_deferred};
@@ -41,6 +43,7 @@ impl Plugin for NeraSettingsPlugin {
             .init_resource::<AppliedRuntimeSettings>()
             .init_resource::<PositionRuntime>()
             .add_message::<OpenSettingsWindow>()
+            .add_message::<crate::animation_manager::OpenCharacterManager>()
             .add_message::<ReturnToActionMenu>()
             .add_systems(Startup, initialize_startup_state)
             .add_systems(PreUpdate, sync_settings_minimized)
@@ -58,7 +61,8 @@ impl Plugin for NeraSettingsPlugin {
                     scroll_settings_window,
                     close_settings_after_mouse_release,
                     update_settings_labels,
-                    (update_character_settings_labels, update_character_import_status),
+                    (update_character_settings_labels, update_character_import_status,
+                        update_gravity_label),
                     update_audio_settings_labels,
                     update_roaming_settings_labels,
                     apply_always_on_top,

@@ -117,6 +117,10 @@ enum AlarmSettingsAction {
     DraftDayDown,
     DraftDayUp,
     DraftToggleDay(u8),
+    DraftCycleSound,
+    PreviewDraftSound,
+    CycleQuickSound,
+    PreviewQuickSound,
 }
 
 pub(crate) struct AlarmSettingsPlugin;
@@ -335,6 +339,8 @@ fn spawn_alarm_list_ui(
 
     spawn_root(commands, window, camera, |panel| {
         spawn_header(panel, window, "Alarms", Some("Manage your Nera alarms"), false);
+        spawn_setting_row(panel, "Quick alarm sound", crate::alarm::sounds::name(settings.alarm_sound), AlarmSettingsAction::CycleQuickSound);
+        spawn_small_button(panel, "Play", AlarmSettingsAction::PreviewQuickSound, BLUE);
 
         panel.spawn((
             Text::new(format!(
@@ -554,6 +560,8 @@ fn spawn_alarm_editor_ui(
                 ScrollPosition::default(),
             ))
             .with_children(|form| {
+                spawn_setting_row(form, "Sound", crate::alarm::sounds::name(alarm.sound), AlarmSettingsAction::DraftCycleSound);
+                spawn_small_button(form, "Play", AlarmSettingsAction::PreviewDraftSound, BLUE);
                 spawn_setting_row(
                     form,
                     "Enabled",
@@ -1085,6 +1093,7 @@ fn handle_alarm_settings_actions(
     mut gate: ResMut<AlarmSettingsInputGate>,
     mut ui: ResMut<AlarmSettingsUiState>,
     mut commands: Commands,
+    mut previews: MessageWriter<crate::alarm::sounds::PreviewAlarmSound>,
 ) {
     for (interaction, action, mut background) in &mut interactions {
         *background = BackgroundColor(action_color(
@@ -1098,6 +1107,15 @@ fn handle_alarm_settings_actions(
         }
 
         match *action {
+            AlarmSettingsAction::CycleQuickSound => {
+                settings.alarm_sound = (settings.alarm_sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8;
+                save_settings_deferred(&mut commands);
+                ui.rebuild = true;
+            }
+            AlarmSettingsAction::PreviewQuickSound => { previews.write(crate::alarm::sounds::PreviewAlarmSound(settings.alarm_sound)); }
+            AlarmSettingsAction::PreviewDraftSound => {
+                if let Some(draft) = &ui.draft { previews.write(crate::alarm::sounds::PreviewAlarmSound(draft.sound)); }
+            }
             AlarmSettingsAction::Close => {
                 gate.close_requested = true;
             }
@@ -1193,8 +1211,24 @@ fn handle_alarm_settings_actions(
     }
 }
 
+#[cfg(debug_assertions)]
+pub(crate) fn smoke_action(world: &mut World, action: &str) {
+    use bevy::ecs::system::RunSystemOnce;
+    let action = match action {
+        "add" => AlarmSettingsAction::Add,
+        "sound" => AlarmSettingsAction::DraftCycleSound,
+        "preview" => AlarmSettingsAction::PreviewDraftSound,
+        "save" => AlarmSettingsAction::Save,
+        _ => panic!("unknown alarm smoke action"),
+    };
+    let button = world.spawn((Button, action, Interaction::Pressed, BackgroundColor(BLUE))).id();
+    world.run_system_once(handle_alarm_settings_actions).unwrap();
+    world.despawn(button);
+}
+
 fn mutate_draft(draft: &mut AlarmConfig, action: AlarmSettingsAction) {
     match action {
+        AlarmSettingsAction::DraftCycleSound => { draft.sound = (draft.sound + 1) % crate::alarm::sounds::SOUNDS.len() as u8; }
         AlarmSettingsAction::DraftToggleEnabled => draft.enabled = !draft.enabled,
         AlarmSettingsAction::DraftCycleLabel => draft.cycle_label(),
         AlarmSettingsAction::DraftCycleMode => {

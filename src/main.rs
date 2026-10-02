@@ -27,6 +27,8 @@ mod startup_entrance;
 mod utility_window;
 mod vrm0_migration;
 mod walking;
+#[cfg(debug_assertions)]
+mod feature_smoke;
 
 #[cfg(target_os = "windows")]
 mod tray;
@@ -111,6 +113,8 @@ fn main() {
     // benchmark flag so normal launches remain render-correct.
     let use_gpu_instance_buffer_builder = !memory_benchmark_d3;
     let mut app = App::new();
+    #[cfg(debug_assertions)]
+    let feature_smoke = std::env::args().any(|arg| arg == "--feature-smoke");
 
     // Load persistent Nera settings before the native window is created.
     //
@@ -118,7 +122,14 @@ fn main() {
     // added, so `NeraSettings` is already available here. This lets the HWND
     // be born in the correct visibility state instead of relying on a later
     // hidden -> visible transition that can race native window creation.
-    app.add_plugins(SettingsPlugin::new("io.github.sahidhaqqi.projectnera"));
+    let settings_id = character::library::instance_id().map_or_else(
+        || "io.github.sahidhaqqi.projectnera".to_owned(),
+        |id| format!("io.github.sahidhaqqi.projectnera.instance.{id}"),
+    );
+    #[cfg(debug_assertions)]
+    let settings_id = if feature_smoke { format!("io.github.sahidhaqqi.projectnera.smoke.{}", std::process::id()) } else { settings_id };
+    app.add_plugins(SettingsPlugin::new(&settings_id));
+    character::library::configure_instance(&mut app.world_mut().resource_mut::<NeraSettings>());
 
     let launch_visible = !app.world().resource::<NeraSettings>().start_hidden;
     character::register_asset_source(&mut app);
@@ -277,6 +288,8 @@ fn main() {
             d3: !use_gpu_instance_buffer_builder,
         });
     }
+    #[cfg(debug_assertions)]
+    if feature_smoke { feature_smoke::install(&mut app); }
 
     app.run();
 }

@@ -1151,6 +1151,7 @@ mod tests {
         let now = Instant::now();
 
         let mut interaction = DesktopPetInteraction {
+            momentum: Default::default(),
             state: InteractionState::Dragging,
             pressed_body_part: Some(BodyPart::Head),
             right_pressed_body_part: Some(BodyPart::Torso),

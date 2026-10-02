@@ -60,7 +60,7 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
     },
     BaseAnimation {
         key: "animasi_basic/ShakeHeadNo1.vrma",
-        label: "Headpat",
+        label: "Shake head",
     },
     BaseAnimation {
         key: "animasi_basic/Death01.vrma",
@@ -84,7 +84,7 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
     },
     BaseAnimation {
         key: "animasi_basic/Blush.vrma",
-        label: "Idle: blush",
+        label: "Headpat / blush",
     },
     BaseAnimation {
         key: "animasi_basic/Catwalk_Idle_Twist_R.vrma",

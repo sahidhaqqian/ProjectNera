@@ -20,6 +20,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Native desktop-window dragging with semantic drag start, movement, and release messages.
 - Animated body-part hit detection for the head, torso, arms, hands, legs, and feet.
 - Left-click reactions and right-click action-menu activation.
+- Side-specific hand/arm greetings and leg/foot flinches generated on the live
+  skeleton, with smooth return to standing or sitting. No additional VRMA is needed.
 - Button-free headpat recognition from deliberate back-and-forth cursor strokes.
 - Input isolation while Settings or Alarm Settings owns application mouse input.
 
@@ -30,11 +32,31 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Sitting on supported native-window top edges and taskbar edges using a pose-derived Seat anchor.
 - Attachment following, target-relative z-order, temporary suspension, and drag-to-unsnap behavior.
 - Desktop-space gravity, falling, landing, and support detection in global physical pixels.
+- Quick drag-and-release transfers momentum into a bounded throw, followed by gravity and landing.
+- Settings **Gravity** defaults to ON. OFF keeps unsupported placements still;
+  throws retain momentum briefly and damp to a stop without downward acceleration.
 - Standing support on monitor work-area floors, taskbars, and visible native-window top edges.
 - Support revalidation when a window moves or disappears, plus tray-based position recovery.
 - Multi-monitor and non-zero/negative desktop coordinate handling in native geometry paths.
 
 ### Character behavior
+
+- Import VRM 0.x or 1.0 characters into a persistent local library. **Multi Character**
+  in Settings' sticky bottom navigation opens a temporary, separate panel with slots
+  and live model previews. Select a slot,
+  then a model to use it. Character 1 starts Used and Character 2 starts Not Used.
+  **Add More Character** adds slots up to eight total, including the main avatar.
+  The same model can be assigned to multiple slots.
+- The character panel is hidden until opened from Settings. **Done** or the panel's
+  close control closes it and returns to Settings; it is not an animation tab.
+- Each additional character has its own window, animation, physics, gaze, settings,
+  and tray. Each slot has an **X** control that switches only that character off.
+  Character 1 hides the main pet while the owner and remaining slots stay alive.
+  Closing the main Nera process closes its companions and their gallery workers.
+  Active companions are session-only; the model library persists across launches.
+- Each companion runs a renderer, so practical capacity depends on available RAM
+  and GPU memory. The main window owns additions; companions can change their
+  own model and settings without spawning nested groups.
 
 - VRM 1.0 avatar loading through `bevy_vrm1`.
 - VRMA clip loading with real clip durations and explicit looping/one-shot behavior.
@@ -55,6 +77,24 @@ The application uses Bevy resources, components, messages, and systems for behav
   braking, and an inward return after reaching a roaming boundary.
 - Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.
 - Facial expression crossfades derived from the resolved body-animation state.
+- All 24 basic clips have facial intent, shared by gallery previews and desktop
+  playback. Headpat now plays **Blush + Embarrassed 75%**, Angry Gesture uses
+  **Angry 90%**, Sleepy uses **Exhausted 60%**, and LookAround uses **Surprised 35%**.
+  Expressions fade over 180 ms and return to the active base pose afterward.
+- Animation Manager **Expressions** shows eight live head-only previews of the
+  current character, with selectable intensity. Nera uses independent eyebrow,
+  eyelid, and mouth morphs for Default, Joy, Sad, Angry, Embarrassed, Timid,
+  Surprised, and Exhausted. Other models fall back to available VRM expressions.
+  Clearing the preview returns the face to automatic animation and blinking.
+  Angry uses a stronger brow, narrowed-eye, and downturned-mouth recipe in both
+  previews and automatic reactions; Embarrassed and Timid also add a soft blush.
+  Exact likeness to an external reference depends on the model's geometry,
+  textures, and available facial morphs.
+- Legacy facial bindings are repaired from authored presets or real named morph
+  targets. Models exported without facial blendshapes cannot change expression;
+  the gallery identifies this limitation rather than inventing missing geometry.
+- Death01 shadows stay on the cached desktop contact line, including VRM 0.x
+  models and Death01 played from the animation gallery.
 - Cursor-driven eye/head gaze with animation-aware temporary ownership.
 - VRM spring-bone simulation and configurable simple or character shadows.
 
@@ -69,6 +109,12 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
 - Persistent one-time and weekly alarms, with enable/disable, edit, and delete controls for up to 12 entries.
 - Alarm attention mode with a reframed upper-body presentation, looping sound, intro/loop animation, dismiss, and five-minute snooze.
+- Choose **Classic**, **Gentle**, **Chime**, **Digital**, or **Siren** in the alarm
+  editor and play a preview before saving. Quick alarms have a separate default
+  sound selector. Snoozing and queued reminders preserve their selected sound.
+  Short sounds repeat no faster than every three seconds; master volume and mute
+  apply to previews and ringing. The four added sounds are verified CC0 assets;
+  sources and license details are in [sound credits](assets/sound/CREDITS.md).
 - Persistent Settings window with controls for:
   - always on top, Start with Windows, Start Hidden, and remembered position;
   - character size and ground offset;
@@ -222,7 +268,10 @@ ProjectNera/
 │   ├── shaders/
 │   │   └── nera_shadow_only.wgsl
 │   ├── sound/
-│   │   └── alarm.mp3
+│   │   ├── alarm.mp3
+│   │   ├── gentle.ogg + chime.ogg
+│   │   ├── digital.wav + siren.wav
+│   │   └── CREDITS.md + KENNEY-LICENSE.txt
 │   └── vrm/
 │       ├── nera_256.vrm
 │       ├── nera.vrm
@@ -240,6 +289,7 @@ ProjectNera/
 │   ├── animation/
 │   │   ├── state.rs
 │   │   ├── systems.rs
+│   │   ├── limbs.rs
 │   │   └── playback.rs
 │   ├── environment.rs
 │   ├── environment/
@@ -251,8 +301,11 @@ ProjectNera/
 │   ├── pet_behavior.rs
 │   ├── walking.rs
 │   ├── expression.rs
+│   ├── expression/                       # Presets and detailed facial morphs
+│   ├── character.rs + character/library.rs
 │   ├── presentation.rs
 │   ├── alarm.rs
+│   ├── alarm/sounds.rs
 │   ├── alarm_settings.rs
 │   ├── alarm_dismiss.rs
 │   ├── action_menu.rs
@@ -352,15 +405,14 @@ These are source-size bounds, not measured RAM limits. Utility windows from Nera
 and its manager process are excluded from support/fullscreen detection, and light
 settings affect only the desktop key light.
 
-Validation: `cargo check` passes; `cargo test` reports **229 passed,
-0 failed, 5 ignored** (existing opt-in native/local-asset tests). The latest debug
-binary compiled and linked, but `cargo build` could not replace the running
-`target/debug/nera.exe`. Its compiled output is available as `target/debug/nera-updated.exe`;
-close the existing pet before launching that build. Native Windows visual
-testing has not been run and remains user-led; this implementation work does not
-launch Nera. Real multi-monitor, mixed-DPI, direction/gait, and extended-use checks
-remain necessary. See [PHASE_7_PLAN.md](PHASE_7_PLAN.md) for the implementation
-boundary and remaining validation.
+Validation: `cargo check --all-targets --offline` and the debug build pass;
+`cargo test --bin nera --offline` reports **280 passed, 0 failed, 6 ignored**.
+Bounded native smoke runs verify live face/model previews at desktop and compact
+sizes, initialized companions and selective close, procedural limb reactions,
+alarm sound save, throw/landing, gravity-OFF coasting, and legacy Death01 shadow
+contact. The debug executable is `target/debug/nera.exe`. Real multi-monitor,
+mixed-DPI, focus/tray, and extended-use checks remain necessary; the smoke runs
+do not establish those behaviors. See [PHASE_7_PLAN.md](PHASE_7_PLAN.md).
 
 Phase 5.9 completed the architecture-focused refactor without intentionally changing application behavior.
 
@@ -383,6 +435,26 @@ cargo test: 116 passed, 0 failed, 0 ignored
 ```
 
 The suite covers state transitions and pure decision logic, including animation priority, interaction hit testing, presentation, settings persistence, desktop support geometry, and native helper boundaries. It does not replace manual Windows GUI testing.
+
+Opt-in debug smoke runs exercise the new native features with bounded lifetimes:
+
+```powershell
+cargo build --bin nera
+.\target\debug\nera.exe --animation-manager-worker --expression-smoke
+.\target\debug\nera.exe --animation-manager-worker --roster-smoke
+.\target\debug\nera.exe --feature-smoke
+.\target\debug\nera.exe --feature-smoke --motion-smoke
+```
+
+The expression run captures all eight heads at desktop and compact sizes. The
+feature run uses a separate settings profile, verifies two initialized companion
+avatars, sided limb reactions, stronger automatic anger, selective companion
+closure, and an alarm sound saved through the editor. Audio is muted for this
+run. Screenshots and reports go to `%TEMP%/nera-feature-smoke`; the owner exits
+and closes its companions when the run completes.
+The roster run captures the model picker at desktop and compact sizes. The motion
+run verifies a throw arc and landing, gravity-OFF coasting and stable placement,
+then loads a legacy character and checks the Death01 shadow's projected floor.
 
 ## Known Limitations and Notes
 

@@ -118,6 +118,10 @@ pub(crate) struct NeraReleased {
     pub(crate) was_dragging: bool,
 }
 
+mod momentum;
+#[derive(Message, Clone, Copy, Debug)]
+pub(crate) struct NeraThrow { pub(crate) velocity: Vec2 }
+
 pub(crate) struct InteractionPlugin;
 
 impl Plugin for InteractionPlugin {
@@ -128,6 +132,7 @@ impl Plugin for InteractionPlugin {
             .add_message::<NeraDragged>()
             .add_message::<NeraHeadPatted>()
             .add_message::<NeraReleased>()
+            .add_message::<NeraThrow>()
             // Debug consumer only. Keeping it in PostUpdate guarantees the
             // Update-stage producer has already emitted this frame's messages.
             .add_systems(PostUpdate, log_interaction_messages);
@@ -217,6 +222,7 @@ const UNSNAP_GUARD_RADIUS_AT_96_DPI: f32 = 240.0;
 const UNSNAP_VERTICAL_BAND_AT_96_DPI: f32 = 24.0;
 #[derive(Resource, Default)]
 pub(crate) struct DesktopPetInteraction {
+    pub(crate) momentum: momentum::DragMomentum,
     pub(crate) state: InteractionState,
 
     /// Phase 5.2 captures semantic body parts at mouse-down so animation or
@@ -263,6 +269,7 @@ impl DesktopPetInteraction {
     /// desktop click until the user happened to complete another full
     /// press+release over Nera.
     pub(crate) fn reset_gesture_state(&mut self) {
+        self.momentum.clear();
         self.state = InteractionState::None;
         self.pressed_body_part = None;
         self.right_pressed_body_part = None;
@@ -487,6 +494,7 @@ pub(crate) fn drag_nera_window(
     mut drag_started: MessageWriter<NeraDragStarted>,
     mut dragged: MessageWriter<NeraDragged>,
     mut released: MessageWriter<NeraReleased>,
+    mut thrown: MessageWriter<NeraThrow>,
 ) {
     let Some(hwnd) = environment.nera_hwnd else {
         return;
@@ -545,6 +553,8 @@ pub(crate) fn drag_nera_window(
             interaction.drag_start_cursor = Some(cursor);
             interaction.last_drag_cursor = Some(cursor);
             interaction.drag_started_at = Some(now);
+            interaction.momentum.clear();
+            interaction.momentum.sample(now, cursor);
 
             if matches!(
                 environment.placement,
@@ -646,6 +656,7 @@ pub(crate) fn drag_nera_window(
         // Pending/attached states intentionally keep the HWND pinned.
         // ------------------------------------------------------------------
         if environment.placement == PlacementState::Free {
+            interaction.momentum.sample(now, cursor);
             if let Some(offset) = interaction.drag_offset {
                 let new_position = platform::PhysicalPoint::new(
                     global_cursor.x - offset.x,
@@ -704,7 +715,8 @@ pub(crate) fn drag_nera_window(
                 }
             }
 
-            if hold_ready && !cooldown_blocked && !guard_blocked && !vertical_blocked {
+            let moving_fast = interaction.momentum.velocity(environment.nera_scale_factor as f32) != Vec2::ZERO;
+            if hold_ready && !moving_fast && !cooldown_blocked && !guard_blocked && !vertical_blocked {
                 // IMPORTANT: this does NOT move the HWND. It only creates a
                 // Pending* placement. Sitting_Enter owns the landing transition before Seat calibration;
                 // Last then samples Seat and commits the attachment later.
@@ -723,6 +735,12 @@ pub(crate) fn drag_nera_window(
         )
     {
         let was_dragging = interaction.state == InteractionState::Dragging;
+        if was_dragging && environment.placement == PlacementState::Free {
+            interaction.momentum.sample(now, cursor);
+            let velocity = interaction.momentum.velocity(environment.nera_scale_factor as f32);
+            if velocity != Vec2::ZERO { thrown.write(NeraThrow { velocity }); }
+        }
+        interaction.momentum.clear();
         let pointer = nera_pointer_position(cursor, &environment);
 
         if let Some(body_part) = interaction.pressed_body_part {

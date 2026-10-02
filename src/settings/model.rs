@@ -28,6 +28,7 @@ pub(crate) struct AlarmConfig {
     pub(crate) day: u8,
     /// Monday = bit 0 ... Sunday = bit 6.
     pub(crate) repeat_days: u8,
+    pub(crate) sound: u8,
 }
 
 impl AlarmConfig {
@@ -45,6 +46,7 @@ impl AlarmConfig {
             month,
             day,
             repeat_days: 0b0111_1111,
+            sound: 1,
         }
     }
 
@@ -57,6 +59,7 @@ impl AlarmConfig {
             .day
             .clamp(1, alarm_days_in_month(self.year, self.month));
         self.repeat_days &= 0b0111_1111;
+        self.sound = self.sound.min((crate::alarm::sounds::SOUNDS.len() - 1) as u8);
         if self.mode == 1 && self.repeat_days == 0 {
             self.enabled = false;
         }
@@ -251,6 +254,7 @@ pub(crate) struct NeraSettings {
     /// Allows Nera to walk around the desktop while otherwise idle.
     /// Disabled by default, including profiles created before walking existed.
     pub(crate) walking_enabled: bool,
+    pub(crate) gravity_enabled: bool,
     /// 0 = Calm, 1 = Normal, 2 = Active. Unknown values use Normal.
     pub(crate) activity_level: u8,
     /// Maximum distance from the last user placement, in logical pixels (DPI-scaled).
@@ -308,6 +312,7 @@ pub(crate) struct NeraSettings {
     /// False means this profile predates the multi-alarm book and should expose
     /// the legacy single-alarm fields as one migration candidate.
     pub(crate) alarm_book_initialized: bool,
+    pub(crate) alarm_sound: u8,
 }
 
 fn default_alarm_date() -> (u16, u8, u8) {
@@ -349,6 +354,7 @@ impl Default for NeraSettings {
             character_asset: String::new(),
             ground_offset: 0,
             walking_enabled: false,
+            gravity_enabled: true,
             activity_level: 1,
             roaming_radius_px: 400,
             pause_roaming_fullscreen: true,
@@ -377,6 +383,7 @@ impl Default for NeraSettings {
 
             alarm_book: "v1|".to_string(),
             alarm_book_initialized: false,
+            alarm_sound: 1,
         }
     }
 }
@@ -673,7 +680,7 @@ fn encode_alarm_book(alarms: &[AlarmConfig]) -> String {
     for alarm in alarms {
         let alarm = alarm.clone().normalized();
         encoded.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{}|",
+            "{},{},{},{},{},{},{},{},{},{},{}|",
             alarm.id,
             u8::from(alarm.enabled),
             alarm.hour,
@@ -684,6 +691,7 @@ fn encode_alarm_book(alarms: &[AlarmConfig]) -> String {
             alarm.day,
             alarm.repeat_days,
             encode_label_hex(&alarm.label),
+            alarm.sound,
         ));
     }
 
@@ -696,7 +704,7 @@ fn decode_alarm_book(book: &str) -> Option<Vec<AlarmConfig>> {
 
     for record in body.split('|').filter(|record| !record.is_empty()) {
         let fields: Vec<_> = record.split(',').collect();
-        if fields.len() != 10 {
+        if fields.len() != 10 && fields.len() != 11 {
             warn!("Settings: skipping malformed alarm record");
             continue;
         }
@@ -714,6 +722,7 @@ fn decode_alarm_book(book: &str) -> Option<Vec<AlarmConfig>> {
                     day: fields[7].parse().ok()?,
                     repeat_days: fields[8].parse().ok()?,
                     label: decode_label_hex(fields[9])?,
+                    sound: fields.get(10).and_then(|sound| sound.parse().ok()).unwrap_or(0),
                 }
                 .normalized(),
             )
@@ -749,6 +758,7 @@ impl NeraSettings {
                 month: self.alarm_month,
                 day: self.alarm_day,
                 repeat_days: self.alarm_repeat_days,
+                sound: self.alarm_sound,
             }
             .normalized(),
         ]
@@ -846,6 +856,16 @@ mod alarm_book_tests {
     use super::*;
 
     #[test]
+    fn old_alarm_records_keep_classic_sound_and_new_records_preserve_choices() {
+        let old = decode_alarm_book("v1|3,1,6,45,1,2026,9,23,31,57616b65207570|").unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].sound, 0);
+        let mut alarm = old[0].clone();
+        alarm.sound = 4;
+        assert_eq!(decode_alarm_book(&encode_alarm_book(&[alarm.clone()])).unwrap(), vec![alarm]);
+    }
+
+    #[test]
     fn alarm_book_roundtrip_preserves_multiple_entries_and_labels() {
         let alarms = vec![
             AlarmConfig {
@@ -859,6 +879,7 @@ mod alarm_book_tests {
                 month: 9,
                 day: 23,
                 repeat_days: 0b0001_1111,
+                sound: 2,
             },
             AlarmConfig {
                 id: 4,
@@ -871,6 +892,7 @@ mod alarm_book_tests {
                 month: 10,
                 day: 2,
                 repeat_days: 0,
+                sound: 4,
             },
         ];
 

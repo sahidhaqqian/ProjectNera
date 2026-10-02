@@ -15,14 +15,32 @@ const PREFIX: &str = "NERA_MANAGER\t";
 
 #[derive(Debug, PartialEq)]
 enum Event {
+    Settings,
+    Roster(crate::character::roster::RosterRequest),
     Play(String),
     Back,
+    Expression(crate::expression::NeraExpressionPreset, f32),
+    ClearExpression,
 }
 
 fn decode_event(line: &str) -> Option<Event> {
     let message = line.strip_prefix(PREFIX)?;
+    if message == "SETTINGS" { return Some(Event::Settings); }
+    if let Some(json) = message.strip_prefix("ROSTER_REQUEST\t") {
+        let request: crate::character::roster::RosterRequest = serde_json::from_str(json).ok()?;
+        return request.valid().then_some(Event::Roster(request));
+    }
     if message == "BACK" {
         return Some(Event::Back);
+    }
+    if message == "CLEAR_EXPRESSION" {
+        return Some(Event::ClearExpression);
+    }
+    if let Some(value) = message.strip_prefix("EXPRESSION\t") {
+        let (name, percent) = value.split_once('\t')?;
+        let preset = crate::expression::NeraExpressionPreset::from_wire(name)?;
+        let percent: u8 = percent.parse().ok()?;
+        return (percent <= 100).then_some(Event::Expression(preset, f32::from(percent) / 100.0));
     }
     let path = message.strip_prefix("PLAY\t")?;
     let key = path.strip_prefix("animations/")?;
@@ -41,6 +59,7 @@ fn decode_event(line: &str) -> Option<Event> {
 
 #[derive(Resource, Default)]
 struct ManagerProcess {
+    roster_snapshot: String,
     child: Option<Child>,
     events: Option<Mutex<mpsc::Receiver<Event>>>,
     pending_playback_error: Option<(String, String)>,
@@ -92,6 +111,7 @@ impl ManagerProcess {
         self.child = Some(child);
         self.events = Some(Mutex::new(receive));
         self.character_path = character_path.to_owned();
+        self.roster_snapshot.clear();
         Ok(())
     }
 }
@@ -102,12 +122,14 @@ impl Plugin for AnimationManagerHostPlugin {
         app.init_resource::<ManagerProcess>()
             .init_resource::<AnimationManagerInputGate>()
             .add_message::<OpenAnimationManager>()
+            .add_message::<super::OpenCharacterManager>()
             .add_systems(
                 Update,
                 (
                     poll_manager,
                     open_manager,
                     forward_character,
+                    forward_roster,
                     forward_playback_errors,
                 )
                     .chain()
@@ -122,16 +144,18 @@ impl Plugin for AnimationManagerHostPlugin {
 
 fn open_manager(
     mut requests: MessageReader<OpenAnimationManager>,
+    mut characters: MessageReader<super::OpenCharacterManager>,
     mut process: ResMut<ManagerProcess>,
     mut gate: ResMut<AnimationManagerInputGate>,
     character: Option<Res<crate::character::ActiveCharacter>>,
 ) {
-    if requests.read().next().is_none() {
+    let character_panel = characters.read().next().is_some();
+    if requests.read().next().is_none() && !character_panel {
         return;
     }
     if let Some(child) = &mut process.child {
         if let Some(input) = &mut child.stdin {
-            let _ = writeln!(input, "FOCUS");
+            let _ = writeln!(input, "{}", if character_panel { "CHARACTERS" } else { "ANIMATIONS" });
         }
         return;
     }
@@ -147,6 +171,14 @@ fn open_manager(
         error!("Could not open Animation Manager: {error}");
     }
     gate.window_open = process.child.is_some();
+    if character_panel && let Some(input) = process.child.as_mut().and_then(|child| child.stdin.as_mut()) { let _ = writeln!(input, "CHARACTERS"); }
+}
+
+fn forward_roster(instances: Res<crate::character::library::CharacterInstances>, catalog: Res<crate::character::library::CharacterCatalog>, active: Res<crate::character::ActiveCharacter>, status: Res<crate::character::CharacterImportStatus>, windows: Query<&Window, With<bevy::window::PrimaryWindow>>, mut process: ResMut<ManagerProcess>) {
+    if process.child.is_none() { return; }
+    let roster = instances.roster(&catalog, &active, windows.single().is_ok_and(|w| w.visible), &status.message);
+    let json = serde_json::to_string(&roster).unwrap();
+    if json != process.roster_snapshot && let Some(input) = process.child.as_mut().and_then(|c| c.stdin.as_mut()) && writeln!(input, "ROSTER\t{json}").is_ok() { process.roster_snapshot = json; }
 }
 
 fn forward_character(
@@ -177,15 +209,28 @@ fn poll_manager(
     mut gate: ResMut<AnimationManagerInputGate>,
     mut play: MessageWriter<crate::animation::PlayLibraryAnimation>,
     mut back: MessageWriter<crate::settings::ReturnToActionMenu>,
+    mut settings: MessageWriter<crate::settings::OpenSettingsWindow>,
+    mut expression: MessageWriter<crate::expression::ExpressionPreviewRequest>,
+    mut roster: MessageWriter<crate::character::roster::RosterRequest>,
 ) {
     if let Some(events) = &process.events {
         for event in events.lock().unwrap().try_iter() {
             match event {
+                Event::Settings => { settings.write_default(); }
+                Event::Roster(request) => { roster.write(request); }
                 Event::Play(path) => {
                     play.write(crate::animation::PlayLibraryAnimation { path });
                 }
                 Event::Back => {
                     back.write(crate::settings::ReturnToActionMenu);
+                }
+                Event::Expression(preset, intensity) => {
+                    if process.child.is_some() {
+                        expression.write(crate::expression::ExpressionPreviewRequest::Set(preset, intensity));
+                    }
+                }
+                Event::ClearExpression => {
+                    expression.write(crate::expression::ExpressionPreviewRequest::Clear);
                 }
             }
         }
@@ -195,6 +240,7 @@ fn poll_manager(
         .as_mut()
         .is_some_and(|child| child.try_wait().ok().flatten().is_some())
     {
+        expression.write(crate::expression::ExpressionPreviewRequest::Clear);
         // The reader drains the pipe asynchronously; retain its receiver until
         // the next launch so the final Back/Play event cannot race process exit.
         process.child = None;
@@ -228,12 +274,18 @@ fn forward_playback_errors(
 
 #[derive(Debug, PartialEq)]
 enum Control {
+    Animations,
+    Characters,
+    Roster(crate::character::roster::CharacterRoster),
     Focus,
     PlaybackError(String, String),
     Character(String),
 }
 
 fn decode_control(line: &str) -> Option<Control> {
+    if line == "ANIMATIONS" { return Some(Control::Animations); }
+    if line == "CHARACTERS" { return Some(Control::Characters); }
+    if let Some(json) = line.strip_prefix("ROSTER\t") { return serde_json::from_str(json).ok().map(Control::Roster); }
     if line == "FOCUS" {
         return Some(Control::Focus);
     }
@@ -306,11 +358,21 @@ pub(crate) fn run_worker() {
             receive_controls.before(super::preview::sync_visible_previews),
             forward_play.after(super::handle_actions),
             forward_back.after(super::close_after_release),
+            forward_expression.after(super::close_after_release),
+            forward_roster_requests.after(super::handle_actions),
         ),
     );
     #[cfg(debug_assertions)]
     if std::env::var_os("NERA_GALLERY_SMOKE_TEST").is_some() {
         app.add_systems(Update, smoke_test.after(super::sync_gallery_scrollbar));
+    }
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|arg| arg == "--expression-smoke") {
+        app.add_systems(Update, expression_smoke.before(super::ui::rebuild_ui));
+    }
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|arg| arg == "--roster-smoke") {
+        app.add_systems(Update, roster_smoke.before(super::ui::rebuild_ui));
     }
     app.run();
 }
@@ -338,9 +400,15 @@ fn receive_controls(
                 state.dirty = true;
             }
             Ok(Control::Character(path)) => {
+                state.character_path = path.clone(); state.dirty = true;
                 previews.set_character(path, &mut commands, &mut images);
             }
+            Ok(Control::Characters) => { previews.clear(&mut commands, &mut images); state.tab = super::GalleryTab::Characters; state.scroll_y = 0.0; state.dirty = true; for mut window in &mut windows { window.title = "Nera Multi Character".into(); window.set_minimized(false); window.focused = true; } }
+            Ok(Control::Animations) => { if state.tab == super::GalleryTab::Characters { previews.clear(&mut commands, &mut images); state.tab = super::GalleryTab::All; state.scroll_y = 0.0; state.dirty = true; } for mut window in &mut windows { window.title = "Nera Animations".into(); window.set_minimized(false); window.focused = true; } }
+            Ok(Control::Roster(roster)) => { if state.characters != roster { state.characters = roster; state.dirty = true; } }
             Err(mpsc::TryRecvError::Disconnected) => {
+                #[cfg(debug_assertions)]
+                if std::env::args().any(|arg| arg == "--expression-smoke" || arg == "--roster-smoke") { break; }
                 exit.write(AppExit::Success);
                 break;
             }
@@ -349,19 +417,91 @@ fn receive_controls(
     }
 }
 
+#[cfg(debug_assertions)]
+fn expression_smoke(
+    time: Res<Time>,
+    mut stage: Local<u8>,
+    mut state: ResMut<super::ManagerState>,
+    windows: Query<Entity, With<ManagerWindow>>,
+    mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
+) {
+    use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+    let folder = std::env::temp_dir().join("nera-feature-smoke");
+    let _ = std::fs::create_dir_all(&folder);
+    if *stage == 0 && time.elapsed_secs() > 0.5 {
+        state.tab = super::GalleryTab::Expressions;
+        state.dirty = true;
+        *stage = 1;
+    }
+    if *stage == 1 && time.elapsed_secs() > 12.0 {
+        if let Ok(window) = windows.single() {
+            commands.spawn(Screenshot::window(window)).observe(save_to_disk(folder.join("expressions-desktop.png")));
+        }
+        *stage = 2;
+    }
+    if *stage == 2 && time.elapsed_secs() > 14.0 {
+        commands.entity(windows.single().unwrap()).insert(Window {
+            resolution: (720, 640).into(), ..super::manager_window_descriptor()
+        });
+        *stage = 3;
+    }
+    if *stage == 3 && time.elapsed_secs() > 17.0 {
+        commands.spawn(Screenshot::window(windows.single().unwrap())).observe(save_to_disk(folder.join("expressions-compact.png")));
+        *stage = 4;
+    }
+    if time.elapsed_secs() > 20.0 { exit.write(AppExit::Success); }
+}
+
 fn send_event(message: &str) {
     let mut output = std::io::stdout().lock();
     let _ = writeln!(output, "{PREFIX}{message}");
     let _ = output.flush();
+}
+
+#[cfg(debug_assertions)]
+fn roster_smoke(time: Res<Time>, mut stage: Local<u8>, mut state: ResMut<super::ManagerState>, windows: Query<Entity, With<ManagerWindow>>, mut commands: Commands, mut exit: MessageWriter<AppExit>) {
+    use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+    let folder = std::env::temp_dir().join("nera-feature-smoke");
+    let _ = std::fs::create_dir_all(&folder);
+    if *stage == 0 && time.elapsed_secs() > 0.5 {
+        state.tab = super::GalleryTab::Characters; state.dirty = true; *stage = 1;
+    }
+    if *stage == 1 && time.elapsed_secs() > 12.0 {
+        commands.spawn(Screenshot::window(windows.single().unwrap())).observe(save_to_disk(folder.join("roster-desktop.png"))); *stage = 2;
+    }
+    if *stage == 2 && time.elapsed_secs() > 14.0 {
+        for _ in 2..8 { state.characters.slots.push(crate::character::roster::SlotView { used: false, path: None, name: String::new() }); }
+        state.characters.can_add = false; state.dirty = true;
+        commands.entity(windows.single().unwrap()).insert(Window { resolution: (720, 640).into(), ..super::manager_window_descriptor() }); *stage = 3;
+    }
+    if *stage == 3 && time.elapsed_secs() > 19.0 {
+        commands.spawn(Screenshot::window(windows.single().unwrap())).observe(save_to_disk(folder.join("roster-compact.png"))); *stage = 4;
+    }
+    if time.elapsed_secs() > 22.0 { exit.write(AppExit::Success); }
 }
 fn forward_play(mut play: MessageReader<crate::animation::PlayLibraryAnimation>) {
     for event in play.read() {
         send_event(&format!("PLAY\t{}", event.path));
     }
 }
-fn forward_back(mut back: MessageReader<crate::settings::ReturnToActionMenu>) {
+fn forward_roster_requests(mut requests: MessageReader<crate::character::roster::RosterRequest>) {
+    for request in requests.read() { send_event(&format!("ROSTER_REQUEST\t{}", serde_json::to_string(request).unwrap())); }
+}
+fn forward_back(mut back: MessageReader<crate::settings::ReturnToActionMenu>, state: Res<super::ManagerState>) {
     for _ in back.read() {
-        send_event("BACK");
+        send_event(if state.tab == super::GalleryTab::Characters { "SETTINGS" } else { "BACK" });
+    }
+}
+
+fn forward_expression(mut requests: MessageReader<crate::expression::ExpressionPreviewRequest>) {
+    for request in requests.read() {
+        match request {
+            crate::expression::ExpressionPreviewRequest::Set(preset, intensity) => {
+                send_event(&format!("EXPRESSION\t{}\t{}", preset.wire(), (intensity * 100.0).round() as u8));
+            }
+            crate::expression::ExpressionPreviewRequest::Clear => send_event("CLEAR_EXPRESSION"),
+        }
     }
 }
 
@@ -479,6 +619,22 @@ fn smoke_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expression_protocol_accepts_only_known_presets_and_valid_intensity() {
+        use crate::expression::NeraExpressionPreset as Preset;
+        assert_eq!(decode_event("NERA_MANAGER\tEXPRESSION\tjoy\t100"),
+            Some(Event::Expression(Preset::Joy, 1.0)));
+        assert_eq!(decode_event("NERA_MANAGER\tEXPRESSION\tdefault\t0"),
+            Some(Event::Expression(Preset::Default, 0.0)));
+        assert_eq!(decode_event("NERA_MANAGER\tCLEAR_EXPRESSION"), Some(Event::ClearExpression));
+        for invalid in ["NERA_MANAGER\tEXPRESSION\tblush\t100",
+            "NERA_MANAGER\tEXPRESSION\tjoy\t101",
+            "NERA_MANAGER\tEXPRESSION\tjoy\tNaN",
+            "NERA_MANAGER\tEXPRESSION\tjoy\t50\tPLAY"] {
+            assert_eq!(decode_event(invalid), None);
+        }
+    }
     #[test]
     fn character_protocol_preserves_asset_paths_and_rejects_malformed_messages() {
         let path = "characters://Nera \"custom\" 日本語.vrm";
@@ -529,6 +685,9 @@ mod tests {
 
     #[test]
     fn pipe_protocol_only_accepts_library_paths_and_back() {
+        assert_eq!(decode_event("NERA_MANAGER\tSETTINGS"), Some(Event::Settings));
+        assert_eq!(decode_control("CHARACTERS"), Some(Control::Characters));
+        assert_eq!(decode_control("ANIMATIONS"), Some(Control::Animations));
         assert_eq!(decode_event("NERA_MANAGER\tBACK"), Some(Event::Back));
         assert_eq!(
             decode_event("NERA_MANAGER\tPLAY\tanimations/VRMA/Angry.vrma"),
@@ -542,6 +701,31 @@ mod tests {
         ] {
             assert_eq!(decode_event(line), None);
         }
+    }
+
+    #[test]
+    fn character_panel_is_on_demand_and_contains_no_animation_navigation() {
+        let (send, receive) = mpsc::channel();
+        let mut app = App::new();
+        app.insert_resource(super::super::ManagerState::for_test())
+            .insert_resource(Controls(Mutex::new(receive)))
+            .init_resource::<super::super::preview::PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .add_message::<AppExit>()
+            .add_systems(Update, (receive_controls, super::super::ui::rebuild_ui).chain());
+        app.world_mut().spawn((ManagerWindow, Window::default()));
+        app.world_mut().spawn((super::super::ManagerCamera, Camera2d));
+        assert!(app.world().resource::<super::super::ManagerState>().tab == super::super::GalleryTab::All);
+        app.update();
+        let world = app.world_mut();
+        assert!(!world.query::<&super::super::ManagerAction>().iter(world).any(|action| matches!(action, super::super::ManagerAction::CharacterSlot(_))));
+        send.send(Control::Characters).unwrap(); app.update();
+        let world = app.world_mut();
+        assert!(world.query::<&super::super::ManagerAction>().iter(world).any(|action| matches!(action, super::super::ManagerAction::CharacterSlot(0))));
+        assert!(!world.query::<&super::super::ManagerAction>().iter(world).any(|action| matches!(action, super::super::ManagerAction::All | super::super::ManagerAction::Base | super::super::ManagerAction::Expressions | super::super::ManagerAction::Import)));
+        assert!(world.query::<&Text>().iter(world).any(|text| text.0 == "Done"));
+        send.send(Control::Animations).unwrap(); app.update();
+        assert!(app.world().resource::<super::super::ManagerState>().tab == super::super::GalleryTab::All);
     }
 
     #[test]

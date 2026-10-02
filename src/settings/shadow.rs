@@ -213,7 +213,7 @@ fn apply_simple_shadow(
     let softness = settings.shadow_softness.clamp(25, 100) as f32 / 100.0;
     let character_scale = settings.character_scale();
     let ground = should_show
-        .then(|| shadow_ground_with_user_offset(&settings, &bones, &camera_query))
+        .then(|| desktop_shadow_ground(&settings, &environment, &bones, &camera_query))
         .flatten();
     let visible = should_show && ground.is_some();
 
@@ -286,6 +286,25 @@ fn character_shadow_ground(
         )),
         (None, None) => None,
     }
+}
+
+fn desktop_shadow_ground(
+    settings: &NeraSettings,
+    environment: &DesktopEnvironment,
+    bones: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+    cameras: &Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
+) -> Option<Vec3> {
+    if let Some(anchor) = environment.feet_anchor_logical
+        && let Some((camera, transform)) = cameras.iter().next()
+        && let Ok(ray) = camera.viewport_to_world(transform, anchor)
+        && ray.direction.z.abs() > 0.001
+    {
+        // Feet are animated; the cached desktop contact line is not.
+        let distance = (SIMPLE_SHADOW_Z - ray.origin.z) / ray.direction.z;
+        let point = ray.get_point(distance);
+        if distance > 0.0 && point.is_finite() { return Some(point); }
+    }
+    shadow_ground_with_user_offset(settings, bones, cameras)
 }
 
 
@@ -365,7 +384,7 @@ fn apply_character_shadow_receiver(
     ) && settings.uses_character_shadow();
 
     let ground = if should_show {
-        shadow_ground_with_user_offset(&settings, &bones, &camera_query)
+        desktop_shadow_ground(&settings, &environment, &bones, &camera_query)
     } else {
         None
     };
@@ -416,6 +435,15 @@ fn apply_light_settings(
         // effect we want here. Keep them disabled even in Character mode.
         light.contact_shadows_enabled = false;
     }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn assert_smoke_shadow_ground(world: &mut World) {
+    let anchor = world.resource::<DesktopEnvironment>().feet_anchor_logical.unwrap();
+    let points: Vec<_> = world.query_filtered::<&GlobalTransform, With<SimpleShadowLayer>>().iter(world).map(GlobalTransform::translation).collect();
+    let (camera, transform) = world.query_filtered::<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>().single(world).unwrap();
+    assert_eq!(points.len(), 3);
+    for point in points { let viewport = camera.world_to_viewport(transform, point).unwrap(); assert!((viewport.y - anchor.y).abs() < 18.0, "shadow must stay at the cached floor, not lifted feet: {} vs {}", viewport.y, anchor.y); }
 }
 
 #[cfg(test)]

@@ -148,6 +148,9 @@ struct SettingsFooter;
 #[derive(Component)]
 pub(super) struct CharacterImportStatus;
 
+#[derive(Component)]
+pub(super) struct GravityValue;
+
 #[derive(Component, Clone, Copy)]
 pub(super) enum SettingsButtonAction {
     ToggleAlwaysOnTop,
@@ -157,6 +160,8 @@ pub(super) enum SettingsButtonAction {
     CycleCharacterSize,
     CycleGroundOffset,
     ToggleWalking,
+    ToggleGravity,
+    OpenCharacterManager,
     CycleActivityLevel,
     TogglePauseFullscreen,
     ToggleFollowMouse,
@@ -335,7 +340,6 @@ fn spawn_settings_ui(
                         },
                     ))
                     .with_children(|scroll| {
-
                         settings_card(scroll, "GENERAL", |card| {
                             settings_row(
                                 card,
@@ -394,6 +398,7 @@ fn spawn_settings_ui(
                         });
 
                         settings_card(scroll, "BEHAVIOR", |card| {
+                            settings_row(card, "Gravity", if settings.gravity_enabled { "ON" } else { "OFF" }.into(), GravityValue, SettingsButtonAction::ToggleGravity);
                             walking_checkbox(card, settings.walking_enabled);
                             settings_row(
                                 card,
@@ -572,6 +577,7 @@ fn spawn_settings_ui(
                         ..default()
                     },
                 )).with_children(|footer| {
+                    action_button(footer, "Multi Character", SettingsButtonAction::OpenCharacterManager);
                     action_button(footer, "Reset to defaults", SettingsButtonAction::ResetDefaults);
                     action_button(footer, "Exit Nera", SettingsButtonAction::Exit);
                     action_button(footer, "Import Character (.vrm)", SettingsButtonAction::ImportCharacter);
@@ -1058,6 +1064,8 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::CycleCharacterSize
         | SettingsButtonAction::CycleGroundOffset
         | SettingsButtonAction::ToggleWalking
+        | SettingsButtonAction::ToggleGravity
+        | SettingsButtonAction::OpenCharacterManager
         | SettingsButtonAction::CycleActivityLevel
         | SettingsButtonAction::TogglePauseFullscreen
         | SettingsButtonAction::ToggleFollowMouse
@@ -1072,7 +1080,8 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::CycleMasterVolume
         | SettingsButtonAction::ToggleAudioMute
         | SettingsButtonAction::CycleFps
-        | SettingsButtonAction::ResetDefaults => match interaction {
+        | SettingsButtonAction::ResetDefaults
+        => match interaction {
             Interaction::Pressed => Color::srgb(0.18, 0.22, 0.36),
             Interaction::Hovered => Color::srgb(0.135, 0.17, 0.29),
             Interaction::None => Color::srgb(0.095, 0.12, 0.21),
@@ -1093,6 +1102,7 @@ pub(super) fn handle_settings_buttons(
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
     mut restore_character: MessageWriter<crate::character::RestoreDefaultCharacter>,
+    mut characters: MessageWriter<crate::animation_manager::OpenCharacterManager>,
 ) {
     for (interaction, action, mut background) in &mut interactions {
         *background = BackgroundColor(button_color(*action, *interaction));
@@ -1102,6 +1112,14 @@ pub(super) fn handle_settings_buttons(
         }
 
         match action {
+            SettingsButtonAction::OpenCharacterManager => {
+                characters.write_default();
+                input_gate.close_requested = true;
+            }
+            SettingsButtonAction::ToggleGravity => {
+                settings.gravity_enabled = !settings.gravity_enabled;
+                save_settings_deferred(&mut commands);
+            }
             SettingsButtonAction::ToggleAlwaysOnTop => {
                 settings.toggle_always_on_top();
                 save_settings_deferred(&mut commands);
@@ -1321,7 +1339,8 @@ pub(super) fn handle_settings_buttons(
             }
             // The picker has its own system so it can use the utility HWND
             // without borrowing the primary pet Window.
-            SettingsButtonAction::ImportCharacter => {}
+            SettingsButtonAction::ImportCharacter
+            => {}
         }
     }
 }
@@ -1355,6 +1374,10 @@ pub(super) fn import_character_from_settings(
         Ok(None) => {}
         Err(error) => status.message = error,
     }
+}
+
+pub(super) fn update_gravity_label(settings: Res<NeraSettings>, mut labels: Query<&mut Text, With<GravityValue>>) {
+    for mut label in &mut labels { label.set_if_neq(Text::new(if settings.gravity_enabled { "ON" } else { "OFF" })); }
 }
 
 pub(super) fn update_character_import_status(
@@ -1773,7 +1796,7 @@ mod walking_checkbox_tests {
     }
 
     #[test]
-    fn exit_and_character_import_stay_outside_the_scrolling_settings_body() {
+    fn navigation_actions_stay_outside_the_scrolling_settings_body() {
         let mut app = App::new();
         app.add_systems(Startup, |mut commands: Commands| {
             let window = commands.spawn_empty().id();
@@ -1810,11 +1833,18 @@ mod walking_checkbox_tests {
         assert!(matches!(
             actions.as_slice(),
             [
+                SettingsButtonAction::OpenCharacterManager,
                 SettingsButtonAction::ResetDefaults,
                 SettingsButtonAction::Exit,
                 SettingsButtonAction::ImportCharacter,
             ]
         ));
+        let character_manager_count = world
+            .query::<&SettingsButtonAction>()
+            .iter(world)
+            .filter(|action| matches!(action, SettingsButtonAction::OpenCharacterManager))
+            .count();
+        assert_eq!(character_manager_count, 1);
         let reset_count = world
             .query::<&SettingsButtonAction>()
             .iter(world)

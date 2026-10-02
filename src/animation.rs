@@ -20,8 +20,9 @@ mod playback;
 mod state;
 mod systems;
 mod walking_loop;
+mod limbs;
 
-pub(crate) use library::{LibraryAnimationError, PlayLibraryAnimation};
+pub(crate) use library::{LibraryAnimationError, LibraryPlayback, PlayLibraryAnimation};
 pub(crate) use playback::*;
 pub(crate) use state::*;
 pub(crate) use systems::*;
@@ -111,6 +112,7 @@ pub(crate) fn install_library_test_systems(app: &mut App) {
 
 impl Plugin for NeraAnimationPlugin {
     fn build(&self, app: &mut App) {
+        limbs::install(app);
         app.init_resource::<NeraAnimationState>()
             .init_resource::<NeraAnimationClips>()
             .init_resource::<NeraAnimationPlayback>()

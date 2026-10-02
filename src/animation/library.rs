@@ -39,7 +39,7 @@ struct CachedClip {
 }
 
 #[derive(Resource, Default)]
-pub(super) struct LibraryPlayback {
+pub(crate) struct LibraryPlayback {
     clips: HashMap<String, CachedClip>,
     source_bytes: u64,
     access_clock: u64,
@@ -48,6 +48,9 @@ pub(super) struct LibraryPlayback {
 }
 
 impl LibraryPlayback {
+    pub(crate) fn path_for(&self, entity: Entity) -> Option<&str> {
+        self.clips.iter().find(|(_, clip)| clip.entity == entity).map(|(path, _)| path.as_str())
+    }
     fn validate_source_size(source_bytes: u64) -> Result<(), &'static str> {
         if source_bytes > MAX_CLIP_SOURCE_BYTES {
             return Err("Animation exceeds the 16 MiB desktop playback limit.");

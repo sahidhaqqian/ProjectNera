@@ -47,6 +47,10 @@ src/
   interaction.rs + interaction/{headpat,hit_testing}.rs
   animation.rs + animation/{state,systems,playback}.rs
   expression.rs
+  expression/{presets,face,basic}.rs
+  character.rs + character/{library,roster}.rs
+  animation/limbs.rs
+  alarm/sounds.rs
   environment.rs + environment/{taskbar,sitting}.rs
   desktop_physics.rs + desktop_physics/geometry.rs
   pet_behavior.rs + walking.rs
@@ -211,6 +215,106 @@ entering Sitting cancels an existing Praying action so it cannot resume later.
   entities.
 - **Produces/emits:** `SetExpressions` triggers before the VRM expression pass.
 - **Should NOT own:** Independent reaction decisions or raw interaction readers.
+
+Manual expression selection uses `ExpressionPreviewRequest` and
+`ExpressionPreviewOverride`. The gallery worker forwards the selection over its
+validated stdout protocol. Each expression card owns a separate render-layer
+preview rig, framed from that rig's `HeadBoneEntity`; the desktop avatar keeps its
+ordinary body framing. `face.rs` caches named morph-target metadata before GPU
+extraction frees mesh CPU data. Before the VRM expression pass it removes the
+previous detailed pose; after the pass it applies independent brow/eye/mouth
+weights for a selected face. Clearing the selection restores normal VRM control,
+including unbound custom facial morphs. Models without these named targets use
+available VRM emotion/blink/mouth expressions instead. Anatomical differences
+and missing morphs prevent a promise of identical appearance across models.
+Where a model separates Face/Hair and Body meshes, expression previews hide Body
+without altering the live desktop avatar. `basic.rs` maps all 24 protected clips
+to a facial preset and intensity. Desktop playback resolves the path from the
+actually active library clip entity, never a pending selection. `AutomaticFace`
+crossfades the outgoing and incoming detailed recipes over 180 ms, replacing
+aggregate facial emotions but preserving natural blink. Gallery clips use the
+same table; unknown custom clips keep their own facial animation. Headpat loads
+Blush and selects Embarrassed at 75%. A manual preview takes precedence and
+selecting a gallery animation releases that manual override.
+Embarrassed/Timid use subtle transparent cheek geometry attached to the head,
+with each preview's render layer preserved.
+
+### Characters and independent desktop instances
+
+`character.rs` validates, migrates, stages, and commits model replacements.
+`character/library.rs` owns `CharacterCatalog`, `CharacterInstances`, and the
+`CharacterLibraryRequest` Select/Spawn/Close vocabulary. Validated models are
+content-addressed in `%APPDATA%/io.github.sahidhaqqi.projectnera/characters`.
+`catalog.json` preserves display names; directory discovery recovers older models.
+Importing identical bytes adds no duplicate catalog entry. `character/roster.rs`
+defines validated AddSlot/Assign/Clear/Import commands and serializable slot/model
+snapshots. The owner starts with two slots and caps the roster at eight, including
+the primary avatar. Settings' fixed bottom navigation opens a temporary, separate
+Multi Character panel;
+it is hidden by default and never appears in the animation navbar or radial menu.
+The utility renderer internally reuses the gallery worker's bounded preview pool
+and virtualized rows, but shows only the character title, slot rail, and model
+picker. Done/X emits SETTINGS rather than BACK, closes the worker window, and
+reopens Settings. Opening animations again restores the ordinary gallery surface.
+Metadata reports facial morph capacity; VRM0 migration repairs supported legacy
+names and missing named bindings without fabricating targets in baked meshes.
+
+Spawn launches the current executable with `--character-instance <session-id>`
+and a validated asset path. Each process keeps the existing single-avatar ECS
+contracts and owns a separate native window, renderer, physics state, animation
+graph, pointer capture, gallery worker, and settings namespace. Initial size,
+position, FPS, audio, brightness, shadow, gravity, and walking preferences are copied from
+the owner. Scheduled alarms are initially empty so spawning cannot duplicate the
+main alarm book. Companion changes never write the main settings profile.
+Companion additions are managed by the main process; its stdin ownership pipe
+asks companions to exit on Close or owner shutdown, including unexpected owner
+termination. MODEL commands replace an existing companion's avatar without
+spawning another process. Polling clears exited companion slots; closing slots
+cannot temporarily exceed the eight-slot cap. Clearing slot zero hides only the
+primary HWND, leaving the owner and its gallery operational. Only the
+catalog is restored on the next launch, not active companion processes. Memory
+use grows per renderer rather than sharing one global animation/physics resource.
+
+### Momentum, gravity, and shadow contact
+
+`interaction/momentum.rs` samples recent free-drag cursor travel and emits
+`NeraThrow` only above a DPI-scaled speed threshold. Paused/slow releases emit
+none; fast movement suppresses drag-to-sit acquisition. Gesture cancellation
+clears the velocity history. `desktop_physics.rs` owns horizontal/vertical launch
+velocity, subpixel movement, screen bounds, drag damping, support collision, and
+the single landing transition. Existing sitting and drag ownership still win.
+The persistent `gravity_enabled` setting defaults true. OFF suppresses unsupported
+falling and startup drops; an explicit throw coasts with damping, then freezes.
+
+Shadow placement projects the cached logical desktop contact line through the
+active camera instead of following animated foot height. Death01 gallery clips
+also participate in body-wide visual grounding, and library poses cannot overwrite
+the standing contact cache. The stable line applies to both shadow modes and
+avoids raised feet pulling the ellipse or receiver above a collapsed VRM0 avatar.
+
+### Procedural limb reactions
+
+Arm, hand, leg, and foot clicks request `TemporaryAction::LimbReaction(BodyPart)`
+at the existing Reaction priority. `animation/limbs.rs` layers a 950 ms sided
+skeletal gesture over the selected standing/seated base clip. A smooth envelope
+returns to zero at both ends. PreUpdate removes the previous additive rotation;
+PostUpdate applies the current one after animation sampling and before VRM
+constraints. Only `NeraLiveBone` entities are changed, excluding VRMA source rigs
+and gallery previews. Dragging, falls, critical actions, and alarms outrank the
+gesture. Limb clicks reset the damage combo and never add damage.
+
+### Alarm sound selection
+
+`alarm/sounds.rs` provides stable persisted sound IDs, source paths, and one-shot
+preview messages. `AlarmConfig.sound` is saved as an optional eleventh field in
+the existing `v1` alarm book; old ten-field entries load as Classic. Unknown IDs
+are normalized. `NeraSettings.alarm_sound` selects the quick-alarm default.
+`AlarmDisplayInfo.sound` travels with each queued reminder and snooze, so another
+alarm cannot replace its sound. Ringing uses one marked audio player and restarts
+completed sounds with at least a three-second start interval. Presentation exit
+still owns ringing teardown. Ogg/Vorbis and WAV decoders are enabled alongside
+MP3. The four new assets are CC0; source provenance and the upstream Kenney
+license are retained in `assets/sound/`.
 
 ### `src/environment.rs` and `src/environment/` — desktop snapshot and attached placement
 
@@ -826,11 +930,10 @@ Manually exercise clicking, dragging, sitting/unsnapping, taskbar and external
 window support, attention entry/exit, settings input gating, tray recovery, and
 multi-monitor/DPI behavior on Windows.
 
-For Phase 7, `cargo check` passes; `cargo test` reports
-**229 passed, 0 failed, 5 ignored** (existing opt-in native/local-asset tests). Native visual
-validation has not been run; GUI testing is user-led and implementation work does
-not launch Nera. Geometry/state tests do not establish real mixed-DPI or
-multi-monitor behavior, gait quality, or long-running resource stability.
-The latest debug executable compiled and linked; `cargo build` could not replace
-the running `target/debug/nera.exe`. The verified compiler output is provided as
-`target/debug/nera-updated.exe` until the existing process is closed.
+Current validation: `cargo check --all-targets --offline`, the debug build, and
+`cargo test --bin nera --offline` pass (**280 passed, 0 failed, 6 ignored**).
+Debug-only bounded smoke runs use separate settings profiles and capture actual
+native screenshots for facial/model previews, companions, limb/alarm controls,
+throw/landing, gravity-OFF motion, and a migrated VRM0 Death01 shadow. Geometry
+and smoke tests do not establish real mixed-DPI or multi-monitor behavior, native
+focus/tray resilience, gait quality, or long-running resource stability.

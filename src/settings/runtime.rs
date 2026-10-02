@@ -544,6 +544,7 @@ mod tests {
             character_asset: String::new(),
             ground_offset: 0,
             walking_enabled: false,
+            gravity_enabled: true,
             activity_level: 1,
             roaming_radius_px: 400,
             pause_roaming_fullscreen: true,
@@ -569,6 +570,7 @@ mod tests {
             alarm_repeat_days: 0,
             alarm_book: String::new(),
             alarm_book_initialized: true,
+            alarm_sound: 0,
         };
         let mut app = App::new();
         app.insert_resource(settings)

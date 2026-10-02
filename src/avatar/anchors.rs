@@ -91,6 +91,7 @@ impl StandingAnchorSampling {
                     | VisualState::SittingLoop
                     | VisualState::SittingExit
                     | VisualState::Death
+                    | VisualState::LibraryAnimation(_)
             )
         {
             self.settle_remaining = STANDING_ANCHOR_SETTLE;
@@ -206,6 +207,7 @@ pub(crate) fn update_avatar_anchors(
     time: Res<Time>,
     interaction: Res<DesktopPetInteraction>,
     animation: Res<NeraAnimationState>,
+    library: Option<Res<crate::animation::LibraryPlayback>>,
     walking: Res<crate::walking::WalkingRuntime>,
     settings: Res<NeraSettings>,
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
@@ -227,6 +229,7 @@ pub(crate) fn update_avatar_anchors(
     children_query: Query<&Children>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
+    let death_pose = animation.death_active() || matches!(animation.visual_state(), VisualState::LibraryAnimation(entity) if library.as_ref().and_then(|library| library.path_for(entity)).is_some_and(|path| path == "animations/animasi_basic/Death01.vrma"));
     let standing_sample_ready =
         standing_sample.ready(animation.visual_state(), walking.active(), time.delta());
     let seat_sample_ready = seat_sample.ready(
@@ -288,7 +291,7 @@ pub(crate) fn update_avatar_anchors(
 
         let world = transform.translation();
 
-        if animation.death_active() {
+        if death_pose {
             if let Ok(viewport) = camera.world_to_viewport(camera_transform, world) {
                 death_support_points.push(viewport);
             }
@@ -358,7 +361,7 @@ pub(crate) fn update_avatar_anchors(
     // inside the 3D scene by constraining Nera's live skeleton to the desktop
     // floor. The VRMA still owns the pose; this only removes any vertical air
     // gap that the desktop renderer would otherwise expose.
-    let death_active = animation.death_active();
+    let death_active = death_pose;
 
     if death_active
         && environment.placement == PlacementState::Free

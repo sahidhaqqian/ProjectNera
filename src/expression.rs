@@ -5,7 +5,7 @@
 //! interaction messages instead would let the face and the body disagree — a
 //! smiling Nera playing `Angry.vrma`, or an angry face over a head-pat clip.
 //!
-//! Two rules keep this from fighting `bevy_vrm1`:
+//! Facial ownership is explicit:
 //!
 //! 1. **`Neutral` is not an override.** `SetExpressions` *replaces* every
 //!    override, and an `ExpressionOverride` component wins over the VRMA
@@ -14,12 +14,14 @@
 //!    `neutral` preset instead would fight the emotion presets, since
 //!    `nera_256.vrm` binds a real morph target to it.
 //!
-//! 2. **Only emotion presets are ever emitted.** `blink`, the five mouth
-//!    presets (`aa` `ih` `ou` `ee` `oh`) and the gaze presets belong to the
-//!    VRMA clips and to `bevy_vrm1`'s own blink/look-at systems. Overriding
-//!    them would freeze Nera's blinking, so the emitted names are an allowlist
-//!    and `only_emotion_presets_can_ever_be_pushed` asserts nothing outside it
-//!    can ever reach the model.
+//! 2. Generic reactions override only emotion presets. The protected basic clips
+//!    use `basic.rs` for intentional eyebrow/eyelid/mouth poses and intensity.
+//!    `AutomaticFace` retains natural blink on detailed rigs; imported models
+//!    fall back to available presets, including deliberate closed-eye faces.
+//!
+//! Manual expression previews intentionally own eyelids and mouth as well.
+//! Detailed Nera morphs refine basic-animation faces after the VRM pass while retaining
+//! its natural blink; clearing a preview returns ownership to the body state.
 //!
 //! Overriding is safe here rather than destructive because of a property of the
 //! asset set, not of this code: every VRMA Nera actually plays is **body-only**.
@@ -30,10 +32,15 @@
 //! clip's own facial performance at full weight.
 //!
 //! That is an asset fact and can change: if a future clip carries expression
-//! curves, `expression_for_visual` should return `Neutral` for its
-//! `VisualState` so the clip keeps its own face.
+//! curves, its basic mapping must be removed so the clip keeps its own face.
 
 use std::time::Duration;
+
+pub(crate) mod presets;
+pub(crate) mod face;
+pub(crate) mod basic;
+pub(crate) use presets::NeraExpressionPreset;
+use presets::preset_weights;
 
 use bevy::prelude::*;
 
@@ -148,6 +155,11 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         Body::HeadStroke | Body::StartupGreeting => Face::Happy,
         Body::HitHead | Body::DodgeWhileSitting => Face::Surprised,
         Body::HitChest => Face::Angry,
+        Body::LimbReaction(part) => match part {
+            crate::interaction::BodyPart::LeftArm | crate::interaction::BodyPart::RightArm
+            | crate::interaction::BodyPart::LeftHand | crate::interaction::BodyPart::RightHand => Face::Happy,
+            _ => Face::Surprised,
+        },
         Body::Death => Face::Sad,
 
         // Airborne, and the alarm presentation.
@@ -279,7 +291,28 @@ pub(crate) struct NeraExpressionState {
     /// replaced, the same facial state must still be re-sent to the new entity.
     bound_entity: Option<Entity>,
     /// Change detection, so an unchanged face emits no VRM event at all.
-    last_pushed: Option<ExpressionWeights>,
+    last_pushed: Option<Vec<(String, f32)>>,
+}
+
+#[derive(Resource, Default, Debug)]
+pub(crate) struct ExpressionPreviewOverride {
+    selection: Option<(NeraExpressionPreset, f32)>,
+}
+
+#[derive(Message, Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ExpressionPreviewRequest {
+    Set(NeraExpressionPreset, f32),
+    Clear,
+}
+
+impl ExpressionPreviewOverride {
+    fn apply(&mut self, request: ExpressionPreviewRequest) {
+        self.selection = match request {
+            ExpressionPreviewRequest::Set(preset, intensity) => Some((preset,
+                if intensity.is_finite() { intensity.clamp(0.0, 1.0) } else { 0.0 })),
+            ExpressionPreviewRequest::Clear => None,
+        };
+    }
 }
 
 impl Default for NeraExpressionState {
@@ -333,7 +366,11 @@ pub(crate) struct NeraExpressionPlugin;
 
 impl Plugin for NeraExpressionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<NeraExpressionState>().add_systems(
+        face::install(app);
+        app.init_resource::<NeraExpressionState>()
+            .init_resource::<ExpressionPreviewOverride>()
+            .add_message::<ExpressionPreviewRequest>()
+            .add_systems(
             PostUpdate,
             drive_nera_expressions
                 .before(VrmSystemSets::Expressions),
@@ -347,17 +384,30 @@ impl Plugin for NeraExpressionPlugin {
 fn drive_nera_expressions(
     time: Res<Time>,
     animation: Res<NeraAnimationState>,
+    library: Option<Res<crate::animation::LibraryPlayback>>,
+    mut automatic: Local<face::AutomaticFace>,
     mut state: ResMut<NeraExpressionState>,
-    vrms: Query<(Entity, &ExpressionEntityMap), With<crate::avatar::NeraAvatar>>,
+    mut preview: ResMut<ExpressionPreviewOverride>,
+    mut requests: MessageReader<ExpressionPreviewRequest>,
+    vrms: Query<(Entity, Ref<ExpressionEntityMap>), With<crate::avatar::NeraAvatar>>,
     mut commands: Commands,
 ) {
-    let target = expression_for_visual(animation.visual_state());
+    for request in requests.read() {
+        preview.apply(*request);
+    }
+    let visual = animation.visual_state();
+    let path = if let VisualState::LibraryAnimation(entity) = visual { library.as_ref().and_then(|library| library.path_for(entity)) } else { None };
+    let selection = if visual == VisualState::SittingLoop && animation.selected_sitting_pose() == crate::animation::SittingPose::Sitting4 {
+        basic::for_clip("animasi_basic/Sitting_4.vrma")
+    } else { basic::for_visual(visual, path) };
+    automatic.advance(selection, time.delta_secs());
+    let target = expression_for_visual(visual);
     state.advance(target, time.delta());
 
     // `iter().next()` rather than `single()`: while the VRM is still loading
     // there is no expression map yet, and `single()` would log an error every
     // frame. `bevy_vrm1` also warns if the event targets an uninitialized VRM.
-    let Some((vrm_entity, _)) = vrms.iter().next() else {
+    let Some((vrm_entity, map)) = vrms.iter().next() else {
         // A later VRM may be a freshly spawned entity. Forget which entity
         // received the previous override so its current face is re-applied.
         state.bound_entity = None;
@@ -365,25 +415,40 @@ fn drive_nera_expressions(
         return;
     };
 
-    if state.bound_entity != Some(vrm_entity) {
+    if state.bound_entity != Some(vrm_entity) || map.is_changed() {
         state.bound_entity = Some(vrm_entity);
         state.last_pushed = None;
     }
 
-    let weights = state.weights();
+    let weights: Vec<(String, f32)> = match preview.selection {
+        Some((preset, intensity)) => preset_weights(
+            preset, intensity, map.0.keys().map(|name| name.0.as_str()),
+        ),
+        None if automatic.current.is_some() || automatic.previous.is_some() => automatic.weights(map.0.keys().map(|name| name.0.as_str())),
+        None => state.weights().live().filter_map(|(name, weight)| {
+            map.0.keys().find(|available| available.0 == name)
+                .map(|_| (name.to_owned(), weight))
+        }).collect(),
+    };
 
-    if state.last_pushed == Some(weights) {
+    let angry = state.weights().live().find(|(name, _)| *name == "angry")
+        .map_or(0.0, |(_, weight)| weight);
+    commands.entity(vrm_entity).insert((
+        face::FacePose(preview.selection), *automatic, face::AutomaticAngry(angry),
+    ));
+
+    if state.last_pushed.as_ref() == Some(&weights) {
         return;
     }
 
-    state.last_pushed = Some(weights);
+    state.last_pushed = Some(weights.clone());
 
     // An empty set is meaningful, not a no-op: `apply_set_expressions` removes
     // every override absent from the map, which is how Neutral hands the face
     // back to the VRMA clip.
     commands.trigger(SetExpressions::from_iter(
         vrm_entity,
-        weights.live(),
+        weights.iter().map(|(name, weight)| (name.as_str(), *weight)),
     ));
 
     if weights.is_empty() {
@@ -398,6 +463,59 @@ fn drive_nera_expressions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_owns_face_until_cleared_and_rebinds_after_avatar_change() {
+        use bevy_vrm1::prelude::VrmExpression;
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<NeraAnimationState>()
+            .init_resource::<NeraExpressionState>()
+            .init_resource::<ExpressionPreviewOverride>()
+            .add_message::<ExpressionPreviewRequest>()
+            .add_systems(PostUpdate, drive_nera_expressions);
+        let expression = app.world_mut().spawn_empty().id();
+        let avatar = app.world_mut().spawn((
+            crate::avatar::NeraAvatar,
+            ExpressionEntityMap([(VrmExpression::from("happy"), expression)].into()),
+        )).id();
+
+        app.world_mut().write_message(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, 1.0));
+        app.update();
+        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed,
+            Some(vec![("happy".into(), 1.0)]));
+
+        app.world_mut().write_message(ExpressionPreviewRequest::Set(NeraExpressionPreset::Angry, 1.0));
+        app.update();
+        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed, Some(vec![]));
+
+        app.world_mut().despawn(avatar);
+        let replacement = app.world_mut().spawn((
+            crate::avatar::NeraAvatar,
+            ExpressionEntityMap([(VrmExpression::from("happy"), expression)].into()),
+        )).id();
+        app.world_mut().write_message(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, 1.0));
+        app.update();
+        assert_eq!(app.world().resource::<NeraExpressionState>().bound_entity, Some(replacement));
+        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed,
+            Some(vec![("happy".into(), 1.0)]));
+
+        app.world_mut().write_message(ExpressionPreviewRequest::Clear);
+        app.update();
+        assert!(app.world().resource::<ExpressionPreviewOverride>().selection.is_none());
+        assert_eq!(app.world().resource::<NeraExpressionState>().last_pushed, Some(vec![]));
+    }
+
+    #[test]
+    fn preview_intensity_is_clamped() {
+        let mut preview = ExpressionPreviewOverride::default();
+        preview.apply(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, 2.0));
+        assert_eq!(preview.selection, Some((NeraExpressionPreset::Joy, 1.0)));
+        preview.apply(ExpressionPreviewRequest::Set(NeraExpressionPreset::Joy, -1.0));
+        assert_eq!(preview.selection, Some((NeraExpressionPreset::Joy, 0.0)));
+        preview.apply(ExpressionPreviewRequest::Clear);
+        assert!(preview.selection.is_none());
+    }
 
     #[test]
     fn neutral_emits_no_override_at_all() {

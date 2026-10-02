@@ -34,7 +34,7 @@ fn is_vrm_asset(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("vrm"))
 }
 
-fn release_avatar_mesh_copies(
+pub(crate) fn release_avatar_mesh_copies(
     mut events: MessageReader<AssetEvent<Mesh>>,
     server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,

@@ -141,6 +141,8 @@ pub(crate) fn sync_interaction_animation_actions(
             }
             _ => {
                 state.reset_damage_combo();
+                state.request_one_shot(TemporaryAction::LimbReaction(event.body_part),
+                    super::limbs::REACTION_DURATION);
             }
         }
     }

@@ -22,6 +22,9 @@ use crate::{
     settings::NeraSettings,
 };
 
+pub(crate) mod library;
+pub(crate) mod roster;
+
 pub(crate) const DEFAULT_CHARACTER: &str = "vrm/nera_256.vrm";
 const MAX_MODEL_BYTES: u64 = 128 * 1024 * 1024;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(45);
@@ -57,6 +60,7 @@ impl Default for ActiveCharacter {
 struct CharacterImport {
     copy: Option<Task<Result<ImportedCharacter, String>>>,
     pending: Option<PendingCharacter>,
+    label: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -104,6 +108,7 @@ pub(crate) struct CharacterPlugin;
 
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
+        library::install(app);
         app.init_resource::<ActiveCharacter>()
             .init_resource::<CharacterImportStatus>()
             .init_resource::<CharacterImport>()
@@ -152,6 +157,7 @@ fn restore_saved_character(
     };
     let path = character_directory().join(name);
     let directory = character_directory();
+    runtime.label = Some(name.to_owned());
     runtime.copy = Some(IoTaskPool::get().spawn(async move { import_model(&path, &directory) }));
     status.loading = true;
     status.message = "Loading saved character...".into();
@@ -176,6 +182,8 @@ fn receive_import(
     }
     // Last selection wins. Completed copies are immutable private assets, so
     // cancelling a previous task cannot overwrite a newer character.
+    runtime.label = selected.as_ref().and_then(|path| path.file_stem())
+        .map(|name| name.to_string_lossy().into_owned());
     runtime.copy = Some(IoTaskPool::get().spawn(async move {
         if restore {
             Ok(ImportedCharacter {
@@ -199,6 +207,12 @@ fn update_import(world: &mut World) {
             runtime.copy = None;
             match result {
                 Ok(imported) => {
+                    if imported.path != DEFAULT_CHARACTER {
+                        let label = runtime.label.take().unwrap_or_else(|| "Character".into());
+                        if let Err(error) = world.resource_mut::<library::CharacterCatalog>().remember(&imported.path, &label) {
+                            warn!("Character catalog save failed: {error}");
+                        }
+                    }
                     runtime.pending = Some(PendingCharacter {
                         handle: world.resource::<AssetServer>().load(imported.path.clone()),
                         path: imported.path,

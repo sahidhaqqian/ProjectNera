@@ -160,6 +160,7 @@ pub(crate) enum TemporaryAction {
     Landing,
     HitHead,
     HitChest,
+    LimbReaction(crate::interaction::BodyPart),
     DodgeWhileSitting,
     HeadStroke,
     Death,
@@ -204,7 +205,7 @@ impl TemporaryAction {
         match self {
             Self::Walking => AnimationPriority::Walking,
             Self::StartupGreeting => AnimationPriority::StartupGreeting,
-            Self::HitHead | Self::HitChest | Self::DodgeWhileSitting | Self::HeadStroke => {
+            Self::HitHead | Self::HitChest | Self::DodgeWhileSitting | Self::HeadStroke | Self::LimbReaction(_) => {
                 AnimationPriority::Reaction
             }
             Self::Praying => AnimationPriority::Menu,
@@ -263,6 +264,7 @@ pub(crate) enum VisualState {
     Landing,
     HitHead,
     HitChest,
+    LimbReaction(crate::interaction::BodyPart),
     DodgeWhileSitting,
     HeadStroke,
     Death,
@@ -315,6 +317,7 @@ impl Default for NeraAnimationState {
 }
 
 impl NeraAnimationState {
+    pub(crate) fn selected_sitting_pose(&self) -> SittingPose { self.sitting_pose.unwrap_or_default() }
     pub(super) fn select_sitting_pose(&mut self, available: &[SittingPose]) {
         let candidates: Vec<_> = available
             .iter()
@@ -814,6 +817,7 @@ impl NeraAnimationState {
                 TemporaryAction::Landing => VisualState::Landing,
                 TemporaryAction::HitHead => VisualState::HitHead,
                 TemporaryAction::HitChest => VisualState::HitChest,
+                TemporaryAction::LimbReaction(part) => VisualState::LimbReaction(part),
                 TemporaryAction::DodgeWhileSitting => VisualState::DodgeWhileSitting,
                 TemporaryAction::HeadStroke => VisualState::HeadStroke,
                 TemporaryAction::Death => VisualState::Death,
