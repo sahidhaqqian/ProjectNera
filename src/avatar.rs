@@ -2,10 +2,12 @@
 //! Scheduling remains in main so cross-subsystem ordering stays explicit.
 mod anchors;
 
-pub(crate) use anchors::{DeathVisualGrounding, update_avatar_anchors};
+pub(crate) use anchors::seat_contact_world;
+pub(crate) use anchors::{DeathVisualGrounding, preserve_seated_hips, update_avatar_anchors};
 
 use crate::{
     animation::{NeraAnimationState, spawn_animation_library},
+    character::ActiveCharacter,
     environment::DesktopEnvironment,
     interaction::cursor_position_in_nera_window,
     settings::NeraSettings,
@@ -20,9 +22,29 @@ pub(crate) struct NeraAvatar;
 pub(crate) struct NeraMainCamera;
 
 #[derive(Component)]
+pub(crate) struct NeraMainLight;
+
+#[derive(Component)]
 pub(crate) struct LookAtTarget;
 
-const VRM_PATH: &str = "vrm/nera_256.vrm";
+/// Project a stable desktop point onto a camera-facing world plane.
+pub(crate) fn desktop_point_to_world(
+    point: Vec2,
+    environment: &DesktopEnvironment,
+    camera: &Camera,
+    view: &GlobalTransform,
+    z: f32,
+) -> Option<Vec3> {
+    let rect = environment.nera_rect?;
+    let local = (point - Vec2::new(rect.left as f32, rect.top as f32))
+        / environment.nera_scale_factor.max(0.25) as f32;
+    let ray = camera.viewport_to_world(view, local).ok()?;
+    if ray.direction.z.abs() < 0.0001 {
+        return None;
+    }
+    let distance = (z - ray.origin.z) / ray.direction.z;
+    (distance.is_finite() && distance >= 0.0).then(|| ray.get_point(distance))
+}
 
 pub(crate) fn setup_camera(mut commands: Commands) {
     commands.spawn((
@@ -41,6 +63,7 @@ pub(crate) fn setup_camera(mut commands: Commands) {
 pub(crate) fn setup_lighting(mut commands: Commands) {
     commands.spawn((
         Name::new("Nera Key Light"),
+        NeraMainLight,
         DirectionalLight {
             illuminance: 10_000.0,
             shadow_maps_enabled: false,
@@ -70,7 +93,9 @@ pub(crate) fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>)
         .spawn((
             Name::new("Nera"),
             NeraAvatar,
-            VrmHandle(asset_server.load(VRM_PATH)),
+            // Reveal only once the startup entrance has a loaded rig and pose.
+            Visibility::Hidden,
+            VrmHandle(asset_server.load(crate::character::DEFAULT_CHARACTER)),
             LookAt::Target(target),
             Transform::from_xyz(0.0, -0.85, 0.0),
         ))
@@ -83,6 +108,7 @@ pub(crate) fn spawn_nera(mut commands: Commands, asset_server: Res<AssetServer>)
 pub(crate) fn update_look_at_target(
     time: Res<Time>,
     settings: Res<NeraSettings>,
+    character: Res<ActiveCharacter>,
     environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
@@ -104,7 +130,12 @@ pub(crate) fn update_look_at_target(
             .map(|cursor_pos| {
                 let intensity = f32::from(settings.follow_intensity.clamp(25, 100)) / 100.0;
 
-                let map_x = (cursor_pos.x / window.resolution.width() - 0.5) * 4.0 * intensity;
+                let map_x = horizontal_gaze_x(
+                    cursor_pos.x,
+                    window.resolution.width(),
+                    intensity,
+                    character.migrated_from_vrm0,
+                );
 
                 let map_y =
                     0.5 + (0.5 - cursor_pos.y / window.resolution.height()) * 4.0 * intensity;
@@ -120,6 +151,11 @@ pub(crate) fn update_look_at_target(
     // gaze responsive while removing the robotic cursor-to-bone snapping.
     let blend = 1.0 - (-12.0 * time.delta_secs()).exp();
     target_transform.translation = target_transform.translation.lerp(desired, blend);
+}
+
+fn horizontal_gaze_x(cursor_x: f32, window_width: f32, intensity: f32, legacy: bool) -> f32 {
+    let x = (cursor_x / window_width.max(1.0) - 0.5) * 4.0 * intensity;
+    if legacy { -x } else { x }
 }
 
 /// VRMA reactions such as HitHead and ShakeHeadNo1 need temporary ownership of
@@ -166,9 +202,78 @@ pub(crate) fn sync_look_at_for_animation(
     }
 }
 
+/// Walking.vrma advances almost two metres along its local +Z axis. Desktop
+/// movement owns that travel, so preserve the vertical gait while constraining
+/// the live hips to their rest X/Z. This must run after AnimationSystems and
+/// before VrmSystemSets::Constraints, which precedes VRM transform propagation.
+pub(crate) fn apply_walking_pose(
+    animation: Res<NeraAnimationState>,
+    walking: Res<crate::walking::WalkingRuntime>,
+    mut original_rotation: Local<Option<(Entity, Quat)>>,
+    mut avatar_query: Query<(Entity, &mut Transform, &HipsBoneEntity), With<NeraAvatar>>,
+    mut bones: Query<(&mut Transform, &RestTransform), Without<NeraAvatar>>,
+) {
+    let Ok((entity, mut avatar, hips)) = avatar_query.single_mut() else {
+        return;
+    };
+    let direction = if matches!(
+        animation.visual_state(),
+        crate::animation::VisualState::Idle | crate::animation::VisualState::Walking
+    ) {
+        walking.direction()
+    } else {
+        0.0
+    };
+
+    if direction == 0.0 {
+        if let Some((owner, rotation)) = original_rotation.take() {
+            if owner == entity {
+                avatar.rotation = rotation;
+            }
+        }
+        return;
+    }
+
+    let (_, rotation) = *original_rotation.get_or_insert((entity, avatar.rotation));
+    // VRM's forward is +Z. Positive yaw turns it toward camera-right (+X).
+    avatar.rotation = rotation * Quat::from_rotation_y(direction * std::f32::consts::FRAC_PI_2);
+    if animation.visual_state() == crate::animation::VisualState::Walking
+        && let Ok((mut transform, rest)) = bones.get_mut(hips.0)
+    {
+        constrain_walking_hips(&mut transform, &rest.0);
+    }
+}
+
+fn constrain_walking_hips(transform: &mut Transform, rest: &Transform) {
+    transform.translation.x = rest.translation.x;
+    transform.translation.z = rest.translation.z;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walking_root_motion_is_removed_without_erasing_gait_or_bone_rotation() {
+        let rest = Transform::from_xyz(0.02, 0.9, -0.03);
+        let original = Transform {
+            translation: Vec3::new(-0.04, 0.94, 1.88),
+            rotation: Quat::from_rotation_y(0.15),
+            scale: Vec3::splat(0.95),
+        };
+        let mut hips = original;
+        constrain_walking_hips(&mut hips, &rest);
+        assert_eq!(hips.translation, Vec3::new(0.02, 0.94, -0.03));
+        assert_eq!(hips.rotation, original.rotation);
+        assert_eq!(hips.scale, original.scale);
+    }
+
+    #[test]
+    fn legacy_vrm0_gaze_corrects_the_horizontal_coordinate_direction() {
+        assert!(horizontal_gaze_x(75.0, 100.0, 1.0, false) > 0.0);
+        assert!(horizontal_gaze_x(75.0, 100.0, 1.0, true) < 0.0);
+        assert!(horizontal_gaze_x(25.0, 100.0, 1.0, true) > 0.0);
+    }
 
     #[test]
     fn animation_temporarily_owns_gaze_then_restores_user_tracking() {

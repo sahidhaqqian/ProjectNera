@@ -1,6 +1,5 @@
-//! Translate events and idle scheduling into animation requests.
+//! Translate interactions and desktop events into animation requests.
 use std::time::Duration;
-use crate::rng::NeraRng;
 
 use bevy::prelude::*;
 
@@ -13,8 +12,8 @@ use crate::{
 use crate::action_menu::{AnimationMenuChoice, NeraActionMenuCommand};
 
 use super::{
-    AlarmAnimationCommand, IDLE_VARIATION_MAX_DELAY, IDLE_VARIATION_MIN_DELAY,
-    IdleMicroAction, NeraAnimationClips, NeraAnimationState, TemporaryAction, VisualState,
+    AlarmAnimationCommand, LazyNeraVrma, LazyNeraVrmaRequested, NeraAnimationClips,
+    NeraAnimationState, SittingPose, TemporaryAction, request_lazy_vrma,
 };
 
 #[derive(Resource, Default)]
@@ -25,17 +24,43 @@ pub(super) struct AlarmAnimationRuntime {
 }
 pub(crate) fn sync_environment_animation_state(
     environment: Res<DesktopEnvironment>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
 ) {
-    let sitting_surface = matches!(
-        environment.placement,
+    if cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()) {
+        return;
+    }
+    observe_environment_support(&environment, &clips, &mut state);
+}
+
+fn on_sitting_surface(placement: PlacementState) -> bool {
+    matches!(
+        placement,
         PlacementState::PendingWindow { .. }
             | PlacementState::PendingTaskbar { .. }
             | PlacementState::Window(_)
             | PlacementState::Taskbar(_)
-    );
+    )
+}
 
+fn observe_environment_support(
+    environment: &DesktopEnvironment,
+    clips: &NeraAnimationClips,
+    state: &mut NeraAnimationState,
+) {
+    let sitting = on_sitting_surface(environment.placement);
+    if sitting && !state.was_on_sitting_surface {
+        let available: Vec<_> = SittingPose::ALL
+            .into_iter()
+            .filter(|pose| {
+                clips
+                    .sitting_pose(*pose)
+                    .is_some_and(|clip| !clip.duration.is_zero())
+            })
+            .collect();
+        state.select_sitting_pose(&available);
+    }
     let enter_duration = clips
         .sitting_enter
         .map(|clip| clip.duration)
@@ -45,7 +70,7 @@ pub(crate) fn sync_environment_animation_state(
         .map(|clip| clip.duration)
         .unwrap_or(Duration::ZERO);
 
-    state.observe_sitting_surface(sitting_surface, enter_duration, exit_duration);
+    state.observe_sitting_surface(sitting, enter_duration, exit_duration);
 }
 
 pub(crate) fn sync_interaction_animation_actions(
@@ -56,12 +81,57 @@ pub(crate) fn sync_interaction_animation_actions(
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
     mut environment: ResMut<DesktopEnvironment>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    cloud_pose: Option<Res<crate::cloud::CloudSeatPose>>,
 ) {
-    if drag_started.read().next().is_some() {
+    let cloud_seated = cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
+    let resting = cloud
+        .as_ref()
+        .is_some_and(|cloud| cloud.mode() == Some(crate::cloud::CloudMode::Rest));
+    let cloud_ready = cloud.as_ref().is_some_and(|cloud| {
+        cloud_pose
+            .as_ref()
+            .is_some_and(|pose| pose.is_ready_for(cloud))
+    });
+    if drag_started.read().next().is_some() && !cloud_seated {
         state.start_persistent_action(TemporaryAction::Floating);
     }
 
     for event in clicked.read() {
+        if resting {
+            continue;
+        }
+        if matches!(event.body_part, BodyPart::Head | BodyPart::Torso)
+            && (cloud_seated || on_sitting_surface(environment.placement))
+        {
+            // Native support may have changed earlier in this frame, before
+            // the regular support sync. Use actual placement for hit routing.
+            if !cloud_seated {
+                observe_environment_support(&environment, &clips, &mut state);
+            }
+            state.reset_damage_combo();
+            // Let the base seated pose calibrate its anchor before playing a
+            // clip authored with a different hip position. Early hits are
+            // consumed, so they cannot fall through to standing damage.
+            if cloud_ready
+                || (!cloud_seated
+                    && matches!(
+                        environment.placement,
+                        PlacementState::Window(_) | PlacementState::Taskbar(_)
+                    ))
+            {
+                state.request_sitting_dodge(
+                    clips
+                        .dodge_while_sitting
+                        .map(|clip| clip.duration)
+                        .unwrap_or(Duration::ZERO),
+                );
+            }
+            continue;
+        }
+        if cloud_seated && !cloud_ready {
+            continue;
+        }
         match event.body_part {
             BodyPart::Head => {
                 if let Some(hit_clip) = clips.hit_head {
@@ -97,6 +167,10 @@ pub(crate) fn sync_interaction_animation_actions(
             }
             _ => {
                 state.reset_damage_combo();
+                state.request_one_shot(
+                    TemporaryAction::LimbReaction(event.body_part),
+                    super::limbs::REACTION_DURATION,
+                );
             }
         }
     }
@@ -113,7 +187,7 @@ pub(crate) fn sync_interaction_animation_actions(
         info!("Nera detached: Death01 triggered while sitting/attached");
     }
 
-    if head_patted.read().next().is_some() {
+    if head_patted.read().count() > 0 && !resting && (!cloud_seated || cloud_ready) {
         if let Some(clip) = clips.head_stroke {
             state.request_one_shot(TemporaryAction::HeadStroke, clip.duration);
         } else {
@@ -131,10 +205,19 @@ pub(super) fn sync_alarm_animation(
     clips: Res<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
     mut runtime: ResMut<AlarmAnimationRuntime>,
+    mut ecs_commands: Commands,
+    asset_server: Res<AssetServer>,
+    lazy_loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
 ) {
     for command in commands.read() {
         match command {
             AlarmAnimationCommand::Start => {
+                request_lazy_vrma(
+                    LazyNeraVrma::AlarmJump,
+                    &mut ecs_commands,
+                    &asset_server,
+                    &lazy_loaders,
+                );
                 runtime.requested = true;
                 runtime.started = false;
                 runtime.waiting_logged = false;
@@ -159,6 +242,15 @@ pub(super) fn sync_alarm_animation(
 
     if !runtime.requested || runtime.started {
         return;
+    }
+
+    if clips.alarm_jump.is_none() {
+        request_lazy_vrma(
+            LazyNeraVrma::AlarmJump,
+            &mut ecs_commands,
+            &asset_server,
+            &lazy_loaders,
+        );
     }
 
     let (Some(wave), Some(jump)) = (clips.alarm_wave, clips.alarm_jump) else {
@@ -232,120 +324,4 @@ pub(crate) fn sync_action_menu_animation(
 
 pub(crate) fn tick_animation_actions(time: Res<Time>, mut state: ResMut<NeraAnimationState>) {
     state.advance(time.delta());
-}
-
-/// Phase 5.8 idle variation scheduler.
-///
-/// Counts down only while Nera is genuinely idle, so a long interaction
-/// postpones variety rather than spending it on frames where nothing could
-/// play. Shaped like `AlarmAnimationRuntime`: a small runtime resource beside
-/// the authoritative `NeraAnimationState`, not a second state machine.
-#[derive(Resource)]
-pub(crate) struct IdleVariationRuntime {
-    pub(super) cooldown: Duration,
-    /// Avoids the same fidget twice in a row, which is the pattern users
-    /// notice fastest.
-    pub(super) last: Option<IdleMicroAction>,
-    pub(super) rng: NeraRng,
-}
-
-impl Default for IdleVariationRuntime {
-    fn default() -> Self {
-        Self {
-            cooldown: IDLE_VARIATION_MIN_DELAY,
-            last: None,
-            rng: NeraRng::from_entropy(),
-        }
-    }
-}
-
-impl IdleVariationRuntime {
-    pub(super) fn tick(
-        &mut self,
-        delta: Duration,
-        state: &mut NeraAnimationState,
-        clips: &NeraAnimationClips,
-    ) {
-        if state.visual_state() != VisualState::Idle {
-            return;
-        }
-
-        self.cooldown = self.cooldown.saturating_sub(delta);
-
-        if !self.cooldown.is_zero() {
-            return;
-        }
-
-        let Some((action, duration)) = pick_idle_micro(clips, self.last, &mut self.rng) else {
-            // No micro-action has finished loading yet. Retry next frame
-            // instead of arming a full 25-75s delay for an asset that may
-            // arrive a moment from now.
-            return;
-        };
-
-        if !state.request_idle_variation(action, duration) {
-            return;
-        }
-
-        self.last = Some(action);
-        self.cooldown = self.next_delay();
-    }
-
-    pub(super) fn next_delay(&mut self) -> Duration {
-        Duration::from_secs_f32(self.rng.range_f32(
-            IDLE_VARIATION_MIN_DELAY.as_secs_f32(),
-            IDLE_VARIATION_MAX_DELAY.as_secs_f32(),
-        ))
-    }
-}
-
-/// Choose a loaded micro-action, starting from a random offset.
-///
-/// Walking the list rather than re-rolling means a clip that has not finished
-/// loading is skipped instead of stalling the scheduler, and no allocation is
-/// needed. `avoid` demotes the previous fidget to a fallback, so a single
-/// loaded clip still plays rather than the scheduler giving up.
-pub(super) fn pick_idle_micro(
-    clips: &NeraAnimationClips,
-    avoid: Option<IdleMicroAction>,
-    rng: &mut NeraRng,
-) -> Option<(IdleMicroAction, Duration)> {
-    let all = IdleMicroAction::ALL;
-
-    let start = rng.pick_index(all.len())?;
-    let mut fallback: Option<(IdleMicroAction, Duration)> = None;
-
-    for offset in 0..all.len() {
-        let candidate = all[(start + offset) % all.len()];
-
-        let Some(clip) = clips.idle_micro(candidate) else {
-            continue;
-        };
-
-        // A zero duration means the VRMA reported no length, which
-        // `request_one_shot` would reject anyway.
-        if clip.duration.is_zero() {
-            continue;
-        }
-
-        let found = (candidate, clip.duration);
-
-        if Some(candidate) == avoid {
-            fallback.get_or_insert(found);
-            continue;
-        }
-
-        return Some(found);
-    }
-
-    fallback
-}
-
-pub(crate) fn schedule_idle_variation(
-    time: Res<Time>,
-    clips: Res<NeraAnimationClips>,
-    mut state: ResMut<NeraAnimationState>,
-    mut runtime: ResMut<IdleVariationRuntime>,
-) {
-    runtime.tick(time.delta(), &mut state, &clips);
 }

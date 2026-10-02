@@ -1,6 +1,7 @@
 //! Animation vocabulary, request priority, and authoritative runtime state.
 use std::time::Duration;
 
+use crate::rng::NeraRng;
 use bevy::prelude::*;
 
 #[cfg(target_os = "windows")]
@@ -18,14 +19,6 @@ pub(super) const HEAD_STROKE_BLEND: Duration = Duration::from_millis(180);
 pub(super) const SUPPORT_BLEND: Duration = Duration::from_millis(100);
 pub(super) const DEATH_BLEND: Duration = Duration::from_millis(160);
 pub(super) const ALARM_BLEND: Duration = Duration::from_millis(120);
-
-/// Phase 5.8 idle variation. A desktop pet that repeats one loop for hours
-/// reads as a screensaver, so an idle Nera occasionally fidgets on her own.
-///
-/// The delay band is wide on purpose: a fixed interval is a pattern the user
-/// notices within minutes, which is worse than no variation at all.
-pub(super) const IDLE_VARIATION_MIN_DELAY: Duration = Duration::from_secs(25);
-pub(super) const IDLE_VARIATION_MAX_DELAY: Duration = Duration::from_secs(75);
 
 /// Longer than `BASE_BLEND`: a fidget eases in and out of Idle rather than
 /// cutting, so it reads as a continuation of standing rather than a reaction.
@@ -48,29 +41,70 @@ pub(crate) enum BasePose {
     Sitting,
 }
 
-/// Phase 5.8 idle micro-actions — short one-shot fidgets played on top of Idle.
-///
-/// Deliberately limited to fidgets. `Clapping.vrma`, `Goodbye.vrma` and
-/// `Jump.vrma` are converted and unused too, but a desktop pet that randomly
-/// applauds or waves goodbye while you are trying to work reads as noise
-/// rather than life.
+/// A base sitting position, chosen once on attachment and kept until detach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SittingPose {
+    #[default]
+    Default,
+    Sitting2,
+    Sitting4,
+}
+
+impl SittingPose {
+    pub(super) const ALL: [Self; 3] = [Self::Default, Self::Sitting2, Self::Sitting4];
+}
+
+/// One-shot idle variations, each restricted to its matching support pose.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum IdleMicroAction {
     LookAround,
     Relax,
     Sleepy,
     Blush,
+    CatwalkIdleTwistR,
+    Bored,
+    AngryGesture,
+    SittingRubbingArm,
 }
 
 impl IdleMicroAction {
-    /// Stable order, so the scheduler can walk the candidates without
-    /// allocating and so a seeded `NeraRng` replays identically in tests.
-    pub(super) const ALL: [IdleMicroAction; 4] = [
+    /// Complete vocabulary for capability/pose coverage in tests.
+    #[cfg(test)]
+    pub(crate) const ALL: [IdleMicroAction; 8] = [
         IdleMicroAction::LookAround,
         IdleMicroAction::Relax,
         IdleMicroAction::Sleepy,
         IdleMicroAction::Blush,
+        IdleMicroAction::CatwalkIdleTwistR,
+        IdleMicroAction::Bored,
+        IdleMicroAction::AngryGesture,
+        IdleMicroAction::SittingRubbingArm,
     ];
+
+    pub(crate) const STANDING: [Self; 7] = [
+        Self::LookAround,
+        Self::Relax,
+        Self::Sleepy,
+        Self::Blush,
+        Self::CatwalkIdleTwistR,
+        Self::Bored,
+        Self::AngryGesture,
+    ];
+    pub(crate) const SITTING: [Self; 1] = [Self::SittingRubbingArm];
+
+    pub(crate) fn for_pose(pose: BasePose) -> &'static [Self] {
+        match pose {
+            BasePose::Idle => &Self::STANDING,
+            BasePose::Sitting => &Self::SITTING,
+        }
+    }
+
+    pub(crate) fn base_pose(self) -> BasePose {
+        match self {
+            Self::SittingRubbingArm => BasePose::Sitting,
+            _ => BasePose::Idle,
+        }
+    }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -78,17 +112,56 @@ impl IdleMicroAction {
             IdleMicroAction::Relax => "Idle/Relax",
             IdleMicroAction::Sleepy => "Idle/Sleepy",
             IdleMicroAction::Blush => "Idle/Blush",
+            IdleMicroAction::CatwalkIdleTwistR => "Idle/CatwalkIdleTwistR",
+            IdleMicroAction::Bored => "Idle/Bored",
+            IdleMicroAction::AngryGesture => "Idle/AngryGesture",
+            IdleMicroAction::SittingRubbingArm => "Sitting/RubbingArm",
+        }
+    }
+}
+
+/// Asset-independent behavior intents. The clip library reports which ones
+/// currently have a usable animation; an unavailable intent stays idle.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PersonalityAction {
+    Stretch,
+    Yawn,
+    LookAround,
+    SitFidget,
+    Turn,
+    StandUp,
+    SitDown,
+}
+
+impl PersonalityAction {
+    /// Current capability mapping, deliberately separate from behavior choice.
+    /// Add a loaded clip capability here when optional assets are introduced;
+    /// unknown optional assets are never probed or loaded by the controller.
+    pub(super) fn idle_micro(self) -> Option<IdleMicroAction> {
+        match self {
+            Self::LookAround => Some(IdleMicroAction::LookAround),
+            Self::Stretch
+            | Self::Yawn
+            | Self::SitFidget
+            | Self::Turn
+            | Self::StandUp
+            | Self::SitDown => None,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
+    Walking,
+    StartupGreeting,
     Floating,
     Falling,
     Landing,
     HitHead,
     HitChest,
+    LimbReaction(crate::interaction::BodyPart),
+    DodgeWhileSitting,
     HeadStroke,
     Death,
     AlarmWave,
@@ -111,9 +184,13 @@ pub(super) enum SupportTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(super) enum AnimationPriority {
+    /// Autonomous movement yields to every existing animation request.
+    Walking = 30,
     /// Phase 5.8 idle fidgets. Below every real interaction layer, so a
     /// micro-action can never delay a reaction, a drag, physics, or the alarm.
     IdleVariation = 40,
+    /// The first greeting is automatic and yields immediately to the user.
+    StartupGreeting = 50,
     Reaction = 60,
     Menu = 70,
     Floating = 80,
@@ -126,7 +203,13 @@ pub(super) enum AnimationPriority {
 impl TemporaryAction {
     fn priority(self) -> AnimationPriority {
         match self {
-            Self::HitHead | Self::HitChest | Self::HeadStroke => AnimationPriority::Reaction,
+            Self::Walking => AnimationPriority::Walking,
+            Self::StartupGreeting => AnimationPriority::StartupGreeting,
+            Self::HitHead
+            | Self::HitChest
+            | Self::DodgeWhileSitting
+            | Self::HeadStroke
+            | Self::LimbReaction(_) => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
             #[cfg(target_os = "windows")]
@@ -173,6 +256,8 @@ pub(super) struct TimedSupportTransition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VisualState {
     Idle,
+    Walking,
+    StartupGreeting,
     SittingLoop,
     SittingEnter,
     SittingExit,
@@ -181,6 +266,8 @@ pub(crate) enum VisualState {
     Landing,
     HitHead,
     HitChest,
+    LimbReaction(crate::interaction::BodyPart),
+    DodgeWhileSitting,
     HeadStroke,
     Death,
     AlarmWave,
@@ -200,6 +287,9 @@ pub(crate) enum VisualState {
 #[derive(Resource, Debug)]
 pub(crate) struct NeraAnimationState {
     pub(super) base_pose: BasePose,
+    // Also remembers the last seat across detach, avoiding consecutive repeats.
+    pub(super) sitting_pose: Option<SittingPose>,
+    pub(super) sitting_rng: NeraRng,
     pub(super) active_actions: Vec<ActiveAction>,
     pub(super) support_transition: Option<TimedSupportTransition>,
     pub(super) was_on_sitting_surface: bool,
@@ -216,6 +306,8 @@ impl Default for NeraAnimationState {
     fn default() -> Self {
         Self {
             base_pose: BasePose::Idle,
+            sitting_pose: None,
+            sitting_rng: NeraRng::from_entropy(),
             active_actions: Vec::with_capacity(4),
             support_transition: None,
             was_on_sitting_surface: false,
@@ -227,6 +319,33 @@ impl Default for NeraAnimationState {
 }
 
 impl NeraAnimationState {
+    /// A cloud reuses ordinary seated playback without a falling entry clip.
+    /// Future sleep enter/loop/wake sequencing can remain inside the Cloud owner.
+    pub(crate) fn enter_cloud_seat(&mut self, pose: SittingPose) {
+        self.active_actions.clear();
+        self.support_transition = None;
+        self.was_on_sitting_surface = true;
+        self.sitting_pose = Some(pose);
+        self.set_base_pose(BasePose::Sitting);
+        self.bump_revision();
+    }
+    pub(crate) fn selected_sitting_pose(&self) -> SittingPose {
+        self.sitting_pose.unwrap_or_default()
+    }
+    pub(super) fn select_sitting_pose(&mut self, available: &[SittingPose]) {
+        let candidates: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|pose| available.len() == 1 || Some(*pose) != self.sitting_pose)
+            .collect();
+        self.sitting_pose = Some(
+            self.sitting_rng
+                .pick_index(candidates.len())
+                .map(|index| candidates[index])
+                .unwrap_or_default(),
+        );
+    }
+
     pub(crate) fn base_pose(&self) -> BasePose {
         self.base_pose
     }
@@ -236,8 +355,22 @@ impl NeraAnimationState {
     }
 
     pub(super) fn set_base_pose(&mut self, pose: BasePose) {
+        if pose == BasePose::Sitting {
+            self.finish_action(TemporaryAction::Walking);
+            self.finish_action(TemporaryAction::Praying);
+            self.cancel_startup_greeting();
+        }
         if self.base_pose != pose {
             info!("Nera base pose: {:?} -> {:?}", self.base_pose, pose);
+            // A pose-specific clip must never resume after standing up or
+            // sitting down, even if its one-shot lifetime has not expired.
+            self.active_actions.retain(|active| match active.action {
+                TemporaryAction::IdleMicro(action) => action.base_pose() == pose,
+                TemporaryAction::DodgeWhileSitting => pose == BasePose::Sitting,
+                TemporaryAction::HitHead | TemporaryAction::HitChest => pose == BasePose::Idle,
+                _ => true,
+            });
+            self.reset_damage_combo();
             self.base_pose = pose;
         }
     }
@@ -255,6 +388,8 @@ impl NeraAnimationState {
         // this Nera returns from Attention stuck in the Floating pose at
         // priority 80 — above every reaction.
         self.finish_action(TemporaryAction::Floating);
+        self.finish_action(TemporaryAction::Walking);
+        self.cancel_startup_greeting();
 
         self.bump_revision();
 
@@ -284,6 +419,12 @@ impl NeraAnimationState {
     }
 
     pub(super) fn start_persistent_action(&mut self, action: TemporaryAction) {
+        if action.priority() > AnimationPriority::Reaction {
+            self.finish_action(TemporaryAction::DodgeWhileSitting);
+        }
+        if action.priority() > AnimationPriority::StartupGreeting {
+            self.cancel_startup_greeting();
+        }
         if self
             .active_actions
             .iter()
@@ -292,11 +433,11 @@ impl NeraAnimationState {
             return;
         }
 
-        // Same reasoning as `request_one_shot`: every persistent action
-        // outranks a fidget, so drop it instead of letting its tail resume
-        // when the persistent state ends.
-        self.active_actions
-            .retain(|active| !active.action.is_idle_variation());
+        // Autonomous actions never resume underneath a user interaction.
+        self.active_actions.retain(|active| {
+            !active.action.is_idle_variation()
+                && (action == TemporaryAction::Walking || active.action != TemporaryAction::Walking)
+        });
 
         self.active_actions.push(ActiveAction {
             action,
@@ -307,10 +448,17 @@ impl NeraAnimationState {
     }
 
     pub(super) fn request_one_shot(&mut self, action: TemporaryAction, duration: Duration) {
+        // A real interaction ends the greeting even when its own clip failed
+        // to load. It must never uncover the old wave when it finishes.
+        if action.priority() > AnimationPriority::StartupGreeting {
+            self.cancel_startup_greeting();
+        }
         if duration.is_zero() {
             warn!("Nera ignored {:?}: VRMA duration unavailable/zero", action);
             return;
         }
+
+        self.finish_action(TemporaryAction::Walking);
 
         // A fidget never survives anything else being requested. It is the
         // lowest layer, so resuming its tail once a reaction ends would look
@@ -353,6 +501,19 @@ impl NeraAnimationState {
     pub(super) fn reset_damage_combo(&mut self) {
         self.damage_hit_count = 0;
         self.damage_combo_remaining = None;
+    }
+
+    /// Seated hits dodge in place; they never accumulate the standing death
+    /// combo or release the environment-owned seat attachment.
+    pub(super) fn request_sitting_dodge(&mut self, duration: Duration) {
+        self.reset_damage_combo();
+        if self.base_pose != BasePose::Sitting
+            || self.support_transition.is_some()
+            || duration.is_zero()
+        {
+            return;
+        }
+        self.request_one_shot(TemporaryAction::DodgeWhileSitting, duration);
     }
 
     /// Registers one damage reaction from either Head or Torso.
@@ -410,6 +571,44 @@ impl NeraAnimationState {
         }
     }
 
+    /// Start a walk only when the standing idle layer is free. Returning true
+    /// means the walk is visible; callers must not move the desktop window
+    /// when a higher-priority animation rejected the request.
+    pub(crate) fn set_walking(&mut self, walking: bool) -> bool {
+        if !walking {
+            self.finish_action(TemporaryAction::Walking);
+            return false;
+        }
+
+        match self.visual_state() {
+            VisualState::Walking => true,
+            VisualState::Idle => {
+                self.start_persistent_action(TemporaryAction::Walking);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Play the startup wave once, only after the landing sequence has handed
+    /// control back to standing idle. The startup runtime owns once-per-launch
+    /// scheduling; this action never queues behind an interaction.
+    pub(crate) fn request_startup_greeting(&mut self, duration: Duration) -> bool {
+        if duration.is_zero()
+            || self.base_pose != BasePose::Idle
+            || self.visual_state() != VisualState::Idle
+        {
+            return false;
+        }
+
+        self.request_one_shot(TemporaryAction::StartupGreeting, duration);
+        true
+    }
+
+    pub(crate) fn cancel_startup_greeting(&mut self) {
+        self.finish_action(TemporaryAction::StartupGreeting);
+    }
+
     /// Phase 5.8 idle variation entry point.
     ///
     /// Returns `false` when Nera is not actually idle, so the scheduler can
@@ -420,7 +619,11 @@ impl NeraAnimationState {
         action: IdleMicroAction,
         duration: Duration,
     ) -> bool {
-        if self.visual_state() != VisualState::Idle {
+        let idle_visual = match action.base_pose() {
+            BasePose::Idle => VisualState::Idle,
+            BasePose::Sitting => VisualState::SittingLoop,
+        };
+        if duration.is_zero() || self.visual_state() != idle_visual {
             return false;
         }
 
@@ -429,12 +632,37 @@ impl NeraAnimationState {
         true
     }
 
+    /// Blocking contexts cancel autonomous fidgets instead of uncovering their
+    /// remaining tail later. User reactions and physics retain ownership.
+    pub(crate) fn cancel_idle_variation(&mut self) {
+        self.active_actions
+            .retain(|active| !active.action.is_idle_variation());
+    }
+
+    /// Optional behavior intents are admitted through loaded capabilities.
+    /// Missing clips leave the base pose alone and never create a pending
+    /// animation or reserve the pose while an asset might appear later.
+    #[allow(dead_code)]
+    pub(crate) fn request_personality_action(
+        &mut self,
+        action: PersonalityAction,
+        clips: &super::NeraAnimationClips,
+    ) -> bool {
+        let (Some(micro), Some(duration)) =
+            (action.idle_micro(), clips.personality_duration(action))
+        else {
+            return false;
+        };
+        self.request_idle_variation(micro, duration)
+    }
+
     /// Phase 5.7 menu hook. The menu system should call this when the actual
     /// menu opens/closes; right-click alone is not enough because we need the
-    /// menu lifecycle to know when Praying should end.
+    /// menu lifecycle to know when Praying should end. Praying is a standing
+    /// clip, so opening the menu must leave a seated pose or reaction intact.
     #[allow(dead_code)]
     pub(crate) fn set_praying_menu(&mut self, open: bool) {
-        if open {
+        if open && self.base_pose == BasePose::Idle {
             self.start_persistent_action(TemporaryAction::Praying);
         } else {
             self.finish_action(TemporaryAction::Praying);
@@ -559,25 +787,26 @@ impl NeraAnimationState {
     fn highest_action(&self) -> Option<TemporaryAction> {
         self.active_actions
             .iter()
-            .filter(|active| !self.suppressed_by_sitting(active.action))
+            .filter(|active| !self.suppressed_by_pose(active.action))
             .max_by_key(|active| active.action.priority())
             .map(|active| active.action)
     }
 
-    /// Actions that must not play while Nera is attached to a seat.
-    ///
-    /// Both are standing clips. Playing one would visually pull her off the
-    /// surface her Seat anchor was calibrated against, so they stay logically
-    /// alive but never win the pose. A micro-action can only *start* while
-    /// `visual_state()` is Idle, but she can be sat down mid-fidget.
-    fn suppressed_by_sitting(&self, action: TemporaryAction) -> bool {
+    /// Pose-specific actions may only use the anchor they were authored for.
+    fn suppressed_by_pose(&self, action: TemporaryAction) -> bool {
+        if let TemporaryAction::IdleMicro(action) = action {
+            return action.base_pose() != self.base_pose;
+        }
+        if action == TemporaryAction::DodgeWhileSitting {
+            return self.base_pose != BasePose::Sitting;
+        }
         if self.base_pose != BasePose::Sitting {
             return false;
         }
 
         matches!(
             action,
-            TemporaryAction::Floating | TemporaryAction::IdleMicro(_)
+            TemporaryAction::Walking | TemporaryAction::StartupGreeting | TemporaryAction::Floating
         )
     }
 
@@ -595,11 +824,15 @@ impl NeraAnimationState {
 
         if let Some(action) = self.highest_action() {
             return match action {
+                TemporaryAction::Walking => VisualState::Walking,
+                TemporaryAction::StartupGreeting => VisualState::StartupGreeting,
                 TemporaryAction::Floating => VisualState::Floating,
                 TemporaryAction::Falling => VisualState::Falling,
                 TemporaryAction::Landing => VisualState::Landing,
                 TemporaryAction::HitHead => VisualState::HitHead,
                 TemporaryAction::HitChest => VisualState::HitChest,
+                TemporaryAction::LimbReaction(part) => VisualState::LimbReaction(part),
+                TemporaryAction::DodgeWhileSitting => VisualState::DodgeWhileSitting,
                 TemporaryAction::HeadStroke => VisualState::HeadStroke,
                 TemporaryAction::Death => VisualState::Death,
                 TemporaryAction::AlarmWave => VisualState::AlarmWave,
@@ -692,10 +925,14 @@ impl NeraAnimationState {
     /// overwrite ShakeHead/HitHead every frame.
     pub(crate) fn suppresses_look_at(&self) -> bool {
         match self.visual_state() {
-            VisualState::Falling
+            VisualState::Walking
+            | VisualState::StartupGreeting
+            | VisualState::Falling
             | VisualState::Landing
             | VisualState::HitHead
             | VisualState::HitChest
+            | VisualState::DodgeWhileSitting
+            | VisualState::IdleMicro(IdleMicroAction::LookAround)
             | VisualState::HeadStroke
             | VisualState::Death
             | VisualState::AlarmWave

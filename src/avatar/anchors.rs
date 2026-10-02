@@ -1,7 +1,9 @@
 //! Project the live avatar skeleton into desktop support anchors and ground Death poses.
+use std::time::Duration;
+
 use super::NeraAvatar;
 use crate::{
-    animation::NeraAnimationState,
+    animation::{BasePose, NeraAnimationState, VisualState},
     desktop_physics,
     environment::{DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, InteractionState},
@@ -19,6 +21,10 @@ const FOOT_SOLE_OFFSET_LOGICAL: f32 = 12.0;
 /// +Y is up; the small +Z term moves the anchor slightly toward Nera's rear in
 /// the current avatar orientation.
 const SEAT_OFFSET_WORLD: Vec3 = Vec3::new(0.0, -0.12, 0.08);
+
+pub(crate) fn seat_contact_world(hips: &GlobalTransform) -> Vec3 {
+    hips.transform_point(SEAT_OFFSET_WORLD)
+}
 
 /// VRMA is a 3D pose, while the Windows desktop support surface is a 2D
 /// screen-space line. During Death01 we gently reconcile those two spaces by
@@ -60,22 +66,195 @@ fn death_fallback_floor_y_logical(environment: &DesktopEnvironment) -> Option<f3
     Some(rect.height().max(1) as f32 / scale * DEATH_FALLBACK_FLOOR_RATIO)
 }
 
+fn support_anchor_geometry(settings: &NeraSettings, hips: Entity) -> (Entity, f32, f32) {
+    (
+        hips,
+        settings.character_scale(),
+        settings.ground_offset_logical(),
+    )
+}
+
+/// Keep the last standing sample until the idle blend has removed the seated
+/// or sideways pose. Native physics may need that sample on the first frame
+/// after detaching, before any new standing pose has been evaluated.
+const STANDING_ANCHOR_SETTLE: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+pub(crate) struct StandingAnchorSampling {
+    settle_remaining: Duration,
+}
+
+impl StandingAnchorSampling {
+    fn ready(&mut self, visual: VisualState, turning: bool, delta: Duration) -> bool {
+        if turning
+            || seated_fidget_or_dodge(visual)
+            || matches!(
+                visual,
+                VisualState::Walking
+                    | VisualState::SittingEnter
+                    | VisualState::SittingLoop
+                    | VisualState::SittingExit
+                    | VisualState::Death
+                    | VisualState::LibraryAnimation(_)
+            )
+        {
+            self.settle_remaining = STANDING_ANCHOR_SETTLE;
+            return false;
+        }
+        // A delayed frame must not instantly admit an unevaluated old pose.
+        self.settle_remaining = self
+            .settle_remaining
+            .saturating_sub(delta.min(Duration::from_millis(50)));
+        self.settle_remaining.is_zero()
+    }
+}
+
+fn seated_fidget_or_dodge(visual: VisualState) -> bool {
+    match visual {
+        VisualState::DodgeWhileSitting => true,
+        VisualState::IdleMicro(action) => action.base_pose() == BasePose::Sitting,
+        _ => false,
+    }
+}
+
+/// A seated gesture moves the body relative to its support. Recalibrating the
+/// seat from those hips would make the native window chase the gesture instead.
+/// Wait through the return blend before sampling the ordinary seated pose again.
+#[derive(Default)]
+pub(crate) struct SeatAnchorSampling {
+    settle_remaining: Duration,
+}
+
+impl SeatAnchorSampling {
+    fn ready(&mut self, visual: VisualState, attached: bool, delta: Duration) -> bool {
+        if !attached {
+            // Free/dragging probes must immediately track the live pose so the
+            // next drop can find a new seat without using the old attachment.
+            self.settle_remaining = Duration::ZERO;
+            return true;
+        }
+        if seated_fidget_or_dodge(visual) {
+            self.settle_remaining = STANDING_ANCHOR_SETTLE;
+            return false;
+        }
+        self.settle_remaining = self
+            .settle_remaining
+            .saturating_sub(delta.min(Duration::from_millis(50)));
+        self.settle_remaining.is_zero()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SeatedHipsAnchor {
+    hips: Option<(Entity, Vec3)>,
+    sampling: SeatAnchorSampling,
+}
+
+impl SeatedHipsAnchor {
+    fn apply(
+        &mut self,
+        entity: Entity,
+        visual: VisualState,
+        attached: bool,
+        delta: Duration,
+        pose: &mut Transform,
+    ) {
+        if !attached {
+            *self = Self::default();
+            return;
+        }
+        if self.hips.is_some_and(|(owner, _)| owner != entity) {
+            *self = Self::default();
+        }
+        let ready = self.sampling.ready(visual, true, delta);
+        if seated_fidget_or_dodge(visual) || (!ready && visual == VisualState::SittingLoop) {
+            if let Some((_, translation)) = self.hips {
+                pose.translation = translation;
+            }
+        } else if ready && matches!(visual, VisualState::SittingEnter | VisualState::SittingLoop) {
+            self.hips = Some((entity, pose.translation));
+        }
+    }
+}
+
+/// Imported seated clips have different authored pelvis heights. Keep the
+/// calibrated seated translation while their rotations still perform the
+/// gesture, without making the native attachment or the avatar jump to a new
+/// seat. Run before VRM constraints/transform propagation, like walking's
+/// existing root-motion correction.
+pub(crate) fn preserve_seated_hips(
+    time: Res<Time>,
+    animation: Res<NeraAnimationState>,
+    environment: Res<DesktopEnvironment>,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    mut anchor: Local<SeatedHipsAnchor>,
+    avatar: Query<&HipsBoneEntity, With<NeraAvatar>>,
+    mut bones: Query<&mut Transform, Without<NeraAvatar>>,
+) {
+    let Ok(hips) = avatar.single() else {
+        *anchor = SeatedHipsAnchor::default();
+        return;
+    };
+    let Ok(mut pose) = bones.get_mut(hips.0) else {
+        return;
+    };
+    anchor.apply(
+        hips.0,
+        animation.visual_state(),
+        environment.placement != PlacementState::Free
+            || cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()),
+        time.delta(),
+        &mut pose,
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct AnchorOwners<'w> {
+    library: Option<Res<'w, crate::animation::LibraryPlayback>>,
+    cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
+    clips: Option<Res<'w, crate::animation::NeraAnimationClips>>,
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn update_avatar_anchors(
+    time: Res<Time>,
     interaction: Res<DesktopPetInteraction>,
     animation: Res<NeraAnimationState>,
+    owners: AnchorOwners,
+    walking: Res<crate::walking::WalkingRuntime>,
     settings: Res<NeraSettings>,
     mut physics: ResMut<desktop_physics::DesktopPhysicsState>,
     mut grounding: ResMut<DeathVisualGrounding>,
     mut environment: ResMut<DesktopEnvironment>,
+    mut applied_support_geometry: Local<Option<(Entity, f32, f32)>>,
+    mut standing_sample: Local<StandingAnchorSampling>,
+    mut seat_sample: Local<SeatAnchorSampling>,
     camera_query: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
     mut avatar_query: Query<
-        (&mut Transform, &GlobalTransform, Option<&HipsBoneEntity>),
+        (
+            &mut Transform,
+            &GlobalTransform,
+            Option<&HipsBoneEntity>,
+            Has<crate::character::CharacterReveal>,
+        ),
         With<NeraAvatar>,
     >,
     children_query: Query<&Children>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
+    let library = owners.library;
+    let cloud = owners.cloud;
+    let death_pose = animation.death_active()
+        || matches!(animation.visual_state(), VisualState::LibraryAnimation(entity) if library.as_ref().and_then(|library| library.path_for(entity)).is_some_and(|path| path == "animations/animasi_basic/Death01.vrma"));
+    let standing_sample_ready =
+        standing_sample.ready(animation.visual_state(), walking.active(), time.delta());
+    let seat_sample_ready = seat_sample.ready(
+        animation.visual_state(),
+        environment.placement != PlacementState::Free
+            || cloud.as_ref().is_some_and(|cloud| cloud.owns_placement()),
+        time.delta(),
+    );
     // Seat/hips must keep updating even during a free drag because it is the
     // live sitting probe. Feet stay cached from the last standing frame so
     // dangling feet from sitting/death clips never become the rigid support.
@@ -83,10 +262,16 @@ pub(crate) fn update_avatar_anchors(
         return;
     };
 
-    let Ok((mut avatar_transform, avatar_global, hips_bone_entity)) = avatar_query.single_mut()
+    let Ok((mut avatar_transform, avatar_global, hips_bone_entity, preparing_character)) =
+        avatar_query.single_mut()
     else {
         return;
     };
+    // Preserve the previous contact points while a replacement rig is hidden
+    // for pose preparation. Initial startup still calibrates its hidden rig.
+    if preparing_character {
+        return;
+    }
 
     // IMPORTANT:
     // `VrmBone` is not unique to the rendered VRM. Every loaded VRMA also owns
@@ -124,7 +309,7 @@ pub(crate) fn update_avatar_anchors(
 
         let world = transform.translation();
 
-        if animation.death_active() {
+        if death_pose {
             if let Ok(viewport) = camera.world_to_viewport(camera_transform, world) {
                 death_support_points.push(viewport);
             }
@@ -140,7 +325,15 @@ pub(crate) fn update_avatar_anchors(
             "hips" => {
                 // The hips bone is the pelvis center, not the actual contact
                 // point with a chair/window edge.
-                let seat_world = transform.transform_point(SEAT_OFFSET_WORLD);
+                let sleeping = cloud.as_ref().is_some_and(|cloud| cloud.is_lying_rest())
+                    && owners
+                        .clips
+                        .as_ref()
+                        .is_some_and(|clips| clips.sleeping_idle_entity().is_some());
+                let seat_world = cloud.as_ref().map_or_else(
+                    || seat_contact_world(transform),
+                    |cloud| cloud.contact_world(transform, sleeping),
+                );
 
                 if let Ok(viewport) = camera.world_to_viewport(camera_transform, seat_world) {
                     seat = Some(viewport);
@@ -151,12 +344,14 @@ pub(crate) fn update_avatar_anchors(
         }
     }
 
-    // Feet means *standing support*. Never rewrite the cached support anchor
-    // from a Death/Sitting/Floating pose.
+    // Feet means *standing support*. A sideways walking gait must not replace
+    // this cache either: a drag begun mid-walk resets physics and later reuses
+    // this standing sample when acquiring support after release.
     if environment.placement == PlacementState::Free
+        && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement())
         && interaction.state != InteractionState::Dragging
         && interaction.drag_offset.is_none()
-        && !animation.death_active()
+        && standing_sample_ready
         && !feet.is_empty()
     {
         let x = feet.iter().map(|point| point.x).sum::<f32>() / feet.len() as f32;
@@ -169,8 +364,16 @@ pub(crate) fn update_avatar_anchors(
 
         environment.set_feet_anchor(Vec2::new(x, y));
 
-        if settings.is_changed() && !physics.falling {
+        // Remembered HWND positions change settings on every walking step.
+        // Only geometry changes may replace the rigid standing support with
+        // the current pose; otherwise the gait would move its own floor.
+        // A replacement rig also changes geometry even at the same size. Keep
+        // that refresh pending through loading, sitting and airborne poses,
+        // then apply it once a standing sample can safely own the support.
+        let geometry = support_anchor_geometry(&settings, hips_bone_entity.0);
+        if *applied_support_geometry != Some(geometry) && !physics.falling {
             physics.refresh_support_anchor(environment.feet_anchor_logical);
+            *applied_support_geometry = Some(geometry);
         }
     }
 
@@ -185,7 +388,7 @@ pub(crate) fn update_avatar_anchors(
     // inside the 3D scene by constraining Nera's live skeleton to the desktop
     // floor. The VRMA still owns the pose; this only removes any vertical air
     // gap that the desktop renderer would otherwise expose.
-    let death_active = animation.death_active();
+    let death_active = death_pose;
 
     if death_active
         && environment.placement == PlacementState::Free
@@ -262,9 +465,9 @@ pub(crate) fn update_avatar_anchors(
         grounding.floor_y_logical = None;
     }
 
-    // Seat is pose-dependent and should follow the evaluated hips while Nera
-    // is attached/sitting. It is harmless to refresh it while Free as well.
-    if let Some(seat) = seat {
+    // Calibrate normal sitting/entry, but retain its support through seated
+    // gestures and their outgoing blend. Free probes still follow live hips.
+    if seat_sample_ready && let Some(seat) = seat {
         environment.set_seat_anchor(seat);
     }
 }
@@ -273,6 +476,196 @@ pub(crate) fn update_avatar_anchors(
 mod tests {
     use super::*;
     use crate::platform::PhysicalRect;
+
+    #[test]
+    fn standing_cache_waits_for_sitting_and_walking_blends_to_settle() {
+        for visual in [
+            VisualState::SittingEnter,
+            VisualState::SittingLoop,
+            VisualState::SittingExit,
+            VisualState::Walking,
+            VisualState::Death,
+        ] {
+            let mut sampling = StandingAnchorSampling::default();
+            assert!(sampling.ready(VisualState::Idle, false, Duration::ZERO));
+            assert!(!sampling.ready(visual, false, Duration::from_secs(1)));
+            for _ in 0..4 {
+                assert!(!sampling.ready(VisualState::Idle, false, Duration::from_millis(50)));
+            }
+            assert!(sampling.ready(VisualState::Idle, false, Duration::from_millis(50)));
+        }
+    }
+
+    #[test]
+    fn seated_gestures_preserve_calibrated_anchors_through_the_return_blend() {
+        use crate::animation::IdleMicroAction;
+
+        for visual in IdleMicroAction::SITTING
+            .into_iter()
+            .map(VisualState::IdleMicro)
+            .chain([VisualState::DodgeWhileSitting])
+        {
+            let mut seat = SeatAnchorSampling::default();
+            let mut feet = StandingAnchorSampling::default();
+            assert!(seat.ready(VisualState::SittingLoop, true, Duration::ZERO));
+            assert!(!seat.ready(visual, true, Duration::from_secs(1)));
+            assert!(!feet.ready(visual, false, Duration::from_secs(1)));
+            // Even a long frame cannot resample the still-blending outgoing pose.
+            assert!(!seat.ready(VisualState::SittingLoop, true, Duration::from_secs(1),));
+            for _ in 0..3 {
+                assert!(!seat.ready(VisualState::SittingLoop, true, Duration::from_millis(50),));
+            }
+            assert!(seat.ready(VisualState::SittingLoop, true, Duration::from_millis(50),));
+        }
+    }
+
+    #[test]
+    fn detaching_during_a_seated_gesture_immediately_restores_the_live_seat_probe() {
+        let mut sampling = SeatAnchorSampling::default();
+        assert!(!sampling.ready(VisualState::DodgeWhileSitting, true, Duration::ZERO));
+        assert!(sampling.ready(VisualState::Floating, false, Duration::ZERO));
+        assert!(sampling.ready(VisualState::SittingEnter, true, Duration::ZERO));
+    }
+
+    #[test]
+    fn seated_gestures_keep_the_calibrated_pelvis_without_erasing_their_rotation() {
+        use crate::animation::IdleMicroAction;
+
+        let mut world = World::default();
+        let hips = world.spawn_empty().id();
+        for visual in IdleMicroAction::SITTING
+            .into_iter()
+            .map(VisualState::IdleMicro)
+            .chain([VisualState::DodgeWhileSitting])
+        {
+            let mut anchor = SeatedHipsAnchor::default();
+            let mut entering = Transform::from_xyz(0.01, 0.85, -0.2);
+            anchor.apply(
+                hips,
+                VisualState::SittingEnter,
+                true,
+                Duration::ZERO,
+                &mut entering,
+            );
+            let mut seated = Transform::from_xyz(0.02, 0.65, -0.3);
+            anchor.apply(
+                hips,
+                VisualState::SittingLoop,
+                true,
+                Duration::ZERO,
+                &mut seated,
+            );
+            let authored = Transform {
+                translation: Vec3::new(0.0, 0.2, 0.1),
+                rotation: Quat::from_rotation_z(0.25),
+                scale: Vec3::splat(0.95),
+            };
+            let mut gesture = authored;
+            anchor.apply(hips, visual, true, Duration::ZERO, &mut gesture);
+            assert_eq!(gesture.translation, seated.translation);
+            assert_eq!(gesture.rotation, authored.rotation);
+            assert_eq!(gesture.scale, authored.scale);
+
+            // The outgoing crossfade may still carry the imported translation.
+            let mut blended = authored;
+            anchor.apply(
+                hips,
+                VisualState::SittingLoop,
+                true,
+                Duration::from_secs(1),
+                &mut blended,
+            );
+            assert_eq!(blended.translation, seated.translation);
+            let mut detached = authored;
+            anchor.apply(
+                hips,
+                VisualState::Floating,
+                false,
+                Duration::ZERO,
+                &mut detached,
+            );
+            assert_eq!(detached, authored);
+            assert!(anchor.hips.is_none());
+        }
+    }
+
+    #[test]
+    fn a_new_rig_or_missing_seated_sample_never_reuses_an_old_pelvis() {
+        let mut world = World::default();
+        let hips = world.spawn_empty().id();
+        let replacement = world.spawn_empty().id();
+        let mut anchor = SeatedHipsAnchor::default();
+        let mut unknown = Transform::from_xyz(0.0, 0.4, 0.0);
+        anchor.apply(
+            hips,
+            VisualState::DodgeWhileSitting,
+            true,
+            Duration::ZERO,
+            &mut unknown,
+        );
+        assert_eq!(unknown.translation.y, 0.4);
+
+        anchor = SeatedHipsAnchor::default();
+        let mut seated = Transform::from_xyz(0.0, 0.6, 0.0);
+        anchor.apply(
+            hips,
+            VisualState::SittingLoop,
+            true,
+            Duration::ZERO,
+            &mut seated,
+        );
+        let mut new_pose = Transform::from_xyz(0.0, 0.9, 0.0);
+        anchor.apply(
+            replacement,
+            VisualState::DodgeWhileSitting,
+            true,
+            Duration::ZERO,
+            &mut new_pose,
+        );
+        assert_eq!(new_pose.translation.y, 0.9);
+        assert!(anchor.hips.is_none());
+    }
+
+    #[test]
+    fn turning_while_idle_cannot_replace_standing_cache_even_after_a_hitch() {
+        let mut sampling = StandingAnchorSampling::default();
+        for _ in 0..10 {
+            assert!(!sampling.ready(VisualState::Idle, true, Duration::from_millis(50)));
+        }
+        assert!(!sampling.ready(VisualState::Idle, false, Duration::from_secs(10)));
+        // A fresh turn during the blend must restart the whole settling period.
+        assert!(!sampling.ready(VisualState::Idle, true, Duration::ZERO));
+        assert_eq!(sampling.settle_remaining, STANDING_ANCHOR_SETTLE);
+        for _ in 0..4 {
+            assert!(!sampling.ready(VisualState::Idle, false, Duration::from_millis(50)));
+        }
+        assert!(sampling.ready(VisualState::Idle, false, Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn moving_the_window_or_toggling_walking_does_not_change_support_geometry() {
+        let mut settings = NeraSettings::default();
+        let mut world = World::new();
+        let hips = world.spawn_empty().id();
+        let replacement = world.spawn_empty().id();
+        let standing_geometry = support_anchor_geometry(&settings, hips);
+        settings.window_x += 200;
+        settings.window_y -= 100;
+        settings.walking_enabled = !settings.walking_enabled;
+        settings.follow_mouse = !settings.follow_mouse;
+        assert_eq!(support_anchor_geometry(&settings, hips), standing_geometry);
+        assert_ne!(
+            support_anchor_geometry(&settings, replacement),
+            standing_geometry,
+            "a replacement character must refresh standing support at the same settings"
+        );
+
+        settings.character_size = 125;
+        assert_ne!(support_anchor_geometry(&settings, hips), standing_geometry);
+        let resized_geometry = support_anchor_geometry(&settings, hips);
+        settings.ground_offset = 10;
+        assert_ne!(support_anchor_geometry(&settings, hips), resized_geometry);
+    }
 
     #[test]
     fn death_fallback_uses_logical_height_independent_of_desktop_origin() {

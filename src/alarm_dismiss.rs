@@ -21,19 +21,20 @@ use bevy::{
     camera::RenderTarget,
     prelude::*,
     ui::UiTargetCamera,
-    window::{WindowLevel, WindowPosition, WindowRef},
+    window::{
+        WindowCloseRequested, WindowLevel, WindowPosition, WindowRef, WindowResizeConstraints,
+    },
 };
 
 use crate::{
     alarm::{AlarmControlCommand, AlarmDisplayInfo, DEFAULT_SNOOZE_DURATION},
     environment::DesktopEnvironment,
-    platform::{
-        self, LocalDateTime, NativeWindowHandle, PhysicalPoint, PhysicalRect,
-    },
+    platform::{self, LocalDateTime, NativeWindowHandle, PhysicalPoint, PhysicalRect},
     presentation::{
-        AttentionKind, PresentationCommand, PresentationEntered,
-        PresentationExited, PresentationState,
+        AttentionKind, PresentationCommand, PresentationEntered, PresentationExited,
+        PresentationState,
     },
+    utility_window::{UtilityWindow, spawn_window_controls},
 };
 
 // -----------------------------------------------------------------------------
@@ -80,7 +81,7 @@ const SECONDARY_TEXT: Color = Color::srgb(0.88, 0.9, 0.96);
 // -----------------------------------------------------------------------------
 
 #[derive(Component)]
-struct AlarmDismissWindow;
+pub(crate) struct AlarmDismissWindow;
 
 /// Garbage-collection tag mirroring `settings::SettingsOwned`.
 #[derive(Component)]
@@ -115,8 +116,7 @@ struct AlarmPanelSnapshot {
 
 impl AlarmPanelSnapshot {
     fn from_alarm(local: LocalDateTime, alarm: &AlarmDisplayInfo) -> Self {
-        let (time, meridiem) =
-            format_alarm_time(alarm.hour as u16, alarm.minute as u16);
+        let (time, meridiem) = format_alarm_time(alarm.hour as u16, alarm.minute as u16);
 
         Self {
             time,
@@ -128,7 +128,7 @@ impl AlarmPanelSnapshot {
 }
 
 #[derive(Resource, Default)]
-struct AlarmDismissRuntime {
+pub(crate) struct AlarmDismissRuntime {
     window: Option<Entity>,
     hwnd: Option<NativeWindowHandle>,
     requested_at: Option<Instant>,
@@ -152,6 +152,7 @@ impl Plugin for AlarmDismissPlugin {
                     place_dismiss_panel,
                     drag_dismiss_panel,
                     update_alarm_action_buttons,
+                    handle_native_close,
                     commit_alarm_action_after_release,
                     spawn_failsafe,
                     cleanup_dismiss_panel,
@@ -170,11 +171,7 @@ impl Plugin for AlarmDismissPlugin {
 /// it. Works with negative desktop coordinates used by left/top secondary
 /// monitors and degrades to the monitor origin if the panel is larger than the
 /// usable bounds.
-fn panel_target(
-    bounds: PhysicalRect,
-    panel_width: i32,
-    panel_height: i32,
-) -> PhysicalPoint {
+fn panel_target(bounds: PhysicalRect, panel_width: i32, panel_height: i32) -> PhysicalPoint {
     let panel_width = panel_width.max(1);
     let panel_height = panel_height.max(1);
 
@@ -227,15 +224,22 @@ fn spawn_dismiss_panel(
         .spawn((
             Name::new("Nera Alarm Dismiss Window"),
             AlarmDismissWindow,
+            UtilityWindow::new(14.0),
             Window {
                 title: "Nera Alarm".into(),
                 resolution: (PANEL_WIDTH_LOGICAL, PANEL_HEIGHT_LOGICAL).into(),
-                resizable: false,
+                resizable: true,
+                resize_constraints: WindowResizeConstraints {
+                    min_width: PANEL_WIDTH_LOGICAL as f32,
+                    min_height: PANEL_HEIGHT_LOGICAL as f32,
+                    ..default()
+                },
                 decorations: false,
                 transparent: true,
                 window_level: WindowLevel::AlwaysOnTop,
                 position: WindowPosition::Automatic,
-                skip_taskbar: true,
+                // A minimized ringing panel must remain reachable from the taskbar.
+                skip_taskbar: false,
                 // Alarm presentation must not steal keyboard focus from the app
                 // the user was using when it fired.
                 focused: false,
@@ -262,17 +266,9 @@ fn spawn_dismiss_panel(
         ))
         .id();
 
-    let snapshot = AlarmPanelSnapshot::from_alarm(
-        platform::local_datetime(),
-        &alarm,
-    );
+    let snapshot = AlarmPanelSnapshot::from_alarm(platform::local_datetime(), &alarm);
 
-    spawn_alarm_panel_ui(
-        &mut commands,
-        window_entity,
-        camera_entity,
-        snapshot,
-    );
+    spawn_alarm_panel_ui(&mut commands, window_entity, camera_entity, snapshot);
 
     runtime.window = Some(window_entity);
 
@@ -326,7 +322,7 @@ fn spawn_alarm_panel_ui(
                 ),
             ))
             .with_children(|panel| {
-                spawn_alarm_header(panel);
+                spawn_alarm_header(panel, window);
                 spawn_alarm_card(panel, &snapshot);
 
                 // Actions live outside the information card. Keeping them in a
@@ -363,29 +359,37 @@ fn spawn_alarm_panel_ui(
         });
 }
 
-fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
+fn spawn_alarm_header(parent: &mut ChildSpawnerCommands, window: Entity) {
     parent
         .spawn((
             Name::new("Nera Alarm Header"),
-            Button,
-            AlarmDismissDragRegion,
             Node {
                 width: percent(100),
                 height: px(54),
+                flex_shrink: 0.0,
                 flex_direction: FlexDirection::Row,
                 justify_content: JustifyContent::SpaceBetween,
                 align_items: AlignItems::Center,
+                column_gap: px(8),
                 ..default()
             },
             BackgroundColor(Color::NONE),
         ))
         .with_children(|header| {
             header
-                .spawn(Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: px(2),
-                    ..default()
-                })
+                .spawn((
+                    Button,
+                    AlarmDismissDragRegion,
+                    Node {
+                        flex_grow: 1.0,
+                        height: percent(100),
+                        flex_direction: FlexDirection::Column,
+                        justify_content: JustifyContent::Center,
+                        row_gap: px(2),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                ))
                 .with_children(|copy| {
                     copy.spawn((
                         Text::new("Alarm"),
@@ -414,11 +418,7 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.22, 0.43, 0.92, 0.14)),
-                    Outline::new(
-                        px(1),
-                        Val::ZERO,
-                        Color::srgba(0.34, 0.52, 1.0, 0.32),
-                    ),
+                    Outline::new(px(1), Val::ZERO, Color::srgba(0.34, 0.52, 1.0, 0.32)),
                 ))
                 .with_children(|pill| {
                     pill.spawn((
@@ -430,13 +430,43 @@ fn spawn_alarm_header(parent: &mut ChildSpawnerCommands) {
                         TextColor(Color::srgb(0.58, 0.7, 1.0)),
                     ));
                 });
+
+            spawn_window_controls(header, window);
+            header
+                .spawn((
+                    Button,
+                    AlarmActionButton {
+                        action: AlarmPanelAction::Dismiss,
+                        normal: SECONDARY_COLOR,
+                        hovered: SECONDARY_HOVER,
+                        pressed: SECONDARY_PRESSED,
+                    },
+                    Node {
+                        width: px(36),
+                        height: px(42),
+                        flex_shrink: 0.0,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border_radius: BorderRadius::all(px(14)),
+                        ..default()
+                    },
+                    BackgroundColor(SECONDARY_COLOR),
+                    Outline::new(px(1), Val::ZERO, SECONDARY_OUTLINE),
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("X"),
+                        TextFont {
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(SECONDARY_TEXT),
+                    ));
+                });
         });
 }
 
-fn spawn_alarm_card(
-    parent: &mut ChildSpawnerCommands,
-    snapshot: &AlarmPanelSnapshot,
-) {
+fn spawn_alarm_card(parent: &mut ChildSpawnerCommands, snapshot: &AlarmPanelSnapshot) {
     parent
         .spawn((
             Name::new("Nera Alarm Card"),
@@ -634,8 +664,7 @@ fn acquire_dismiss_hwnd(world: &mut World) {
         return;
     }
 
-    let Some(window_entity) = world.resource::<AlarmDismissRuntime>().window
-    else {
+    let Some(window_entity) = world.resource::<AlarmDismissRuntime>().window else {
         return;
     };
 
@@ -707,10 +736,7 @@ fn place_dismiss_panel(
 
 fn drag_dismiss_panel(
     mouse: Res<ButtonInput<MouseButton>>,
-    drag_regions: Query<
-        &Interaction,
-        (Changed<Interaction>, With<AlarmDismissDragRegion>),
-    >,
+    drag_regions: Query<&Interaction, (Changed<Interaction>, With<AlarmDismissDragRegion>)>,
     mut windows: Query<&mut Window, With<AlarmDismissWindow>>,
 ) {
     // Same rule as Settings: winit expects start_drag_move() directly from a
@@ -761,6 +787,28 @@ fn update_alarm_action_buttons(
     }
 }
 
+/// Alt+F4/native close has the same meaning as Turn off. Bevy removes the
+/// native window in Last; request presentation teardown in Update while its
+/// identity is still known, so PresentationExited stops audio and animation.
+fn handle_native_close(
+    mut requests: MessageReader<WindowCloseRequested>,
+    windows: Query<(), With<AlarmDismissWindow>>,
+    mut runtime: ResMut<AlarmDismissRuntime>,
+    mut presentation: MessageWriter<PresentationCommand>,
+) {
+    let requested = requests
+        .read()
+        .any(|request| Some(request.window) == runtime.window);
+    let disappeared = runtime
+        .window
+        .is_some_and(|window| !windows.contains(window));
+    if requested || disappeared {
+        // A close cancels a not-yet-committed button gesture, including snooze.
+        runtime.pending_action = None;
+        presentation.write(PresentationCommand::ExitAttention);
+    }
+}
+
 /// True once every mouse button is up.
 ///
 /// Despawning the native window underneath a held button can make winit miss
@@ -794,9 +842,7 @@ fn commit_alarm_action_after_release(
             presentation.write(PresentationCommand::ExitAttention);
         }
         AlarmPanelAction::SnoozeFiveMinutes => {
-            alarm_control.write(AlarmControlCommand::Snooze(
-                DEFAULT_SNOOZE_DURATION,
-            ));
+            alarm_control.write(AlarmControlCommand::Snooze(DEFAULT_SNOOZE_DURATION));
         }
     }
 }
@@ -889,6 +935,18 @@ fn collect_orphaned_dismiss_entities(
 }
 
 impl AlarmDismissRuntime {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.window.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_window_for_test(window: Entity) -> Self {
+        Self {
+            window: Some(window),
+            ..default()
+        }
+    }
+
     fn reset(&mut self) {
         self.window = None;
         self.hwnd = None;
@@ -906,6 +964,88 @@ impl AlarmDismissRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dismiss_action_app() -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<AlarmDismissRuntime>()
+            .init_resource::<PresentationState>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<WindowCloseRequested>()
+            .add_message::<PresentationCommand>()
+            .add_message::<PresentationExited>()
+            .add_message::<AlarmControlCommand>()
+            .add_systems(
+                Update,
+                (handle_native_close, commit_alarm_action_after_release).chain(),
+            );
+        let panel = app.world_mut().spawn(AlarmDismissWindow).id();
+        app.world_mut().resource_mut::<AlarmDismissRuntime>().window = Some(panel);
+        (app, panel)
+    }
+
+    #[test]
+    fn native_close_exits_attention_and_cancels_uncommitted_snooze() {
+        let (mut app, panel) = dismiss_action_app();
+        app.world_mut()
+            .resource_mut::<AlarmDismissRuntime>()
+            .pending_action = Some(AlarmPanelAction::SnoozeFiveMinutes);
+        app.world_mut()
+            .write_message(WindowCloseRequested { window: panel });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![PresentationCommand::ExitAttention]
+        );
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<AlarmControlCommand>>()
+                .drain()
+                .count(),
+            0
+        );
+        assert!(
+            app.world()
+                .resource::<AlarmDismissRuntime>()
+                .pending_action
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_close_of_another_window_does_not_dismiss_alarm() {
+        let (mut app, _) = dismiss_action_app();
+        let other = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .write_message(WindowCloseRequested { window: other });
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn disappeared_panel_also_exits_attention_after_it_was_revealed() {
+        let (mut app, panel) = dismiss_action_app();
+        app.world_mut()
+            .resource_mut::<AlarmDismissRuntime>()
+            .revealed = true;
+        app.world_mut().despawn(panel);
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<PresentationCommand>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![PresentationCommand::ExitAttention]
+        );
+    }
 
     #[test]
     fn panel_sits_on_the_right_and_is_vertically_centered() {

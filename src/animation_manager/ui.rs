@@ -1,16 +1,17 @@
+use crate::expression::NeraExpressionPreset;
 use bevy::{prelude::*, ui::UiTargetCamera};
 
 use super::{
-    CaretBlink, Dialog, GalleryScroll, GalleryScrollbarThumb, GalleryScrollbarTrack, GalleryTab,
-    ManagerAction, ManagerCamera, ManagerDragRegion, ManagerOwned, ManagerRoot, ManagerState,
-    ManagerWindow, PreviewSlot, TextCaret, TextFocus,
+    CaretBlink, CombineListScroll, Dialog, GalleryScroll, GalleryScrollbarThumb,
+    GalleryScrollbarTrack, GalleryTab, ManagerAction, ManagerCamera, ManagerDragRegion,
+    ManagerOwned, ManagerRoot, ManagerState, ManagerWindow, PreviewSlot, TextCaret, TextFocus,
 };
 
 pub(super) const ROW_HEIGHT: f32 = 360.0;
 pub(super) const COLUMNS: usize = 3;
 
 #[derive(Component)]
-pub(super) struct GalleryContent(usize);
+pub(super) struct GalleryContent(pub(super) usize);
 #[derive(Component)]
 pub(super) struct GalleryRow;
 #[derive(Component)]
@@ -88,10 +89,18 @@ pub(super) fn sync_gallery_rows(
                     },
                 ))
                 .with_children(|row| {
-                    for index in
-                        row_number * COLUMNS..((row_number + 1) * COLUMNS).min(entries.len())
+                    for index in row_number * COLUMNS
+                        ..((row_number + 1) * COLUMNS).min(if state.tab == GalleryTab::Characters {
+                            state.characters.models.len()
+                        } else {
+                            entries.len()
+                        })
                     {
-                        spawn_card(row, entries[index], index, &state);
+                        if state.tab == GalleryTab::Characters {
+                            super::characters::card(row, index, &state);
+                        } else {
+                            spawn_card(row, entries[index], index, &state);
+                        }
                     }
                 });
         }
@@ -99,26 +108,52 @@ pub(super) fn sync_gallery_rows(
     *previous = Some((scroll_entity, range));
 }
 const SHELL: Color = Color::srgba(0.032, 0.042, 0.078, 0.985);
-const CARD: Color = Color::srgba(0.055, 0.071, 0.122, 0.98);
+pub(super) const CARD: Color = Color::srgba(0.055, 0.071, 0.122, 0.98);
 const OUTLINE: Color = Color::srgba(0.20, 0.27, 0.43, 0.85);
-const PRIMARY: Color = Color::srgb(0.95, 0.96, 1.0);
-const MUTED: Color = Color::srgb(0.60, 0.67, 0.82);
-const BLUE: Color = Color::srgb(0.12, 0.39, 0.94);
+pub(super) const PRIMARY: Color = Color::srgb(0.95, 0.96, 1.0);
+pub(super) const MUTED: Color = Color::srgb(0.60, 0.67, 0.82);
+pub(super) const BLUE: Color = Color::srgb(0.12, 0.39, 0.94);
 pub(super) const BLUE_HOVER: Color = Color::srgb(0.19, 0.46, 1.0);
 pub(super) const BLUE_PRESSED: Color = Color::srgb(0.10, 0.32, 0.78);
 pub(super) const BUTTON: Color = Color::srgb(0.095, 0.12, 0.21);
 
 pub(super) fn button_color(action: &ManagerAction, state: &ManagerState) -> Color {
     match action {
-        ManagerAction::Import | ManagerAction::Reset | ManagerAction::ConfirmRename => BLUE,
+        ManagerAction::AssignCharacter(path) => {
+            if state
+                .characters
+                .slots
+                .get(state.character_slot)
+                .and_then(|slot| slot.path.as_ref())
+                == Some(path)
+            {
+                BLUE
+            } else {
+                CARD
+            }
+        }
+        ManagerAction::CharacterSlot(slot) if state.character_slot == *slot => BLUE,
+        ManagerAction::Import
+        | ManagerAction::Reset
+        | ManagerAction::ConfirmRename
+        | ManagerAction::ConfirmCombine => BLUE,
+        ManagerAction::Base if state.tab == GalleryTab::Base => BLUE,
         ManagerAction::All if state.tab == GalleryTab::All => BLUE,
         ManagerAction::Bookmarks if state.tab == GalleryTab::Bookmarks => BLUE,
+        ManagerAction::Expressions if state.tab == GalleryTab::Expressions => BLUE,
+        ManagerAction::Expression(preset) if state.expression == *preset => BLUE,
+        ManagerAction::Intensity(value) if state.intensity == *value => BLUE,
         ManagerAction::ConfirmDelete => Color::srgb(0.58, 0.13, 0.18),
         _ => BUTTON,
     }
 }
 
-fn label(parent: &mut ChildSpawnerCommands, value: impl Into<String>, size: f32, color: Color) {
+pub(super) fn label(
+    parent: &mut ChildSpawnerCommands,
+    value: impl Into<String>,
+    size: f32,
+    color: Color,
+) {
     parent.spawn((
         Text::new(value),
         TextFont {
@@ -164,7 +199,7 @@ pub(super) fn blink_text_caret(
     }
 }
 
-fn button(
+pub(super) fn button(
     parent: &mut ChildSpawnerCommands,
     value: &str,
     action: ManagerAction,
@@ -179,6 +214,7 @@ fn button(
             Node {
                 width,
                 height: px(44),
+                flex_shrink: 0.0,
                 padding: UiRect::horizontal(px(15)),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
@@ -191,6 +227,113 @@ fn button(
         .with_children(|node| label(node, value, 15.0, PRIMARY));
 }
 
+fn spawn_expression_panel(parent: &mut ChildSpawnerCommands, state: &ManagerState) {
+    parent
+        .spawn(Node {
+            width: percent(100),
+            flex_grow: 1.0,
+            min_height: px(0),
+            padding: UiRect::all(px(12)),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(10),
+            ..default()
+        })
+        .with_children(|panel| {
+            label(panel, "Facial expressions", 22.0, PRIMARY);
+            if state
+                .characters
+                .models
+                .iter()
+                .any(|model| model.path == state.character_path && model.facial_targets == 0)
+            {
+                label(
+                    panel,
+                    "This model has no facial blendshapes.",
+                    14.0,
+                    Color::srgb(1.0, 0.68, 0.36),
+                );
+            }
+            for row in NeraExpressionPreset::ALL.chunks(4) {
+                panel
+                    .spawn(Node {
+                        width: percent(100),
+                        flex_grow: 1.0,
+                        min_height: px(80),
+                        max_height: px(190),
+                        column_gap: px(16),
+                        flex_direction: FlexDirection::Row,
+                        ..default()
+                    })
+                    .with_children(|cards| {
+                        for &preset in row {
+                            let selected = state.expression == preset;
+                            cards
+                                .spawn((
+                                    Button,
+                                    ManagerAction::Expression(preset),
+                                    Node {
+                                        width: percent(23),
+                                        height: percent(100),
+                                        border_radius: BorderRadius::all(px(8)),
+                                        flex_direction: FlexDirection::Column,
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        ..default()
+                                    },
+                                    BackgroundColor(if selected { BLUE } else { CARD }),
+                                    Outline::new(
+                                        px(if selected { 2 } else { 1 }),
+                                        Val::ZERO,
+                                        if selected { PRIMARY } else { OUTLINE },
+                                    ),
+                                ))
+                                .with_children(|card| {
+                                    card.spawn((
+                                        PreviewSlot {
+                                            key: format!("face/{}", preset.wire()),
+                                            index: 0,
+                                        },
+                                        ImageNode::default(),
+                                        Node {
+                                            width: percent(100),
+                                            height: percent(78),
+                                            min_height: px(0),
+                                            ..default()
+                                        },
+                                    ));
+                                    label(card, preset.name(), 16.0, PRIMARY);
+                                });
+                        }
+                    });
+            }
+            label(
+                panel,
+                format!("Intensity: {}%", state.intensity),
+                17.0,
+                PRIMARY,
+            );
+            panel
+                .spawn(Node {
+                    width: percent(100),
+                    height: px(44),
+                    column_gap: px(12),
+                    flex_direction: FlexDirection::Row,
+                    ..default()
+                })
+                .with_children(|steps| {
+                    for value in [0, 25, 50, 75, 100] {
+                        button(
+                            steps,
+                            &format!("{value}%"),
+                            ManagerAction::Intensity(value),
+                            percent(18.5),
+                            state,
+                        );
+                    }
+                });
+        });
+}
+
 pub(super) fn rebuild_ui(
     mut commands: Commands,
     mut state: ResMut<ManagerState>,
@@ -201,7 +344,7 @@ pub(super) fn rebuild_ui(
     if !state.dirty {
         return;
     }
-    let (Ok(_window), Ok(camera)) = (windows.single(), cameras.single()) else {
+    let (Ok(window), Ok(camera)) = (windows.single(), cameras.single()) else {
         return;
     };
     for root in &roots {
@@ -255,7 +398,7 @@ pub(super) fn rebuild_ui(
                             ..default()
                         })
                         .with_children(|header| {
-                            button(header, "Back", ManagerAction::Back, px(88), &state);
+                            button(header, if state.tab == GalleryTab::Characters { "Done" } else { "Back" }, ManagerAction::Back, px(88), &state);
                             header
                                 .spawn((
                                     Button,
@@ -269,42 +412,65 @@ pub(super) fn rebuild_ui(
                                     BackgroundColor(Color::NONE),
                                 ))
                                 .with_children(|title| {
-                                    label(title, "ANIMATIONS", 27.0, PRIMARY);
+                                    label(title, if state.tab == GalleryTab::Characters { "MULTI CHARACTER" } else { "ANIMATIONS" }, 27.0, PRIMARY);
                                     label(
                                         title,
-                                        "Drag the scrollbar or press Home / End to jump",
+                                        "Drag title to move / edges to resize",
                                         13.0,
                                         MUTED,
                                     );
                                 });
-                            button(header, "X", ManagerAction::Close, px(48), &state);
+                            header
+                                .spawn(Node {
+                                    column_gap: px(8),
+                                    flex_shrink: 0.0,
+                                    ..default()
+                                })
+                                .with_children(|controls| {
+                                    crate::utility_window::spawn_window_controls(controls, window);
+                                    button(controls, "X", ManagerAction::Close, px(44), &state);
+                                });
                         });
 
-                    panel
+                    if state.tab != GalleryTab::Characters { panel
                         .spawn(Node {
                             width: percent(100),
-                            height: px(48),
+                            min_height: px(48),
+                            flex_shrink: 0.0,
+                            flex_wrap: FlexWrap::Wrap,
+                            row_gap: px(8),
                             flex_direction: FlexDirection::Row,
                             column_gap: px(10),
                             align_items: AlignItems::Center,
                             ..default()
                         })
                         .with_children(|bar| {
-                            button(bar, "All Animations", ManagerAction::All, px(185), &state);
+                            button(bar, "Animasi Dasar", ManagerAction::Base, px(155), &state);
                             button(
                                 bar,
                                 "*  Bookmarks",
                                 ManagerAction::Bookmarks,
-                                px(176),
+                                px(150),
                                 &state,
                             );
+                            button(bar, "All Animations", ManagerAction::All, px(155), &state);
+                            button(bar, "Expressions", ManagerAction::Expressions, px(145), &state);
                             bar.spawn(Node {
                                 flex_grow: 1.0,
                                 ..default()
                             });
-                            button(bar, "Import VRMA", ManagerAction::Import, px(178), &state);
-                        });
+                            button(bar, "Import VRMA", ManagerAction::Import, px(140), &state);
+                        }); }
 
+                    if state.tab == GalleryTab::Base {
+                        label(panel, "Nera's core animations — click a preview to replay. Editing is locked.", 13.0, MUTED);
+                    }
+
+                    if state.tab == GalleryTab::Characters {
+                        super::characters::panel(panel, &state);
+                    } else if state.tab == GalleryTab::Expressions {
+                        spawn_expression_panel(panel, &state);
+                    } else {
                     panel
                         .spawn((
                             Button,
@@ -438,6 +604,7 @@ pub(super) fn rebuild_ui(
                                     ));
                                 });
                         });
+                    }
 
                     if let Some(error) = &state.error {
                         label(panel, error.clone(), 13.0, Color::srgb(1.0, 0.48, 0.53));
@@ -452,22 +619,37 @@ pub(super) fn rebuild_ui(
                             ..default()
                         })
                         .with_children(|footer| {
-                            footer.spawn((
-                                GalleryCount(entries.len()),
-                                Text::new(format!("{} animations", entries.len())),
-                                TextFont {
-                                    font_size: FontSize::Px(14.0),
-                                    ..default()
-                                },
-                                TextColor(MUTED),
-                            ));
+                            if state.tab == GalleryTab::Characters {
+                                label(footer, state.characters.status.clone(), 13.0, MUTED);
+                            } else if state.tab == GalleryTab::Expressions {
+                                label(footer, "8 expressions · preview on desktop pet", 14.0, MUTED);
+                            } else {
+                                footer.spawn((
+                                    GalleryCount(entries.len()),
+                                    Text::new(format!("{} animations", entries.len())),
+                                    TextFont {
+                                        font_size: FontSize::Px(14.0),
+                                        ..default()
+                                    },
+                                    TextColor(MUTED),
+                                ));
+                            }
+                            if state.tab != GalleryTab::Expressions && state.tab != GalleryTab::Characters {
                             button(
                                 footer,
-                                "Reset Previews",
-                                ManagerAction::Reset,
+                                &format!("Combine ({})", state.combine_parts.len()),
+                                ManagerAction::OpenCombine,
                                 px(180),
                                 &state,
                             );
+                            }
+                            if state.tab != GalleryTab::Characters { button(
+                                footer,
+                                if state.tab == GalleryTab::Expressions { "Reset Expression" } else { "Reset Previews" },
+                                ManagerAction::Reset,
+                                px(180),
+                                &state,
+                            ); }
                         });
                     if let Some(dialog) = &state.dialog {
                         spawn_dialog(panel, dialog, &state);
@@ -484,6 +666,7 @@ fn spawn_card(
     state: &ManagerState,
 ) {
     let key = entry.key.clone();
+    let is_base = super::base::is_base_animation(&key);
     parent
         .spawn((
             Node {
@@ -534,20 +717,26 @@ fn spawn_card(
                         label(info, entry.display_name.clone(), 15.0, PRIMARY);
                         label(
                             info,
-                            format!("{} - {}", entry.emotion, entry.source),
+                            if let Some(label) = super::base::base_label(&entry.key) {
+                                format!("Dasar (locked) - {label}")
+                            } else {
+                                format!("{} - {}", entry.emotion, entry.source)
+                            },
                             12.0,
                             MUTED,
                         );
                     });
-                button(
-                    footer,
-                    "...",
-                    ManagerAction::OpenMenu(key.clone()),
-                    px(40),
-                    state,
-                );
+                if !is_base {
+                    button(
+                        footer,
+                        "...",
+                        ManagerAction::OpenMenu(key.clone()),
+                        px(40),
+                        state,
+                    );
+                }
             });
-            if state.menu_key.as_deref() == Some(&key) {
+            if !is_base && state.menu_key.as_deref() == Some(&key) {
                 card.spawn((
                     Node {
                         position_type: PositionType::Absolute,
@@ -565,6 +754,13 @@ fn spawn_card(
                     ZIndex(10),
                 ))
                 .with_children(|menu| {
+                    button(
+                        menu,
+                        "Add to Combine",
+                        ManagerAction::AddCombine(key.clone()),
+                        percent(100),
+                        state,
+                    );
                     button(
                         menu,
                         "Rename",
@@ -596,6 +792,195 @@ fn spawn_card(
         });
 }
 
+fn spawn_combine_editor(modal: &mut ChildSpawnerCommands, state: &ManagerState) {
+    label(modal, "Combine animations", 24.0, PRIMARY);
+    label(
+        modal,
+        "Play clips in order. Trim in 0.25-second steps. Original files stay intact.",
+        13.0,
+        MUTED,
+    );
+    modal
+        .spawn((
+            CombineListScroll,
+            ScrollPosition(Vec2::new(0.0, state.combine_scroll_y)),
+            Node {
+                width: percent(100),
+                flex_grow: 1.0,
+                min_height: px(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(10),
+                overflow: Overflow::scroll_y(),
+                ..default()
+            },
+        ))
+        .with_children(|list| {
+            if state.combine_parts.is_empty() {
+                label(
+                    list,
+                    "Choose clips with each card's ... menu > Add to Combine, then return here.",
+                    16.0,
+                    MUTED,
+                );
+            }
+            for (index, part) in state.combine_parts.iter().enumerate() {
+                list.spawn((
+                    Node {
+                        width: percent(100),
+                        padding: UiRect::all(px(12)),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(8),
+                        border_radius: BorderRadius::all(px(10)),
+                        ..default()
+                    },
+                    BackgroundColor(CARD),
+                ))
+                .with_children(|clip| {
+                    label(clip, format!("{}. {}", index + 1, part.key), 14.0, PRIMARY);
+                    clip.spawn(Node {
+                        width: percent(100),
+                        flex_direction: FlexDirection::Row,
+                        column_gap: px(8),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        label(row, format!("Start: {:.2}s", part.start), 14.0, MUTED);
+                        button(
+                            row,
+                            "-",
+                            ManagerAction::TrimCombine(index, true, false),
+                            px(40),
+                            state,
+                        );
+                        button(
+                            row,
+                            "+",
+                            ManagerAction::TrimCombine(index, true, true),
+                            px(40),
+                            state,
+                        );
+                        label(row, format!("End: {:.2}s", part.end), 14.0, MUTED);
+                        button(
+                            row,
+                            "-",
+                            ManagerAction::TrimCombine(index, false, false),
+                            px(40),
+                            state,
+                        );
+                        button(
+                            row,
+                            "+",
+                            ManagerAction::TrimCombine(index, false, true),
+                            px(40),
+                            state,
+                        );
+                        button(
+                            row,
+                            "Up",
+                            ManagerAction::MoveCombine(index, true),
+                            px(52),
+                            state,
+                        );
+                        button(
+                            row,
+                            "Down",
+                            ManagerAction::MoveCombine(index, false),
+                            px(72),
+                            state,
+                        );
+                        button(row, "X", ManagerAction::RemoveCombine(index), px(40), state);
+                    });
+                });
+            }
+        });
+    let total: f32 = state
+        .combine_parts
+        .iter()
+        .map(|part| part.end - part.start)
+        .sum();
+    label(
+        modal,
+        format!(
+            "{} clips · {:.2}s total · Save to animations/Combined",
+            state.combine_parts.len(),
+            total
+        ),
+        13.0,
+        MUTED,
+    );
+    if state.combine_job.is_some() {
+        label(
+            modal,
+            "Combining... Please wait while the new VRMA is saved.",
+            15.0,
+            PRIMARY,
+        );
+    }
+    modal
+        .spawn((
+            Button,
+            ManagerAction::FocusCombineName,
+            Node {
+                width: percent(100),
+                height: px(46),
+                flex_shrink: 0.0,
+                padding: UiRect::horizontal(px(12)),
+                align_items: AlignItems::Center,
+                border_radius: BorderRadius::all(px(10)),
+                ..default()
+            },
+            BackgroundColor(CARD),
+            Outline::new(
+                px(1),
+                Val::ZERO,
+                if state.focus == TextFocus::CombineName {
+                    BLUE
+                } else {
+                    OUTLINE
+                },
+            ),
+        ))
+        .with_children(|field| {
+            if state.combine_name.is_empty() && state.focus != TextFocus::CombineName {
+                label(field, "New animation name", 15.0, MUTED);
+            } else {
+                label(field, &state.combine_name, 15.0, PRIMARY);
+            }
+            if state.focus == TextFocus::CombineName {
+                caret(field, true);
+            }
+            if !state.combine_name.to_ascii_lowercase().ends_with(".vrma") {
+                label(field, ".vrma", 15.0, MUTED);
+            }
+        });
+    modal
+        .spawn(Node {
+            width: percent(100),
+            flex_direction: FlexDirection::Row,
+            column_gap: px(12),
+            flex_shrink: 0.0,
+            ..default()
+        })
+        .with_children(|row| {
+            button(
+                row,
+                "Add more / Back",
+                ManagerAction::CancelDialog,
+                px(215),
+                state,
+            );
+            button(
+                row,
+                "Create VRMA",
+                ManagerAction::ConfirmCombine,
+                px(200),
+                state,
+            );
+        });
+}
+
 fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &ManagerState) {
     parent
         .spawn((
@@ -616,7 +1001,17 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
             overlay
                 .spawn((
                     Node {
-                        width: px(420),
+                        width: if matches!(dialog, Dialog::Combine) {
+                            px(750)
+                        } else {
+                            px(420)
+                        },
+                        height: if matches!(dialog, Dialog::Combine) {
+                            percent(88)
+                        } else {
+                            Val::Auto
+                        },
+                        max_height: px(820),
                         padding: UiRect::all(px(22)),
                         row_gap: px(14),
                         flex_direction: FlexDirection::Column,
@@ -631,6 +1026,7 @@ fn spawn_dialog(parent: &mut ChildSpawnerCommands, dialog: &Dialog, state: &Mana
                         label(modal, error.clone(), 13.0, Color::srgb(1.0, 0.48, 0.53));
                     }
                     match dialog {
+                        Dialog::Combine => spawn_combine_editor(modal, state),
                         Dialog::Rename(key) => {
                             label(modal, "Rename animation", 22.0, PRIMARY);
                             label(modal, key.rsplit('/').next().unwrap_or(key), 13.0, MUTED);
@@ -737,7 +1133,7 @@ mod tests {
     #[test]
     fn ten_thousand_entries_only_build_nearby_cards_even_after_jumping_to_end() {
         let mut app = App::new();
-        let mut state = ManagerState::new();
+        let mut state = ManagerState::for_test();
         state.registry.entries = (0..10_000)
             .map(|i| super::super::registry::AnimationEntry {
                 key: format!("{i}.vrma"),

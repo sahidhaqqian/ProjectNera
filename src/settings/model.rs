@@ -28,6 +28,7 @@ pub(crate) struct AlarmConfig {
     pub(crate) day: u8,
     /// Monday = bit 0 ... Sunday = bit 6.
     pub(crate) repeat_days: u8,
+    pub(crate) sound: u8,
 }
 
 impl AlarmConfig {
@@ -45,6 +46,7 @@ impl AlarmConfig {
             month,
             day,
             repeat_days: 0b0111_1111,
+            sound: 1,
         }
     }
 
@@ -57,6 +59,9 @@ impl AlarmConfig {
             .day
             .clamp(1, alarm_days_in_month(self.year, self.month));
         self.repeat_days &= 0b0111_1111;
+        self.sound = self
+            .sound
+            .min((crate::alarm::sounds::SOUNDS.len() - 1) as u8);
         if self.mode == 1 && self.repeat_days == 0 {
             self.enabled = false;
         }
@@ -198,6 +203,32 @@ impl AlarmConfig {
     }
 }
 
+/// Behavior cadence independent of how primitive settings are persisted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActivityLevel {
+    Calm,
+    Normal,
+    Active,
+}
+
+impl ActivityLevel {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Calm => "Calm",
+            Self::Normal => "Normal",
+            Self::Active => "Active",
+        }
+    }
+
+    pub(crate) fn walk_interval_secs(self) -> (f32, f32) {
+        match self {
+            Self::Calm => (60.0, 180.0),
+            Self::Normal => (30.0, 90.0),
+            Self::Active => (15.0, 45.0),
+        }
+    }
+}
+
 /// Settings that already have a real runtime consumer.
 ///
 /// Keep unfinished controls out of this resource: a setting should only be
@@ -216,9 +247,25 @@ pub(crate) struct NeraSettings {
 
     /// Uniform VRM scale in percent. Kept proportional; no independent X/Y stretch.
     pub(crate) character_size: u16,
+    /// Empty selects bundled Nera; imported models use the private characters asset source.
+    pub(crate) character_asset: String,
     /// Standing support offset in logical pixels. Positive values keep the visible
     /// feet slightly above the desktop support line; negative values sink them lower.
     pub(crate) ground_offset: i16,
+
+    /// Allows Nera to walk around the desktop while otherwise idle.
+    /// Disabled by default, including profiles created before walking existed.
+    pub(crate) walking_enabled: bool,
+    pub(crate) gravity_enabled: bool,
+    pub(crate) throw_enabled: bool,
+    /// Launch strength percentage. 100 preserves the original throw velocity.
+    pub(crate) throw_intensity: u8,
+    /// 0 = Calm, 1 = Normal, 2 = Active. Unknown values use Normal.
+    pub(crate) activity_level: u8,
+    /// Maximum distance from the last user placement, in logical pixels (DPI-scaled).
+    pub(crate) roaming_radius_px: u16,
+    /// Pause autonomous movement while a foreground app covers its monitor.
+    pub(crate) pause_roaming_fullscreen: bool,
 
     /// Master switch for gaze behavior driven by the global mouse cursor.
     pub(crate) follow_mouse: bool,
@@ -270,6 +317,7 @@ pub(crate) struct NeraSettings {
     /// False means this profile predates the multi-alarm book and should expose
     /// the legacy single-alarm fields as one migration candidate.
     pub(crate) alarm_book_initialized: bool,
+    pub(crate) alarm_sound: u8,
 }
 
 fn default_alarm_date() -> (u16, u8, u8) {
@@ -308,7 +356,15 @@ impl Default for NeraSettings {
             window_x: 200,
             window_y: 200,
             character_size: 100,
+            character_asset: String::new(),
             ground_offset: 0,
+            walking_enabled: false,
+            gravity_enabled: true,
+            throw_enabled: true,
+            throw_intensity: 50,
+            activity_level: 1,
+            roaming_radius_px: 400,
+            pause_roaming_fullscreen: true,
             follow_mouse: true,
             follow_eyes: true,
             follow_head: false,
@@ -320,7 +376,7 @@ impl Default for NeraSettings {
             brightness: 100,
             master_volume: 100,
             audio_muted: false,
-            fps_limit: 60,
+            fps_limit: 24,
 
             alarm_enabled: false,
             alarm_hour: 7,
@@ -334,11 +390,44 @@ impl Default for NeraSettings {
 
             alarm_book: "v1|".to_string(),
             alarm_book_initialized: false,
+            alarm_sound: 1,
         }
     }
 }
 
 impl NeraSettings {
+    pub(crate) fn throw_strength(&self) -> f32 {
+        if self.throw_enabled {
+            f32::from(self.throw_intensity.min(100)) / 100.0
+        } else {
+            0.0
+        }
+    }
+
+    pub(super) fn throw_intensity_label(&self) -> String {
+        format!("{}%", self.throw_intensity.min(100))
+    }
+
+    pub(crate) fn activity_level(&self) -> ActivityLevel {
+        match self.activity_level {
+            0 => ActivityLevel::Calm,
+            2 => ActivityLevel::Active,
+            _ => ActivityLevel::Normal,
+        }
+    }
+
+    pub(crate) fn roaming_radius_px(&self) -> f32 {
+        self.roaming_radius_px.clamp(300, 600) as f32
+    }
+
+    pub(super) fn cycle_activity_level(&mut self) {
+        self.activity_level = match self.activity_level() {
+            ActivityLevel::Calm => 1,
+            ActivityLevel::Normal => 2,
+            ActivityLevel::Active => 0,
+        };
+    }
+
     pub(crate) fn toggle_always_on_top(&mut self) {
         self.always_on_top = !self.always_on_top;
     }
@@ -474,18 +563,21 @@ impl NeraSettings {
 
     pub(super) fn cycle_fps_limit(&mut self) {
         self.fps_limit = match self.fps_limit {
+            24 => 30,
             30 => 60,
             60 => 90,
             90 => 120,
             120 => 144,
             144 => 0,
-            _ => 30,
+            _ => 24,
         };
     }
 
     pub(super) fn fps_label(&self) -> String {
         match self.fps_limit {
             0 => "Unlimited (VSync)".to_string(),
+            // Legacy 15 FPS values are retired and now behave as 24 FPS.
+            15 => "24 FPS".to_string(),
             fps => format!("{fps} FPS"),
         }
     }
@@ -607,7 +699,7 @@ fn encode_alarm_book(alarms: &[AlarmConfig]) -> String {
     for alarm in alarms {
         let alarm = alarm.clone().normalized();
         encoded.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{}|",
+            "{},{},{},{},{},{},{},{},{},{},{}|",
             alarm.id,
             u8::from(alarm.enabled),
             alarm.hour,
@@ -618,6 +710,7 @@ fn encode_alarm_book(alarms: &[AlarmConfig]) -> String {
             alarm.day,
             alarm.repeat_days,
             encode_label_hex(&alarm.label),
+            alarm.sound,
         ));
     }
 
@@ -630,7 +723,7 @@ fn decode_alarm_book(book: &str) -> Option<Vec<AlarmConfig>> {
 
     for record in body.split('|').filter(|record| !record.is_empty()) {
         let fields: Vec<_> = record.split(',').collect();
-        if fields.len() != 10 {
+        if fields.len() != 10 && fields.len() != 11 {
             warn!("Settings: skipping malformed alarm record");
             continue;
         }
@@ -648,6 +741,10 @@ fn decode_alarm_book(book: &str) -> Option<Vec<AlarmConfig>> {
                     day: fields[7].parse().ok()?,
                     repeat_days: fields[8].parse().ok()?,
                     label: decode_label_hex(fields[9])?,
+                    sound: fields
+                        .get(10)
+                        .and_then(|sound| sound.parse().ok())
+                        .unwrap_or(0),
                 }
                 .normalized(),
             )
@@ -683,6 +780,7 @@ impl NeraSettings {
                 month: self.alarm_month,
                 day: self.alarm_day,
                 repeat_days: self.alarm_repeat_days,
+                sound: self.alarm_sound,
             }
             .normalized(),
         ]
@@ -704,11 +802,124 @@ impl NeraSettings {
     }
 }
 
-/// Sent by the radial action menu. The Settings module owns what "opening
-/// settings" means, so action_menu.rs does not need to know about UI details.
+#[cfg(test)]
+mod walking_settings_tests {
+    use super::*;
+
+    #[test]
+    fn older_profiles_keep_walking_off_and_saved_choice_is_reflectable() {
+        // SettingsPlugin starts from Default and applies only persisted fields.
+        let mut legacy = bevy::reflect::structs::DynamicStruct::default();
+        legacy.insert("character_size", 125_u16);
+        legacy.insert("follow_mouse", false);
+        let mut settings = NeraSettings::default();
+        settings.apply(&legacy);
+        assert_eq!(settings.character_size, 125);
+        assert!(!settings.follow_mouse);
+        assert!(!settings.walking_enabled);
+        assert_eq!(settings.activity_level(), ActivityLevel::Normal);
+        assert_eq!(settings.roaming_radius_px(), 400.0);
+        assert!(settings.pause_roaming_fullscreen);
+
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("walking_enabled", true);
+        settings.apply(&saved);
+        assert!(settings.walking_enabled);
+        assert_eq!(settings.character_size, 125);
+    }
+}
+
+#[cfg(test)]
+mod throw_settings_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_profiles_default_to_gentler_throws_and_saved_preferences_are_reflectable() {
+        let mut old = bevy::reflect::structs::DynamicStruct::default();
+        old.insert("gravity_enabled", false);
+        let mut settings = NeraSettings::default();
+        settings.apply(&old);
+        assert!(settings.throw_enabled);
+        assert_eq!(settings.throw_intensity, 50);
+        assert_eq!(settings.throw_strength(), 0.5);
+        assert!(!settings.gravity_enabled);
+
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("throw_enabled", false);
+        saved.insert("throw_intensity", 30_u8);
+        settings.apply(&saved);
+        assert!(!settings.throw_enabled);
+        assert_eq!(settings.throw_intensity, 30);
+        assert_eq!(settings.throw_strength(), 0.0);
+        settings.throw_enabled = true;
+        assert_eq!(settings.throw_strength(), 0.3);
+        settings.throw_intensity = u8::MAX;
+        assert_eq!(settings.throw_strength(), 1.0);
+        settings.throw_intensity = 0;
+        assert_eq!(settings.throw_strength(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod roaming_settings_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_roaming_settings_use_safe_runtime_values() {
+        let mut settings = NeraSettings::default();
+        settings.activity_level = u8::MAX;
+        settings.roaming_radius_px = 0;
+        assert_eq!(settings.activity_level(), ActivityLevel::Normal);
+        assert_eq!(settings.roaming_radius_px(), 300.0);
+        settings.roaming_radius_px = u16::MAX;
+        assert_eq!(settings.roaming_radius_px(), 600.0);
+    }
+
+    #[test]
+    fn activity_choices_follow_requested_cadence() {
+        let mut settings = NeraSettings::default();
+        assert_eq!(settings.activity_level().walk_interval_secs(), (30.0, 90.0));
+        settings.cycle_activity_level();
+        assert_eq!(settings.activity_level().walk_interval_secs(), (15.0, 45.0));
+        settings.cycle_activity_level();
+        assert_eq!(
+            settings.activity_level().walk_interval_secs(),
+            (60.0, 180.0)
+        );
+        settings.cycle_activity_level();
+        assert_eq!(settings.activity_level(), ActivityLevel::Normal);
+    }
+
+    #[test]
+    fn saved_roaming_preferences_are_reflectable() {
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("activity_level", 2_u8);
+        saved.insert("roaming_radius_px", 550_u16);
+        saved.insert("pause_roaming_fullscreen", false);
+        let mut settings = NeraSettings::default();
+        settings.apply(&saved);
+        assert_eq!(settings.activity_level(), ActivityLevel::Active);
+        assert_eq!(settings.roaming_radius_px(), 550.0);
+        assert!(!settings.pause_roaming_fullscreen);
+    }
+}
+
 #[cfg(test)]
 mod alarm_book_tests {
     use super::*;
+
+    #[test]
+    fn old_alarm_records_keep_classic_sound_and_new_records_preserve_choices() {
+        let old = decode_alarm_book("v1|3,1,6,45,1,2026,9,23,31,57616b65207570|").unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].sound, 0);
+        let mut alarm = old[0].clone();
+        alarm.sound = 4;
+        assert_eq!(
+            decode_alarm_book(&encode_alarm_book(&[alarm.clone()])).unwrap(),
+            vec![alarm]
+        );
+    }
 
     #[test]
     fn alarm_book_roundtrip_preserves_multiple_entries_and_labels() {
@@ -724,6 +935,7 @@ mod alarm_book_tests {
                 month: 9,
                 day: 23,
                 repeat_days: 0b0001_1111,
+                sound: 2,
             },
             AlarmConfig {
                 id: 4,
@@ -736,6 +948,7 @@ mod alarm_book_tests {
                 month: 10,
                 day: 2,
                 repeat_days: 0,
+                sound: 4,
             },
         ];
 

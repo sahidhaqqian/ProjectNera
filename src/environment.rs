@@ -1,27 +1,17 @@
 //! Desktop window snapshot, target tracking, and support surfaces.
-mod taskbar;
 mod sitting;
+mod taskbar;
 
-pub use taskbar::{
-    TaskbarEdge,
-    TaskbarInfo,
-    TaskbarState,
-};
+pub use taskbar::{TaskbarEdge, TaskbarInfo, TaskbarState};
 
 pub use sitting::{AvatarAnchor, PlacementState};
+#[cfg(test)]
+pub(crate) use sitting::{TaskbarAttachment, WindowAttachment};
 
-use bevy::{
-    prelude::*,
-    window::PrimaryWindow,
-};
+use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::platform::{
-    self,
-    DesktopWindow,
-    MonitorInfo,
-    NativeMonitorHandle,
-    NativeWindowHandle,
-    PhysicalRect,
+    self, DesktopWindow, MonitorInfo, NativeMonitorHandle, NativeWindowHandle, PhysicalRect,
 };
 
 // -----------------------------------------------------------------------------
@@ -33,7 +23,6 @@ pub struct DesktopEnvironment {
     // -------------------------------------------------------------------------
     // Nera
     // -------------------------------------------------------------------------
-
     pub nera_hwnd: Option<NativeWindowHandle>,
     pub nera_rect: Option<PhysicalRect>,
     pub nera_dpi: u32,
@@ -53,31 +42,26 @@ pub struct DesktopEnvironment {
     // -------------------------------------------------------------------------
     // Monitor
     // -------------------------------------------------------------------------
-
     pub monitor: Option<MonitorInfo>,
 
     // -------------------------------------------------------------------------
     // Window Discovery
     // -------------------------------------------------------------------------
-
     pub discovered_windows: Vec<DesktopWindow>,
 
     // -------------------------------------------------------------------------
     // Window Tracking
     // -------------------------------------------------------------------------
-
     pub target_window: Option<TrackedWindow>,
 
     // -------------------------------------------------------------------------
     // Taskbar
     // -------------------------------------------------------------------------
-
     pub taskbar: TaskbarState,
 
     // -------------------------------------------------------------------------
     // Phase 4 - Sitting / attachment
     // -------------------------------------------------------------------------
-
     pub placement: PlacementState,
 
     /// True while Phase 4 hides Nera because the attached target is temporarily
@@ -114,8 +98,7 @@ pub struct DesktopEnvironmentPlugin;
 
 impl Plugin for DesktopEnvironmentPlugin {
     fn build(&self, app: &mut App) {
-        app
-            .init_resource::<DesktopEnvironment>()
+        app.init_resource::<DesktopEnvironment>()
             .init_resource::<WindowDiscoveryTimer>()
             .init_resource::<sitting::SittingTimer>()
             .add_systems(First, sync_desktop_environment)
@@ -139,8 +122,7 @@ impl Plugin for DesktopEnvironmentPlugin {
 
 fn sync_desktop_environment(world: &mut World) {
     let primary_window_entity = {
-        let mut query =
-            world.query_filtered::<Entity, With<PrimaryWindow>>();
+        let mut query = world.query_filtered::<Entity, With<PrimaryWindow>>();
 
         query.iter(world).next()
     };
@@ -149,16 +131,12 @@ fn sync_desktop_environment(world: &mut World) {
         return;
     };
 
-    let current_handle = world
-        .resource::<DesktopEnvironment>()
-        .nera_hwnd;
+    let current_handle = world.resource::<DesktopEnvironment>().nera_hwnd;
 
     let handle = if let Some(handle) = current_handle {
         handle
     } else {
-        let Some(handle) =
-            platform::native_window_handle(primary_window_entity)
-        else {
+        let Some(handle) = platform::native_window_handle(primary_window_entity) else {
             return;
         };
 
@@ -175,8 +153,7 @@ fn sync_desktop_environment(world: &mut World) {
     let monitor = platform::monitor_info(handle);
     let scale_factor = platform::dpi_scale_factor(dpi);
 
-    let mut environment =
-        world.resource_mut::<DesktopEnvironment>();
+    let mut environment = world.resource_mut::<DesktopEnvironment>();
 
     environment.nera_hwnd = Some(handle);
     environment.nera_rect = rect;
@@ -203,10 +180,7 @@ struct WindowDiscoveryTimer {
 impl Default for WindowDiscoveryTimer {
     fn default() -> Self {
         Self {
-            timer: Timer::from_seconds(
-                WINDOW_ENUM_INTERVAL,
-                TimerMode::Repeating,
-            ),
+            timer: Timer::from_seconds(WINDOW_ENUM_INTERVAL, TimerMode::Repeating),
             initialized: false,
         }
     }
@@ -221,44 +195,30 @@ fn refresh_window_snapshot(
     mut timer: ResMut<WindowDiscoveryTimer>,
     mut environment: ResMut<DesktopEnvironment>,
 ) {
-    let Some(nera_hwnd) =
-        environment.nera_hwnd
-    else {
+    let Some(nera_hwnd) = environment.nera_hwnd else {
         return;
     };
 
-    let should_refresh =
-        if !timer.initialized {
-            timer.initialized = true;
-            true
-        } else {
-            timer
-                .timer
-                .tick(time.delta())
-                .just_finished()
-        };
+    let should_refresh = if !timer.initialized {
+        timer.initialized = true;
+        true
+    } else {
+        timer.timer.tick(time.delta()).just_finished()
+    };
 
     if !should_refresh {
         return;
     }
 
-    match platform::enumerate_windows(
-        nera_hwnd,
-    ) {
+    match platform::enumerate_windows(nera_hwnd) {
         Ok(windows) => {
-            debug!(
-                "Desktop window snapshot: {} candidates",
-                windows.len()
-            );
+            debug!("Desktop window snapshot: {} candidates", windows.len());
 
-            environment.discovered_windows =
-                windows;
+            environment.discovered_windows = windows;
         }
 
         Err(error) => {
-            warn!(
-                "EnumWindows failed: {error}"
-            );
+            warn!("EnumWindows failed: {error}");
         }
     }
 }
@@ -338,10 +298,7 @@ impl DesktopEnvironment {
     ///
     /// Phase 4 nanti bisa memakai method yang sama ketika Nera
     /// landing / snap ke sebuah window.
-    pub fn track_window(
-        &mut self,
-        handle: NativeWindowHandle,
-    ) -> bool {
+    pub fn track_window(&mut self, handle: NativeWindowHandle) -> bool {
         if !platform::is_window_alive(handle) {
             return false;
         }
@@ -354,24 +311,13 @@ impl DesktopEnvironment {
             return false;
         }
 
-        let Some(rect) =
-            platform::window_rect(handle)
-        else {
+        let Some(rect) = platform::window_rect(handle) else {
             return false;
         };
 
-        let monitor =
-            platform::monitor_info(handle)
-                .map(|info| info.handle);
+        let monitor = platform::monitor_info(handle).map(|info| info.handle);
 
-        self.target_window =
-            Some(
-                TrackedWindow::new(
-                    handle,
-                    rect,
-                    monitor,
-                ),
-            );
+        self.target_window = Some(TrackedWindow::new(handle, rect, monitor));
 
         true
     }
@@ -381,12 +327,8 @@ impl DesktopEnvironment {
 // Persistent Tracking
 // -----------------------------------------------------------------------------
 
-fn track_target_window(
-    mut environment: ResMut<DesktopEnvironment>,
-) {
-    let Some(target) =
-        environment.target_window.as_mut()
-    else {
+fn track_target_window(mut environment: ResMut<DesktopEnvironment>) {
+    let Some(target) = environment.target_window.as_mut() else {
         return;
     };
 
@@ -407,17 +349,12 @@ fn track_target_window(
     // Alive
     // -------------------------------------------------------------------------
 
-    if !platform::is_window_alive(
-        target.handle,
-    ) {
+    if !platform::is_window_alive(target.handle) {
         target.alive = false;
         target.minimized = false;
         target.cloaked = false;
 
-        info!(
-            "Tracked window closed: {:?}",
-            target.handle,
-        );
+        info!("Tracked window closed: {:?}", target.handle,);
 
         return;
     }
@@ -426,27 +363,17 @@ fn track_target_window(
     // Minimized
     // -------------------------------------------------------------------------
 
-    let was_minimized =
-        target.minimized;
+    let was_minimized = target.minimized;
 
-    let minimized =
-        platform::is_window_minimized(
-            target.handle,
-        );
+    let minimized = platform::is_window_minimized(target.handle);
 
     target.minimized = minimized;
 
     if minimized != was_minimized {
         if minimized {
-            info!(
-                "Tracked window minimized: {:?}",
-                target.handle,
-            );
+            info!("Tracked window minimized: {:?}", target.handle,);
         } else {
-            info!(
-                "Tracked window restored: {:?}",
-                target.handle,
-            );
+            info!("Tracked window restored: {:?}", target.handle,);
         }
     }
 
@@ -456,8 +383,7 @@ fn track_target_window(
     if target.cloaked != was_cloaked {
         debug!(
             "Tracked window DWM cloak changed: {:?} -> {}",
-            target.handle,
-            target.cloaked,
+            target.handle, target.cloaked,
         );
     }
 
@@ -472,52 +398,33 @@ fn track_target_window(
     // Geometry
     // -------------------------------------------------------------------------
 
-    let Some(new_rect) =
-        platform::window_rect(
-            target.handle,
-        )
-    else {
+    let Some(new_rect) = platform::window_rect(target.handle) else {
         return;
     };
 
-    let old_rect =
-        target.rect;
+    let old_rect = target.rect;
 
-    target.previous_rect =
-        old_rect;
+    target.previous_rect = old_rect;
 
-    target.rect =
-        new_rect;
+    target.rect = new_rect;
 
-    target.moved =
-        old_rect.left != new_rect.left
-            || old_rect.top != new_rect.top;
+    target.moved = old_rect.left != new_rect.left || old_rect.top != new_rect.top;
 
-    target.resized =
-        old_rect.width() != new_rect.width()
-            || old_rect.height() != new_rect.height();
+    target.resized = old_rect.width() != new_rect.width() || old_rect.height() != new_rect.height();
 
     // -------------------------------------------------------------------------
     // Monitor
     // -------------------------------------------------------------------------
 
-    let old_monitor =
-        target.monitor;
+    let old_monitor = target.monitor;
 
-    let new_monitor =
-        platform::monitor_info(
-            target.handle,
-        )
-        .map(|info| info.handle);
+    let new_monitor = platform::monitor_info(target.handle).map(|info| info.handle);
 
-    target.previous_monitor =
-        old_monitor;
+    target.previous_monitor = old_monitor;
 
-    target.monitor =
-        new_monitor;
+    target.monitor = new_monitor;
 
-    target.monitor_changed =
-        old_monitor != new_monitor;
+    target.monitor_changed = old_monitor != new_monitor;
 
     // -------------------------------------------------------------------------
     // Diagnostics
@@ -534,10 +441,7 @@ fn track_target_window(
     if target.moved || target.resized {
         debug!(
             "Tracked window changed: {:?} | moved={} resized={} | rect={:?}",
-            target.handle,
-            target.moved,
-            target.resized,
-            target.rect,
+            target.handle, target.moved, target.resized, target.rect,
         );
     }
 }

@@ -3,19 +3,9 @@ use bevy::{
     window::{PrimaryWindow, WindowLevel},
 };
 
-use crate::platform::{
-    self,
-    NativeMonitorHandle,
-    NativeWindowHandle,
-    PhysicalPoint,
-    PhysicalRect,
-};
+use crate::platform::{self, NativeMonitorHandle, NativeWindowHandle, PhysicalPoint, PhysicalRect};
 
-use super::{
-    DesktopEnvironment,
-    TaskbarEdge,
-    TaskbarInfo,
-};
+use super::{DesktopEnvironment, TaskbarEdge, TaskbarInfo};
 
 // -----------------------------------------------------------------------------
 // Phase 4 tuning
@@ -102,10 +92,7 @@ pub(super) struct SittingTimer {
 impl Default for SittingTimer {
     fn default() -> Self {
         Self {
-            z_order: Timer::from_seconds(
-                Z_ORDER_REFRESH_INTERVAL,
-                TimerMode::Repeating,
-            ),
+            z_order: Timer::from_seconds(Z_ORDER_REFRESH_INTERVAL, TimerMode::Repeating),
             z_order_initialized: false,
         }
     }
@@ -136,11 +123,7 @@ impl DesktopEnvironment {
         }
     }
 
-    fn anchor_for_rect(
-        &self,
-        rect: PhysicalRect,
-        mode: AvatarAnchor,
-    ) -> PhysicalPoint {
+    fn anchor_for_rect(&self, rect: PhysicalRect, mode: AvatarAnchor) -> PhysicalPoint {
         let width = rect.width().max(1);
         let height = rect.height().max(1);
 
@@ -311,16 +294,11 @@ impl DesktopEnvironment {
                     return None;
                 }
 
-                let edge_probe = PhysicalPoint::new(
-                    probe.x,
-                    window.rect.top.saturating_add(1),
-                );
+                let edge_probe = PhysicalPoint::new(probe.x, window.rect.top.saturating_add(1));
 
-                let visible_at_edge = platform::window_at_point(
-                    edge_probe,
-                    nera_hwnd,
-                    &self.discovered_windows,
-                ) == Some(window.handle);
+                let visible_at_edge =
+                    platform::window_at_point(edge_probe, nera_hwnd, &self.discovered_windows)
+                        == Some(window.handle);
 
                 visible_at_edge.then_some((distance, window.handle))
             })
@@ -380,8 +358,7 @@ impl DesktopEnvironment {
 
         info!(
             "Nera sit candidate: window {:?} probe_distance={}px | pose first",
-            target,
-            distance,
+            target, distance,
         );
 
         true
@@ -453,28 +430,20 @@ impl DesktopEnvironment {
         };
 
         let from_anchor = match self.placement {
-            PlacementState::Window(_) => {
-                self.anchor_for_rect(nera_rect, self.attached_anchor)
+            PlacementState::Window(_) => self.anchor_for_rect(nera_rect, self.attached_anchor),
+            PlacementState::Taskbar(attachment) => {
+                self.taskbar_anchor_for_rect(nera_rect, attachment.edge, self.attached_anchor)
             }
-            PlacementState::Taskbar(attachment) => self.taskbar_anchor_for_rect(
-                nera_rect,
-                attachment.edge,
-                self.attached_anchor,
-            ),
             PlacementState::Free
             | PlacementState::PendingWindow { .. }
             | PlacementState::PendingTaskbar { .. } => return,
         };
 
         let feet_anchor = match self.placement {
-            PlacementState::Window(_) => {
-                self.anchor_for_rect(nera_rect, AvatarAnchor::Feet)
+            PlacementState::Window(_) => self.anchor_for_rect(nera_rect, AvatarAnchor::Feet),
+            PlacementState::Taskbar(attachment) => {
+                self.taskbar_anchor_for_rect(nera_rect, attachment.edge, AvatarAnchor::Feet)
             }
-            PlacementState::Taskbar(attachment) => self.taskbar_anchor_for_rect(
-                nera_rect,
-                attachment.edge,
-                AvatarAnchor::Feet,
-            ),
             PlacementState::Free
             | PlacementState::PendingWindow { .. }
             | PlacementState::PendingTaskbar { .. } => return,
@@ -525,11 +494,7 @@ impl DesktopEnvironment {
             return false;
         }
 
-        let Some(target_rect) = self
-            .target_window
-            .as_ref()
-            .map(|target| target.rect)
-        else {
+        let Some(target_rect) = self.target_window.as_ref().map(|target| target.rect) else {
             self.placement = PlacementState::Free;
             return false;
         };
@@ -556,18 +521,13 @@ impl DesktopEnvironment {
 
         info!(
             "Nera sitting committed to window: {:?} | Seat calibrated | support_offset_x={}",
-            handle,
-            support_offset_x,
+            handle, support_offset_x,
         );
 
         true
     }
 
-    fn commit_taskbar_sit(
-        &mut self,
-        monitor: NativeMonitorHandle,
-        edge: TaskbarEdge,
-    ) -> bool {
+    fn commit_taskbar_sit(&mut self, monitor: NativeMonitorHandle, edge: TaskbarEdge) -> bool {
         let Some(taskbar) = self
             .taskbar
             .for_monitor(monitor)
@@ -589,23 +549,12 @@ impl DesktopEnvironment {
         };
 
         self.set_attached_anchor(AvatarAnchor::Seat);
-        let anchor = self.taskbar_anchor_for_rect(
-            nera_rect,
-            taskbar.edge,
-            AvatarAnchor::Seat,
-        );
-        let global = PhysicalPoint::new(
-            nera_rect.left + anchor.x,
-            nera_rect.top + anchor.y,
-        );
+        let anchor = self.taskbar_anchor_for_rect(nera_rect, taskbar.edge, AvatarAnchor::Seat);
+        let global = PhysicalPoint::new(nera_rect.left + anchor.x, nera_rect.top + anchor.y);
 
         let along_offset = match taskbar.edge {
-            TaskbarEdge::Top | TaskbarEdge::Bottom => {
-                global.x - taskbar.rect.left
-            }
-            TaskbarEdge::Left | TaskbarEdge::Right => {
-                global.y - taskbar.rect.top
-            }
+            TaskbarEdge::Top | TaskbarEdge::Bottom => global.x - taskbar.rect.left,
+            TaskbarEdge::Left | TaskbarEdge::Right => global.y - taskbar.rect.top,
         };
 
         self.target_window = None;
@@ -636,35 +585,20 @@ impl DesktopEnvironment {
 // Snap math
 // -----------------------------------------------------------------------------
 
-fn taskbar_snap_distance(
-    point: PhysicalPoint,
-    taskbar: TaskbarInfo,
-) -> Option<i32> {
+fn taskbar_snap_distance(point: PhysicalPoint, taskbar: TaskbarInfo) -> Option<i32> {
     match taskbar.edge {
-        TaskbarEdge::Bottom => {
-            (point.x >= taskbar.rect.left && point.x <= taskbar.rect.right)
-                .then_some((point.y - taskbar.rect.top).abs())
-        }
-        TaskbarEdge::Top => {
-            (point.x >= taskbar.rect.left && point.x <= taskbar.rect.right)
-                .then_some((point.y - taskbar.rect.bottom).abs())
-        }
-        TaskbarEdge::Left => {
-            (point.y >= taskbar.rect.top && point.y <= taskbar.rect.bottom)
-                .then_some((point.x - taskbar.rect.right).abs())
-        }
-        TaskbarEdge::Right => {
-            (point.y >= taskbar.rect.top && point.y <= taskbar.rect.bottom)
-                .then_some((point.x - taskbar.rect.left).abs())
-        }
+        TaskbarEdge::Bottom => (point.x >= taskbar.rect.left && point.x <= taskbar.rect.right)
+            .then_some((point.y - taskbar.rect.top).abs()),
+        TaskbarEdge::Top => (point.x >= taskbar.rect.left && point.x <= taskbar.rect.right)
+            .then_some((point.y - taskbar.rect.bottom).abs()),
+        TaskbarEdge::Left => (point.y >= taskbar.rect.top && point.y <= taskbar.rect.bottom)
+            .then_some((point.x - taskbar.rect.right).abs()),
+        TaskbarEdge::Right => (point.y >= taskbar.rect.top && point.y <= taskbar.rect.bottom)
+            .then_some((point.x - taskbar.rect.left).abs()),
     }
 }
 
-fn clamp_support_on_window(
-    target: PhysicalRect,
-    requested_x: i32,
-    margin: i32,
-) -> i32 {
+fn clamp_support_on_window(target: PhysicalRect, requested_x: i32, margin: i32) -> i32 {
     let min = target.left + margin.min(target.width().max(0) / 2);
     let max = target.right - margin.min(target.width().max(0) / 2);
 
@@ -681,10 +615,7 @@ fn position_on_window(
     let support_x = clamp_support_on_window(target, requested_support_x, margin);
 
     (
-        PhysicalPoint::new(
-            support_x - anchor.x,
-            target.top - anchor.y,
-        ),
+        PhysicalPoint::new(support_x - anchor.x, target.top - anchor.y),
         support_x - target.left,
     )
 }
@@ -696,8 +627,8 @@ fn position_on_taskbar(
 ) -> (PhysicalPoint, i32) {
     match taskbar.edge {
         TaskbarEdge::Bottom | TaskbarEdge::Top => {
-            let support_x = (taskbar.rect.left + along_offset)
-                .clamp(taskbar.rect.left, taskbar.rect.right);
+            let support_x =
+                (taskbar.rect.left + along_offset).clamp(taskbar.rect.left, taskbar.rect.right);
 
             let y = match taskbar.edge {
                 TaskbarEdge::Bottom => taskbar.rect.top - anchor.y,
@@ -711,8 +642,8 @@ fn position_on_taskbar(
             )
         }
         TaskbarEdge::Left | TaskbarEdge::Right => {
-            let support_y = (taskbar.rect.top + along_offset)
-                .clamp(taskbar.rect.top, taskbar.rect.bottom);
+            let support_y =
+                (taskbar.rect.top + along_offset).clamp(taskbar.rect.top, taskbar.rect.bottom);
 
             let x = match taskbar.edge {
                 TaskbarEdge::Left => taskbar.rect.right - anchor.x,
@@ -767,11 +698,7 @@ pub(super) fn follow_sitting_attachment(
         }
 
         PlacementState::Taskbar(attachment) => {
-            follow_taskbar_attachment(
-                &mut environment,
-                attachment,
-                refresh_z_order,
-            );
+            follow_taskbar_attachment(&mut environment, attachment, refresh_z_order);
         }
     }
 }
@@ -916,15 +843,13 @@ fn follow_window_attachment(
     // pushes almost the whole avatar above the screen. Detach before applying
     // the resized geometry so Nera remains visible and falls naturally.
     if let Some(monitor) = platform::monitor_info(target.handle) {
-        let top_guard =
-            (24.0 * environment.nera_scale_factor.max(0.5)).round() as i32;
+        let top_guard = (24.0 * environment.nera_scale_factor.max(0.5)).round() as i32;
 
         if target.rect.top <= monitor.bounds.top.saturating_add(top_guard) {
             environment.detach_nera();
             info!(
                 "Nera detached: target top edge has no sitting headroom | target_top={} monitor_top={}",
-                target.rect.top,
-                monitor.bounds.top,
+                target.rect.top, monitor.bounds.top,
             );
             return;
         }
@@ -976,10 +901,8 @@ fn follow_window_attachment(
             .unwrap_or(true);
 
         if !always_on_top {
-            if let Err(error) = platform::place_window_directly_above(
-                nera_hwnd,
-                attachment.target,
-            ) {
+            if let Err(error) = platform::place_window_directly_above(nera_hwnd, attachment.target)
+            {
                 debug!("Failed to refresh target-relative z-order: {error}");
             }
         }
@@ -1012,16 +935,9 @@ fn follow_taskbar_attachment(
         return;
     };
 
-    let anchor = environment.taskbar_anchor_for_rect(
-        nera_rect,
-        taskbar.edge,
-        environment.attached_anchor,
-    );
-    let (desired, clamped_offset) = position_on_taskbar(
-        taskbar,
-        anchor,
-        attachment.along_offset,
-    );
+    let anchor =
+        environment.taskbar_anchor_for_rect(nera_rect, taskbar.edge, environment.attached_anchor);
+    let (desired, clamped_offset) = position_on_taskbar(taskbar, anchor, attachment.along_offset);
 
     if desired.x != nera_rect.left || desired.y != nera_rect.top {
         if platform::move_window(nera_hwnd, desired).is_ok() {

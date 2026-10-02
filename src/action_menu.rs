@@ -7,102 +7,51 @@
 //! - Bevy main thread unblocked.
 //! - Existing tray/native UI thread.
 //! - Typed `NeraActionMenuCommand` messages.
-//! - Praying while the wheel is open.
+//! - Praying while the wheel is open and Nera is standing.
 //! - Animation / Alarm command contracts.
 //!
 //! The wheel is a real transparent Win32 popup. Its center is color-key
 //! transparent so Nera remains visible inside the ring.
 
 use std::{
-    ffi::c_void,
     f32::consts::{PI, TAU},
+    ffi::c_void,
     mem::size_of,
     sync::{
-        atomic::{AtomicIsize, Ordering},
-        Mutex,
-        OnceLock,
+        Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicIsize, Ordering},
     },
 };
 
 use bevy::prelude::*;
 
 use windows::{
-    core::{w, Error, Result},
     Win32::{
-        Foundation::{
-            COLORREF,
-            GetLastError,
-            HINSTANCE,
-            HWND,
-            LPARAM,
-            LRESULT,
-            RECT,
-            WPARAM,
-        },
+        Foundation::{COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint,
-            CreatePen,
-            CreateSolidBrush,
-            DeleteObject,
-            Ellipse,
-            EndPaint,
-            GetStockObject,
-            HGDIOBJ,
-            InvalidateRect,
-            LineTo,
-            MoveToEx,
-            PAINTSTRUCT,
-            PS_SOLID,
-            SelectObject,
-            SetBkMode,
-            SetTextColor,
-            TextOutW,
-            DEFAULT_GUI_FONT,
-            NULL_PEN,
-            TRANSPARENT,
+            BeginPaint, CreatePen, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, Ellipse,
+            EndPaint, GetStockObject, HGDIOBJ, InvalidateRect, LineTo, MoveToEx, NULL_PEN,
+            PAINTSTRUCT, PS_SOLID, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW,
-            DefWindowProcW,
-            DestroyWindow,
-            RegisterClassExW,
-            SetForegroundWindow,
-            SetLayeredWindowAttributes,
-            SetWindowPos,
-            ShowWindow,
-            LWA_COLORKEY,
-            SWP_NOACTIVATE,
-            SWP_NOMOVE,
-            SWP_NOSIZE,
-            SW_SHOW,
-            WM_DESTROY,
-            WM_ERASEBKGND,
-            WM_KEYDOWN,
-            WM_KILLFOCUS,
-            WM_LBUTTONUP,
-            WM_MOUSEMOVE,
-            WM_PAINT,
-            WM_RBUTTONUP,
-            WNDCLASSEXW,
-            HWND_TOPMOST,
-            WS_EX_LAYERED,
-            WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST,
-            WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, LWA_COLORKEY,
+            RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+            SetLayeredWindowAttributes, SetWindowPos, ShowWindow, WM_DESTROY, WM_ERASEBKGND,
+            WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP,
+            WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
+    core::{Error, Result, w},
 };
 
 use crate::{
     alarm_settings::OpenAlarmSettingsWindow,
     animation::NeraAnimationState,
+    environment::{DesktopEnvironment, PlacementState},
     interaction::NeraRightClicked,
-    settings::{OpenSettingsWindow, ReturnToActionMenu},
-    tray::{
-        send_action_menu_result,
-        TrayRuntime,
-    },
+    settings::{NeraSettings, OpenSettingsWindow, ReturnToActionMenu, save_settings_deferred},
+    tray::{TrayRuntime, send_action_menu_result},
 };
 
 // =============================================================================
@@ -136,11 +85,14 @@ pub(crate) enum AlarmMenuChoice {
 
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NeraActionMenuCommand {
+    Cloud(crate::cloud::CloudCommand),
     Animation(AnimationMenuChoice),
     AnimationManager,
     Alarm(AlarmMenuChoice),
     AlarmSettings,
     Settings,
+    ToggleRoaming,
+    StayHere,
 }
 
 /// Posted to the existing tray HWND. The tray thread creates the radial popup,
@@ -172,11 +124,7 @@ const TEXT_RGB: (u8, u8, u8) = (245, 244, 252);
 const MUTED_RGB: (u8, u8, u8) = (108, 116, 145);
 
 fn rgb(value: (u8, u8, u8)) -> COLORREF {
-    COLORREF(
-        value.0 as u32
-            | ((value.1 as u32) << 8)
-            | ((value.2 as u32) << 16),
-    )
+    COLORREF(value.0 as u32 | ((value.1 as u32) << 8) | ((value.2 as u32) << 16))
 }
 
 // =============================================================================
@@ -186,6 +134,8 @@ fn rgb(value: (u8, u8, u8)) -> COLORREF {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RadialPage {
     Root,
+    Cloud,
+    Roaming,
     Alarm,
     /// Longer presets + "Test Now", reached from the Alarm page. Replaces the
     /// old `Custom` slot, which was an enabled menu item that did nothing but
@@ -216,9 +166,9 @@ impl RadialItem {
 
 const ROOT_ITEMS: [RadialItem; 6] = [
     RadialItem {
-        glyph: "●",
-        label: "Chat",
-        action: RadialItemAction::Disabled,
+        glyph: "☁",
+        label: "Cloud",
+        action: RadialItemAction::Open(RadialPage::Cloud),
     },
     RadialItem {
         glyph: "⚙",
@@ -237,8 +187,8 @@ const ROOT_ITEMS: [RadialItem; 6] = [
     },
     RadialItem {
         glyph: "✓",
-        label: "Productivity",
-        action: RadialItemAction::Disabled,
+        label: "Roaming",
+        action: RadialItemAction::Open(RadialPage::Roaming),
     },
     RadialItem {
         glyph: "◆",
@@ -247,27 +197,74 @@ const ROOT_ITEMS: [RadialItem; 6] = [
     },
 ];
 
+const ROAMING_ITEMS: [RadialItem; 3] = [
+    RadialItem {
+        glyph: "○",
+        label: "Allow Roaming",
+        action: RadialItemAction::Command(NeraActionMenuCommand::ToggleRoaming),
+    },
+    RadialItem {
+        glyph: "⌂",
+        label: "Stay Here",
+        action: RadialItemAction::Command(NeraActionMenuCommand::StayHere),
+    },
+    RadialItem {
+        glyph: "<",
+        label: "Back",
+        action: RadialItemAction::Back,
+    },
+];
+
+const CLOUD_ITEMS: [RadialItem; 4] = [
+    RadialItem {
+        glyph: "Z",
+        label: "Rest",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
+            crate::cloud::CloudCommand::Summon(crate::cloud::CloudMode::Rest),
+        )),
+    },
+    RadialItem {
+        glyph: "~",
+        label: "Ride",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
+            crate::cloud::CloudCommand::Summon(crate::cloud::CloudMode::Ride),
+        )),
+    },
+    RadialItem {
+        glyph: "×",
+        label: "Dismiss",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
+            crate::cloud::CloudCommand::Dismiss,
+        )),
+    },
+    RadialItem {
+        glyph: "<",
+        label: "Back",
+        action: RadialItemAction::Back,
+    },
+];
+
 const ALARM_ITEMS: [RadialItem; 6] = [
     RadialItem {
         glyph: "5",
         label: "5 min",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::FiveMinutes),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
+            AlarmMenuChoice::FiveMinutes,
+        )),
     },
     RadialItem {
         glyph: "10",
         label: "10 min",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::TenMinutes),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
+            AlarmMenuChoice::TenMinutes,
+        )),
     },
     RadialItem {
         glyph: "30",
         label: "30 min",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::ThirtyMinutes),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
+            AlarmMenuChoice::ThirtyMinutes,
+        )),
     },
     RadialItem {
         glyph: "›",
@@ -277,9 +274,7 @@ const ALARM_ITEMS: [RadialItem; 6] = [
     RadialItem {
         glyph: "×",
         label: "Cancel",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::Cancel),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::Cancel)),
     },
     RadialItem {
         glyph: "<",
@@ -292,44 +287,36 @@ const ALARM_MORE_ITEMS: [RadialItem; 7] = [
     RadialItem {
         glyph: "15",
         label: "15 min",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::FifteenMinutes),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
+            AlarmMenuChoice::FifteenMinutes,
+        )),
     },
     RadialItem {
         glyph: "45",
         label: "45 min",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::FortyFiveMinutes),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(
+            AlarmMenuChoice::FortyFiveMinutes,
+        )),
     },
     RadialItem {
         glyph: "1h",
         label: "1 hour",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::OneHour),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::OneHour)),
     },
     RadialItem {
         glyph: "2h",
         label: "2 hours",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::TwoHours),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TwoHours)),
     },
     RadialItem {
         glyph: "⚙",
         label: "Custom",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::AlarmSettings,
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings),
     },
     RadialItem {
         glyph: "!",
         label: "Test Now",
-        action: RadialItemAction::Command(
-            NeraActionMenuCommand::Alarm(AlarmMenuChoice::TestNow),
-        ),
+        action: RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TestNow)),
     },
     RadialItem {
         glyph: "<",
@@ -341,6 +328,8 @@ const ALARM_MORE_ITEMS: [RadialItem; 7] = [
 fn items_for(page: RadialPage) -> &'static [RadialItem] {
     match page {
         RadialPage::Root => &ROOT_ITEMS,
+        RadialPage::Cloud => &CLOUD_ITEMS,
+        RadialPage::Roaming => &ROAMING_ITEMS,
         RadialPage::Alarm => &ALARM_ITEMS,
         RadialPage::AlarmMore => &ALARM_MORE_ITEMS,
     }
@@ -355,9 +344,9 @@ fn items_for(page: RadialPage) -> &'static [RadialItem] {
 fn parent_page(page: RadialPage) -> Option<RadialPage> {
     match page {
         RadialPage::Root => None,
-        RadialPage::Alarm => {
-            Some(RadialPage::Root)
-        }
+        RadialPage::Cloud => Some(RadialPage::Root),
+        RadialPage::Roaming => Some(RadialPage::Root),
+        RadialPage::Alarm => Some(RadialPage::Root),
         RadialPage::AlarmMore => Some(RadialPage::Alarm),
     }
 }
@@ -392,6 +381,7 @@ impl Default for NativeRadialState {
 
 static NATIVE_STATE: OnceLock<Mutex<NativeRadialState>> = OnceLock::new();
 static RADIAL_HWND: AtomicIsize = AtomicIsize::new(0);
+static ROAMING_ENABLED: AtomicBool = AtomicBool::new(false);
 static CLASS_READY: OnceLock<()> = OnceLock::new();
 
 fn native_state() -> &'static Mutex<NativeRadialState> {
@@ -403,12 +393,31 @@ fn native_state() -> &'static Mutex<NativeRadialState> {
 // =============================================================================
 
 #[derive(Resource, Default)]
-struct ActionMenuState {
+pub(crate) struct ActionMenuState {
     open: bool,
     /// Last root-menu center in desktop physical pixels. Settings uses this to
     /// return to the same radial menu location instead of reopening under the
     /// Settings-window cursor.
     last_center: Option<IVec2>,
+}
+
+impl ActionMenuState {
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn open_at(
+        &mut self,
+        screen: IVec2,
+        placement: PlacementState,
+        animation: &mut NeraAnimationState,
+    ) {
+        self.open = true;
+        self.last_center = Some(screen);
+        // Attachment may already be pending before animation's support sync.
+        // The wheel still opens; only its standing-only pose is gated.
+        animation.set_praying_menu(placement == PlacementState::Free);
+    }
 }
 
 pub(crate) struct ActionMenuPlugin;
@@ -420,6 +429,7 @@ impl Plugin for ActionMenuPlugin {
             .add_systems(
                 Update,
                 (
+                    sync_roaming_menu_state,
                     open_action_menu,
                     reopen_action_menu_from_settings,
                     poll_action_menu_result,
@@ -430,10 +440,21 @@ impl Plugin for ActionMenuPlugin {
     }
 }
 
+fn sync_roaming_menu_state(settings: Res<NeraSettings>) {
+    let previous = ROAMING_ENABLED.swap(settings.walking_enabled, Ordering::AcqRel);
+    if previous != settings.walking_enabled {
+        let hwnd_raw = RADIAL_HWND.load(Ordering::Acquire);
+        if hwnd_raw != 0 {
+            let _ = unsafe { InvalidateRect(Some(HWND(hwnd_raw as *mut c_void)), None, false) };
+        }
+    }
+}
+
 fn post_action_menu_request(
     screen: IVec2,
     menu: &mut ActionMenuState,
     animation: &mut NeraAnimationState,
+    placement: PlacementState,
     tray: &TrayRuntime,
 ) {
     if menu.open {
@@ -446,9 +467,7 @@ fn post_action_menu_request(
         return;
     }
 
-    menu.open = true;
-    menu.last_center = Some(screen);
-    animation.set_praying_menu(true);
+    menu.open_at(screen, placement, animation);
 
     let hwnd = HWND(hwnd_raw as *mut c_void);
     let posted = unsafe {
@@ -471,6 +490,7 @@ fn open_action_menu(
     mut right_clicked: MessageReader<NeraRightClicked>,
     mut menu: ResMut<ActionMenuState>,
     mut animation: ResMut<NeraAnimationState>,
+    environment: Res<DesktopEnvironment>,
     tray: Option<Res<TrayRuntime>>,
 ) {
     let Some(tray) = tray else {
@@ -482,6 +502,7 @@ fn open_action_menu(
             event.pointer.screen,
             &mut menu,
             &mut animation,
+            environment.placement,
             &tray,
         );
     }
@@ -491,6 +512,7 @@ fn reopen_action_menu_from_settings(
     mut requests: MessageReader<ReturnToActionMenu>,
     mut menu: ResMut<ActionMenuState>,
     mut animation: ResMut<NeraAnimationState>,
+    environment: Res<DesktopEnvironment>,
     tray: Option<Res<TrayRuntime>>,
 ) {
     if requests.read().next().is_none() {
@@ -506,11 +528,16 @@ fn reopen_action_menu_from_settings(
         return;
     };
 
-    post_action_menu_request(screen, &mut menu, &mut animation, &tray);
+    post_action_menu_request(
+        screen,
+        &mut menu,
+        &mut animation,
+        environment.placement,
+        &tray,
+    );
     info!(
         "Nera Settings -> radial root reopened at ({}, {})",
-        screen.x,
-        screen.y,
+        screen.x, screen.y,
     );
 }
 
@@ -543,7 +570,7 @@ fn keep_action_menu_front(menu: Res<ActionMenuState>) {
     };
 }
 
-fn poll_action_menu_result(
+pub(crate) fn poll_action_menu_result(
     mut menu: ResMut<ActionMenuState>,
     mut animation: ResMut<NeraAnimationState>,
     tray: Option<Res<TrayRuntime>>,
@@ -551,6 +578,8 @@ fn poll_action_menu_result(
     mut open_settings: MessageWriter<OpenSettingsWindow>,
     mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
     mut open_animation_manager: MessageWriter<crate::animation_manager::OpenAnimationManager>,
+    mut settings: ResMut<NeraSettings>,
+    mut deferred: Commands,
 ) {
     let Some(tray) = tray else {
         return;
@@ -566,6 +595,9 @@ fn poll_action_menu_result(
         };
 
         match command {
+            NeraActionMenuCommand::Cloud(choice) => {
+                info!("Nera radial menu -> Cloud::{choice:?}");
+            }
             NeraActionMenuCommand::AnimationManager => {
                 info!("Nera radial menu -> Animation Manager");
                 open_animation_manager.write(crate::animation_manager::OpenAnimationManager);
@@ -574,9 +606,7 @@ fn poll_action_menu_result(
                 info!("Nera radial menu -> Animation::{choice:?}");
             }
             NeraActionMenuCommand::Alarm(choice) => {
-                info!(
-                    "Nera radial menu -> Alarm::{choice:?} (timer logic in Phase 5.6)"
-                );
+                info!("Nera radial menu -> Alarm::{choice:?} (timer logic in Phase 5.6)");
             }
             NeraActionMenuCommand::AlarmSettings => {
                 info!("Nera radial menu -> Alarm Settings");
@@ -585,6 +615,19 @@ fn poll_action_menu_result(
             NeraActionMenuCommand::Settings => {
                 info!("Nera radial menu -> Settings");
                 open_settings.write(OpenSettingsWindow);
+            }
+            NeraActionMenuCommand::ToggleRoaming => {
+                settings.walking_enabled = !settings.walking_enabled;
+                save_settings_deferred(&mut deferred);
+                info!(
+                    "Nera radial menu -> Allow Roaming {}",
+                    settings.walking_enabled
+                );
+            }
+            NeraActionMenuCommand::StayHere => {
+                settings.walking_enabled = false;
+                save_settings_deferred(&mut deferred);
+                info!("Nera radial menu -> Stay Here");
             }
         }
 
@@ -629,8 +672,7 @@ fn sector_at(page: RadialPage, x: i32, y: i32) -> Option<usize> {
         angle += TAU;
     }
 
-    let index = ((angle + segment * 0.5) / segment).floor() as usize
-        % items.len();
+    let index = ((angle + segment * 0.5) / segment).floor() as usize % items.len();
 
     Some(index)
 }
@@ -652,10 +694,7 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().collect()
 }
 
-unsafe fn select(
-    hdc: windows::Win32::Graphics::Gdi::HDC,
-    object: HGDIOBJ,
-) -> HGDIOBJ {
+unsafe fn select(hdc: windows::Win32::Graphics::Gdi::HDC, object: HGDIOBJ) -> HGDIOBJ {
     unsafe { SelectObject(hdc, object) }
 }
 
@@ -677,17 +716,9 @@ unsafe fn paint_wheel(hwnd: HWND) {
         right: WHEEL_SIZE,
         bottom: WHEEL_SIZE,
     };
-    let _ = unsafe {
-        windows::Win32::Graphics::Gdi::FillRect(
-            hdc,
-            &full,
-            key_brush,
-        )
-    };
+    let _ = unsafe { windows::Win32::Graphics::Gdi::FillRect(hdc, &full, key_brush) };
 
-    let old_pen = unsafe {
-        select(hdc, GetStockObject(NULL_PEN))
-    };
+    let old_pen = unsafe { select(hdc, GetStockObject(NULL_PEN)) };
     let old_brush = unsafe { select(hdc, HGDIOBJ(ring_brush.0)) };
 
     // Outer disk.
@@ -711,7 +742,12 @@ unsafe fn paint_wheel(hwnd: HWND) {
 
     // Hover bubble.
     if let Some(index) = state.hover {
-        if items.get(index).copied().map(RadialItem::enabled).unwrap_or(false) {
+        if items
+            .get(index)
+            .copied()
+            .map(RadialItem::enabled)
+            .unwrap_or(false)
+        {
             let (cx, cy) = item_position(index, items.len());
             let _ = unsafe { select(hdc, HGDIOBJ(hover_brush.0)) };
             let _ = unsafe {
@@ -725,8 +761,7 @@ unsafe fn paint_wheel(hwnd: HWND) {
             };
 
             // Tiny accent dot toward the outside edge.
-            let outer_angle =
-                -PI * 0.5 + TAU * index as f32 / items.len() as f32;
+            let outer_angle = -PI * 0.5 + TAU * index as f32 / items.len() as f32;
             let ax = (WHEEL_CENTER + outer_angle.cos() * 171.0).round() as i32;
             let ay = (WHEEL_CENTER + outer_angle.sin() * 171.0).round() as i32;
 
@@ -756,14 +791,10 @@ unsafe fn paint_wheel(hwnd: HWND) {
         let segment = TAU / items.len() as f32;
         let angle = -PI * 0.5 - segment * 0.5 + index as f32 * segment;
 
-        let inner_x =
-            (WHEEL_CENTER + angle.cos() * (INNER_RADIUS + 14.0)).round() as i32;
-        let inner_y =
-            (WHEEL_CENTER + angle.sin() * (INNER_RADIUS + 14.0)).round() as i32;
-        let outer_x =
-            (WHEEL_CENTER + angle.cos() * (OUTER_RADIUS - 3.0)).round() as i32;
-        let outer_y =
-            (WHEEL_CENTER + angle.sin() * (OUTER_RADIUS - 3.0)).round() as i32;
+        let inner_x = (WHEEL_CENTER + angle.cos() * (INNER_RADIUS + 14.0)).round() as i32;
+        let inner_y = (WHEEL_CENTER + angle.sin() * (INNER_RADIUS + 14.0)).round() as i32;
+        let outer_x = (WHEEL_CENTER + angle.cos() * (OUTER_RADIUS - 3.0)).round() as i32;
+        let outer_y = (WHEEL_CENTER + angle.sin() * (OUTER_RADIUS - 3.0)).round() as i32;
 
         let _ = unsafe { MoveToEx(hdc, inner_x, inner_y, None) };
         let _ = unsafe { LineTo(hdc, outer_x, outer_y) };
@@ -800,12 +831,21 @@ unsafe fn paint_wheel(hwnd: HWND) {
 
         let _ = unsafe { SetTextColor(hdc, color) };
 
-        let glyph = wide(item.glyph);
+        let glyph_text = if matches!(
+            item.action,
+            RadialItemAction::Command(NeraActionMenuCommand::ToggleRoaming)
+        ) && ROAMING_ENABLED.load(Ordering::Acquire)
+        {
+            "✓"
+        } else {
+            item.glyph
+        };
+        let glyph = wide(glyph_text);
         let label = wide(item.label);
 
         // Default GUI font is intentionally used: no font asset needs to be
         // shipped and Windows can font-link many Unicode symbols.
-        let glyph_x = cx - (item.glyph.chars().count() as i32 * 4);
+        let glyph_x = cx - (glyph_text.chars().count() as i32 * 4);
         let _ = unsafe { TextOutW(hdc, glyph_x, cy - 15, &glyph) };
 
         let label_x = cx - (item.label.chars().count() as i32 * 3);
@@ -989,9 +1029,7 @@ unsafe extern "system" fn radial_window_proc(
             LRESULT(0)
         }
 
-        _ => unsafe {
-            DefWindowProcW(hwnd, message, wparam, lparam)
-        },
+        _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
 
@@ -1067,12 +1105,7 @@ pub(crate) unsafe fn show_nera_action_menu(
     RADIAL_HWND.store(hwnd.0 as isize, Ordering::Release);
 
     unsafe {
-        SetLayeredWindowAttributes(
-            hwnd,
-            rgb(KEY_RGB),
-            255,
-            LWA_COLORKEY,
-        )?;
+        SetLayeredWindowAttributes(hwnd, rgb(KEY_RGB), 255, LWA_COLORKEY)?;
     }
 
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
@@ -1097,9 +1130,7 @@ pub(crate) unsafe fn show_nera_action_menu(
 
     info!(
         "Nera radial action wheel opened center=({}, {}) hwnd=0x{:X}",
-        screen_x,
-        screen_y,
-        hwnd.0 as usize,
+        screen_x, screen_y, hwnd.0 as usize,
     );
 
     Ok(())
@@ -1114,8 +1145,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wheel_opens_without_praying_before_pending_or_attached_seat_sync() {
+        use crate::{
+            animation::{BasePose, VisualState},
+            environment::{TaskbarAttachment, TaskbarEdge, WindowAttachment},
+            platform::{NativeMonitorHandle, NativeWindowHandle},
+        };
+
+        let target = NativeWindowHandle::from_raw(1);
+        let monitor = NativeMonitorHandle::from_raw(1);
+        for placement in [
+            PlacementState::PendingWindow {
+                target,
+                settle_frames: 1,
+            },
+            PlacementState::PendingTaskbar {
+                monitor,
+                edge: TaskbarEdge::Bottom,
+                settle_frames: 1,
+            },
+            PlacementState::Window(WindowAttachment {
+                target,
+                support_offset_x: 100,
+            }),
+            PlacementState::Taskbar(TaskbarAttachment {
+                monitor,
+                edge: TaskbarEdge::Bottom,
+                along_offset: 100,
+            }),
+        ] {
+            let mut menu = ActionMenuState::default();
+            let mut animation = NeraAnimationState::default();
+            let screen = IVec2::new(200, 300);
+            // Animation still says Idle when a physical attachment arrives
+            // earlier in the same frame. The menu must use placement too.
+            assert_eq!(animation.base_pose(), BasePose::Idle);
+            menu.open_at(screen, placement, &mut animation);
+            assert!(menu.open);
+            assert_eq!(menu.last_center, Some(screen));
+            assert_eq!(animation.visual_state(), VisualState::Idle);
+        }
+
+        let mut menu = ActionMenuState::default();
+        let mut animation = NeraAnimationState::default();
+        menu.open_at(IVec2::ZERO, PlacementState::Free, &mut animation);
+        assert!(menu.open);
+        assert_eq!(animation.visual_state(), VisualState::Praying);
+    }
+
+    #[test]
     fn root_has_six_wheel_segments() {
         assert_eq!(items_for(RadialPage::Root).len(), 6);
+    }
+
+    #[test]
+    fn roaming_controls_are_reachable_and_keep_typed_commands() {
+        assert!(
+            ROOT_ITEMS
+                .iter()
+                .any(|item| matches!(item.action, RadialItemAction::Open(RadialPage::Roaming)))
+        );
+        assert!(matches!(
+            ROAMING_ITEMS[0].action,
+            RadialItemAction::Command(NeraActionMenuCommand::ToggleRoaming)
+        ));
+        assert!(matches!(
+            ROAMING_ITEMS[1].action,
+            RadialItemAction::Command(NeraActionMenuCommand::StayHere)
+        ));
+        assert_eq!(parent_page(RadialPage::Roaming), Some(RadialPage::Root));
+        assert!(ROAMING_ITEMS.iter().all(|item| item.enabled()));
     }
 
     #[test]
@@ -1123,20 +1222,13 @@ mod tests {
         let x = WHEEL_CENTER.round() as i32;
         let y = (WHEEL_CENTER - ITEM_RADIUS).round() as i32;
 
-        assert_eq!(
-            sector_at(RadialPage::Root, x, y),
-            Some(0)
-        );
+        assert_eq!(sector_at(RadialPage::Root, x, y), Some(0));
     }
 
     #[test]
     fn center_is_not_a_sector() {
         assert_eq!(
-            sector_at(
-                RadialPage::Root,
-                WHEEL_CENTER as i32,
-                WHEEL_CENTER as i32,
-            ),
+            sector_at(RadialPage::Root, WHEEL_CENTER as i32, WHEEL_CENTER as i32,),
             None
         );
     }
@@ -1150,9 +1242,7 @@ mod tests {
 
         assert!(matches!(
             ALARM_ITEMS[1].action,
-            RadialItemAction::Command(
-                NeraActionMenuCommand::Alarm(AlarmMenuChoice::TenMinutes)
-            )
+            RadialItemAction::Command(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TenMinutes))
         ));
     }
 
@@ -1164,22 +1254,17 @@ mod tests {
     fn every_sub_page_ends_with_a_back_item() {
         for page in [
             RadialPage::Root,
+            RadialPage::Cloud,
+            RadialPage::Roaming,
             RadialPage::Alarm,
             RadialPage::AlarmMore,
         ] {
             let items = items_for(page);
             assert!(!items.is_empty(), "{page:?}");
 
-            let last_is_back = matches!(
-                items[items.len() - 1].action,
-                RadialItemAction::Back
-            );
+            let last_is_back = matches!(items[items.len() - 1].action, RadialItemAction::Back);
 
-            assert_eq!(
-                last_is_back,
-                parent_page(page).is_some(),
-                "{page:?}",
-            );
+            assert_eq!(last_is_back, parent_page(page).is_some(), "{page:?}",);
         }
     }
 
@@ -1188,14 +1273,8 @@ mod tests {
     #[test]
     fn page_hierarchy_nests_alarm_more_under_alarm() {
         assert_eq!(parent_page(RadialPage::Root), None);
-        assert_eq!(
-            parent_page(RadialPage::Alarm),
-            Some(RadialPage::Root)
-        );
-        assert_eq!(
-            parent_page(RadialPage::AlarmMore),
-            Some(RadialPage::Alarm)
-        );
+        assert_eq!(parent_page(RadialPage::Alarm), Some(RadialPage::Root));
+        assert_eq!(parent_page(RadialPage::AlarmMore), Some(RadialPage::Alarm));
     }
 
     /// Every alarm slot must perform a real action. `Custom` now opens the

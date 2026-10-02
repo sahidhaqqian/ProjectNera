@@ -2,7 +2,7 @@
 
 Project Nera is a 3D desktop pet for Windows built with Rust and Bevy. It renders a VRM avatar in a transparent native window and combines avatar interaction, VRMA animation, desktop-aware movement, utility windows, alarms, and Win32 integration.
 
-> Application version: **0.1.0** · Current milestone: **Phase 5.9 — Refactor / Cleanup / Robustness complete**
+> Application version: **0.1.0** · Current milestone: **Phase 7 — Cloud, semantic SFX, and interaction feedback polish**
 
 ## Overview
 
@@ -20,6 +20,8 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Native desktop-window dragging with semantic drag start, movement, and release messages.
 - Animated body-part hit detection for the head, torso, arms, hands, legs, and feet.
 - Left-click reactions and right-click action-menu activation.
+- Side-specific hand/arm greetings and leg/foot flinches generated on the live
+  skeleton, with smooth return to standing or sitting. No additional VRMA is needed.
 - Button-free headpat recognition from deliberate back-and-forth cursor strokes.
 - Input isolation while Settings or Alarm Settings owns application mouse input.
 
@@ -30,35 +32,142 @@ The application uses Bevy resources, components, messages, and systems for behav
 - Sitting on supported native-window top edges and taskbar edges using a pose-derived Seat anchor.
 - Attachment following, target-relative z-order, temporary suspension, and drag-to-unsnap behavior.
 - Desktop-space gravity, falling, landing, and support detection in global physical pixels.
+- Quick drag-and-release transfers momentum into a bounded throw, followed by gravity and landing.
+- Settings **Throw Physics** can switch drag momentum ON/OFF. **Throw Intensity**
+  is saved from 0-100%, defaulting to a gentler 50%; 100% restores the original
+  launch strength. OFF or 0% stops throw momentum without disabling gravity.
+- Settings **Gravity** defaults to ON. OFF keeps unsupported placements still;
+  throws retain momentum briefly and damp to a stop without downward acceleration.
 - Standing support on monitor work-area floors, taskbars, and visible native-window top edges.
 - Support revalidation when a window moves or disappears, plus tray-based position recovery.
 - Multi-monitor and non-zero/negative desktop coordinate handling in native geometry paths.
 
+### Cloud and interaction feedback
+
+- Right-click Nera, then **Cloud > Rest**, **Ride**, or **Dismiss**.
+- Rest creates a stationary temporary bed with two sleep variations: lying
+  to the right (`Sleeping_Idle.vrma`) and seated sleeping (`Sitting_4.vrma`).
+  Each new Rest chooses the other variation, then loops it for that attachment;
+  repeated Rest commands do not restart or change it. Both use automatic
+  Exhausted 100%. Sleeping Idle was promoted from Bookmarks to Animasi Dasar
+  and loads only on first lying Rest per rig; Sitting 4/Exhausted 60% remain
+  its loading fallback. Dragging Nera detaches her and shrinks the cloud
+  away; ordinary dragging, throw, gravity, and desktop support resume.
+- Ordinary sitting uses Default rather than Timid, so it does not force eyelids
+  closed. Sleeping Rest ignores head/torso/arm/hand/leg/foot clicks and headpat
+  animations/feedback. Drag, explicit dismiss, and alarm interruption still work.
+- Ride uses the existing seated loop and remains floating after release, even
+  with no desktop/window/taskbar support. Drag either Nera or the cloud to move
+  the ride together. Ride releases do not throw or snap to native supports.
+- Dismiss restores normal placement ownership without changing the saved Gravity
+  preference. Character replacement, hiding, alarm Attention, explicit animation
+  playback, and tray Reset Position intentionally leave the cloud.
+- The local author-provided `assets/vrm/Cloud/nera_cloud_1024.glb` loads only on
+  first summon. A small procedural cloud is available if the model is absent.
+  Subtle visual bobbing never changes the logical desktop seat point.
+- Ride and seated sleeping use the model's measured front rim and the live hips'
+  contact depth, keeping dangling legs in front of the cloud. Lying Rest uses the
+  inner cushion with the lobes behind the face and a world-down pelvis contact.
+  Rest rolls the sleeping pose toward the right without changing the VRMA file.
+  A rig-rest-aware arm layer lowers the elbows and relaxes the wrists, keeping
+  hands alongside the waist/over the torso instead of raised beside the face.
+  It blends in over 300 ms and releases when leaving lying sleep. On Ride,
+  upper-body reactions retain the calibrated pelvis/leg pose through their
+  return blend; early hits wait for seat calibration.
+- Headpat sparkles, touchdown puffs, anger marks, occasional Rest Zs, and cloud
+  puffs work without the Animation Manager. At most 32 particles exist, with
+  lifetimes of 0.75-1.8 seconds and debounced bursts.
+- Semantic pet SFX use the existing Bevy Audio/master volume/mute stack, at most
+  four concurrent short cues. Optional files are checked once at startup; missing
+  files remain silent and never interrupt interactions. No pet sounds were
+  downloaded or added in this milestone. Expected paths and the Windows release
+  checklist are in [Phase 7 polish validation](PHASE_7_POLISH_VALIDATION.md).
+
 ### Character behavior
+
+- Import VRM 0.x or 1.0 characters into a persistent local library. **Multi Character**
+  in Settings' sticky bottom navigation opens a temporary, separate panel with slots
+  and live model previews. Select a slot,
+  then a model to use it. Character 1 starts Used and Character 2 starts Not Used.
+  **Add More Character** adds slots up to eight total, including the main avatar.
+  The same model can be assigned to multiple slots.
+- The character panel is hidden until opened from Settings. **Done** or the panel's
+  close control closes it and returns to Settings; it is not an animation tab.
+- Each additional character has its own window, animation, physics, gaze, settings,
+  and tray. Each slot has an **X** control that switches only that character off.
+  Character 1 hides the main pet while the owner and remaining slots stay alive.
+  Closing the main Nera process closes its companions and their gallery workers.
+  Active companions are session-only; the model library persists across launches.
+- Each companion runs a renderer, so practical capacity depends on available RAM
+  and GPU memory. The main window owns additions; companions can change their
+  own model and settings without spawning nested groups.
 
 - VRM 1.0 avatar loading through `bevy_vrm1`.
 - VRMA clip loading with real clip durations and explicit looping/one-shot behavior.
 - Prioritized animation state for idle, sitting, dragging/floating, physics, reactions, death, menu, and alarm behavior.
 - Sitting entry and seated loop animation tied to pose-first Seat-anchor calibration.
 - Falling and landing animation integrated with desktop support physics.
-- Head/chest hit reactions, head-stroke reaction, and a three-hit death combo.
-- Random idle micro-actions: Look Around, Relax, Sleepy, and Blush.
+- Once per visible startup: drop from above the monitor, finish landing, pause
+  briefly to notice the user, then greet with a happy, one-shot `161_Waving.vrma`.
+  User interactions can interrupt the entrance; Start Hidden skips it.
+- Standing head/chest hit reactions and a three-hit death combo; seated hits
+  play Dodge While Sitting without detaching. Head-stroke reactions remain available.
+- Standing idle variations: Look Around, Relax, Sleepy, Blush, Catwalk Idle Twist R,
+  Bored, and Angry Gesture. Seated variations: Sitting 2, Sitting 4, and Sitting Rubbing Arm.
+- One behavior controller selects idle, pose-matched idle variations, and bounded
+  walks, with recent-action history to reduce repetition. Sitting/standing changes
+  belong to user placement and physical support; the controller has no auto-stand timer.
+- Destination-based walking after a complete Look Around, with a short direction-intent pause, acceleration,
+  braking, and an inward return after reaching a roaming boundary.
 - Menu-triggered Wave, Thinking, Angry, Sad, and Surprised animations.
 - Facial expression crossfades derived from the resolved body-animation state.
+- All 25 basic clips have facial intent, shared by gallery previews and desktop
+  playback. Headpat now plays **Blush + Embarrassed 75%**, Angry Gesture uses
+  **Angry 90%**, Sleepy uses **Exhausted 60%**, and LookAround uses **Surprised 35%**.
+  Expressions fade over 180 ms and return to the active base pose afterward.
+- Animation Manager **Expressions** shows eight live head-only previews of the
+  current character, with selectable intensity. Nera uses independent eyebrow,
+  eyelid, and mouth morphs for Default, Joy, Sad, Angry, Embarrassed, Timid,
+  Surprised, and Exhausted. Other models fall back to available VRM expressions.
+  Default, Reset Expression, and 0% intensity release manual preview ownership
+  and return the face to automatic animation and blinking. Playing a VRMA keeps
+  the selected expression and intensity. Unchanged card faces are not re-sent
+  every frame; late-loaded or changed model bindings still receive their preview.
+  Angry uses a stronger brow, narrowed-eye, and downturned-mouth recipe in both
+  previews and automatic reactions; Embarrassed and Timid also add a soft blush.
+  Exact likeness to an external reference depends on the model's geometry,
+  textures, and available facial morphs.
+- Legacy facial bindings are repaired from authored presets or real named morph
+  targets. Models exported without facial blendshapes cannot change expression;
+  the gallery identifies this limitation rather than inventing missing geometry.
+- Death01 shadows stay on the cached desktop contact line, including VRM 0.x
+  models and Death01 played from the animation gallery.
 - Cursor-driven eye/head gaze with animation-aware temporary ownership.
 - VRM spring-bone simulation and configurable simple or character shadows.
 
 ### Utilities
 
 - Native Windows radial action menu opened by right-clicking Nera.
-- Animation Manager gallery, quick alarms, custom alarm editor, and Settings access from the menu.
+- The menu's Praying pose runs only while standing; opening it while seated keeps Nera seated.
+- Animation Manager gallery, quick alarms, custom alarm editor, Settings, and a
+  Roaming submenu with **Allow Roaming** and **Stay Here**.
 - Animation Manager with live per-card VRM previews, search, persistent bookmarks, and physical VRMA import/rename/delete.
+- Protected basic animations retain previews and hide their card action menus.
 - Quick alarm presets for 5, 10, 15, 30, and 45 minutes, 1 hour, and 2 hours, plus Test Now and Cancel.
 - Persistent one-time and weekly alarms, with enable/disable, edit, and delete controls for up to 12 entries.
 - Alarm attention mode with a reframed upper-body presentation, looping sound, intro/loop animation, dismiss, and five-minute snooze.
+- Choose **Classic**, **Gentle**, **Chime**, **Digital**, or **Siren** in the alarm
+  editor and play a preview before saving. Quick alarms have a separate default
+  sound selector. Snoozing and queued reminders preserve their selected sound.
+  Short sounds repeat no faster than every three seconds; master volume and mute
+  apply to previews and ringing. The four added sounds are verified CC0 assets;
+  sources and license details are in [sound credits](assets/sound/CREDITS.md).
 - Persistent Settings window with controls for:
   - always on top, Start with Windows, Start Hidden, and remembered position;
   - character size and ground offset;
+  - **Allow Roaming** (off by default), **Activity** (Calm / Normal / Active),
+    **Roaming Distance** (300–600 logical px; default 400), and **Pause in Fullscreen**
+    (on by default);
   - mouse, eye, and upper-body gaze behavior;
   - shadow type, opacity, softness, and scene brightness;
   - master volume, mute, and FPS limit;
@@ -66,7 +175,33 @@ The application uses Bevy resources, components, messages, and systems for behav
 - System tray commands for Show, Hide, Reset Position, Always On Top, and Exit.
 - Saved settings, position recovery, deferred persistence during editing, and synchronous save on controlled exit paths.
 
-The radial menu currently shows **Chat**, **Productivity**, and **Games** as disabled placeholders. They are not implemented features.
+The radial menu currently shows **Games** as a disabled placeholder.
+It is not an implemented feature. The former disabled Chat slot now opens Cloud.
+
+Roaming stays near the latest user placement and on its current monitor. Dragging
+Nera establishes a new home; the radius scales with monitor DPI. Activity sets a
+random walking cooldown: Calm **60–180 s**, Normal **30–90 s**, Active **15–45 s**.
+These are eligible-time ranges, not deadlines: interactions, unavailable support,
+other activities, and pauses can delay the next walk. Walk distance, speed, and
+the subsequent idle interval vary.
+
+Nera can walk on a supported desktop/taskbar floor or a visible window top where
+she is already standing. Window-top movement updates the standing support offset;
+it does not walk while seated or jump between windows. Dragging, hovering, falls,
+alarms, selected animations, menu/Settings, and an open Animation Manager interrupt
+autonomy. **Stay Here** turns roaming off while keeping Nera's interactions and
+idle behavior available. Fullscreen pause keeps autonomy idle on the pet's monitor
+without disabling alarms or hiding Nera. Support and monitor changes are
+revalidated before another journey.
+Seated idle variations work with roaming enabled or disabled and return to the
+ordinary seated loop. Nera remains seated until dragged or the support becomes
+unavailable; roaming never makes her sit down or stand up by itself.
+
+Phase 7 uses the existing assets. Optional personality intent names are prepared;
+only LookAround currently maps to an existing capability. Other optional intents
+leave the base pose unchanged until a clip is explicitly integrated.
+The protected `assets/animations/animasi_basic/` folder is included in Git; the
+rest of the local animation collection remains ignored.
 
 ## Tech Stack
 
@@ -121,6 +256,12 @@ cargo build --release
 
 Keep the `assets/` directory available with packaged builds. During repository development, the application resolves assets from the manifest directory; packaged execution falls back to an `assets` directory beside the executable.
 
+GitHub Actions artifacts include `nera.exe`, `assets/`, and `START-HERE.txt`.
+Download the debug or release artifact ZIP and **extract the entire ZIP** into
+one folder, then run the extracted `nera.exe`. Keep `assets/` beside it; moving
+only the executable causes `Path not found` errors for the model and animations.
+The workflow checks that required runtime assets were committed and packaged.
+
 ### Run
 
 ```powershell
@@ -165,16 +306,19 @@ ProjectNera/
 ├── assets/
 │   ├── animations/
 │   │   ├── Falling.vrma
-│   │   ├── Falling_To_Landing.vrma
-│   │   ├── animasi_basic/
+│   │   ├── animasi_basic/                 # 25 active, protected Nera animations
 │   │   ├── Clawatar_animations/
 │   │   ├── FreeMotionPack1_converted_21_vrma/
 │   │   ├── UAL1_converted_43_vrma/
+│   │   ├── Unused/                        # Former basic clips, editable stock
 │   │   └── VRMA/
 │   ├── shaders/
 │   │   └── nera_shadow_only.wgsl
 │   ├── sound/
-│   │   └── alarm.mp3
+│   │   ├── alarm.mp3
+│   │   ├── gentle.ogg + chime.ogg
+│   │   ├── digital.wav + siren.wav
+│   │   └── CREDITS.md + KENNEY-LICENSE.txt
 │   └── vrm/
 │       ├── nera_256.vrm
 │       ├── nera.vrm
@@ -192,6 +336,7 @@ ProjectNera/
 │   ├── animation/
 │   │   ├── state.rs
 │   │   ├── systems.rs
+│   │   ├── limbs.rs
 │   │   └── playback.rs
 │   ├── environment.rs
 │   ├── environment/
@@ -200,9 +345,14 @@ ProjectNera/
 │   ├── desktop_physics.rs
 │   ├── desktop_physics/
 │   │   └── geometry.rs
+│   ├── pet_behavior.rs
+│   ├── walking.rs
 │   ├── expression.rs
+│   ├── expression/                       # Presets and detailed facial morphs
+│   ├── character.rs + character/library.rs
 │   ├── presentation.rs
 │   ├── alarm.rs
+│   ├── alarm/sounds.rs
 │   ├── alarm_settings.rs
 │   ├── alarm_dismiss.rs
 │   ├── action_menu.rs
@@ -239,6 +389,10 @@ Major ownership boundaries:
 - `animation.rs` + `animation/` — request scheduling, animation state and priorities, clip library, and playback.
 - `environment.rs` + `environment/` — native desktop and external-window state, taskbar data, and sitting attachments.
 - `desktop_physics*` — gravity, falling/landing, standing support, and pure support geometry.
+- `pet_behavior.rs` — autonomous decisions, recent behavior history, home/radius,
+  activity cooldowns, and interruption/fullscreen gates.
+- `walking.rs` — destinations, turn delay, velocity, braking, and journey outcomes;
+  native translation remains in desktop physics.
 - `presentation.rs` — attention-mode ownership of the main window and camera.
 - `alarm*`, `action_menu.rs`, and `animation_manager*` — alarms and Windows utility surfaces.
 - `settings/` — persistent model/defaults, runtime application, settings UI, startup integration, and shadows.
@@ -246,7 +400,12 @@ Major ownership boundaries:
 
 ## Architecture
 
-Phase 5.9 separated the main architectural hotspots into subsystem-focused modules. The follow-up consolidation keeps each behavior's closely related code together: pointer messages and capture in `interaction.rs`, desktop-window discovery and tracking in `environment.rs`, avatar spawning and gaze in `avatar.rs`, idle scheduling in `animation/systems.rs`, and clip registration plus playback in `animation/playback.rs`. `main.rs` remains focused on bootstrap and cross-subsystem ordering.
+Phase 5.9 separated the main architectural hotspots into subsystem-focused modules.
+Phase 7 centralizes autonomous idle variations and walking decisions in
+`pet_behavior.rs`; `walking.rs` executes destinations through desktop physics.
+Pointer messages remain in `interaction.rs`, desktop discovery in `environment.rs`,
+and clip registration/playback in `animation/playback.rs`. `main.rs` defines their
+cross-subsystem ordering.
 
 A simplified runtime flow is:
 
@@ -256,6 +415,8 @@ Windows / Bevy input and desktop facts
        Interaction + Environment
                  ↓
        Placement / Physics / Alarm
+                 ↓
+       Behavior → Walking → Physics movement
                  ↓
         Animation state resolution
                  ↓
@@ -274,6 +435,37 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before making cross-subsystem changes. I
 - the practical “Where do I change X?” lookup table.
 
 ## Current Development Status
+
+Phase 7 behavior, roaming controls, home bounds, motion smoothing, fullscreen
+pause, and standing window-top movement are implemented using the existing clips.
+Each sitting session picks one loaded base position (Sitting_Idle_Loop, Sitting_2,
+or Sitting_4) and retains it until detach; only Sitting_Rubbing_Arm is a timed
+seated gesture. Menu interaction, dodge, and returning from an alarm preserve
+that choice.
+
+Reliability fixes queue all simultaneous scheduled alarms without losing an
+existing quick/snooze deadline, dismiss Attention on native panel close, and
+validate/time out failed desktop VRMA loads with visible gallery errors. Desktop
+custom clips have an admission limit of 32 clips / 64 MiB source files (16 MiB per
+file); cached clips remain playable at capacity, while new clips require restart.
+These are source-size bounds, not measured RAM limits. Utility windows from Nera
+and its manager process are excluded from support/fullscreen detection, and light
+settings affect only the desktop key light.
+
+Validation: `cargo check --all-targets --offline` and the debug build pass;
+`cargo fmt --all -- --check` passes; `cargo test --offline` reports
+**320 passed, 0 failed, 6 ignored**, including 19 Cloud/SFX/FX milestone tests
+and eleven sleeping-loop/pose regressions.
+Bounded native smoke runs verify live face/model previews at desktop and compact
+sizes, initialized companions and selective close, procedural limb reactions,
+alarm sound save, throw checkbox/slider controls, throw/landing, gravity-OFF coasting, and legacy Death01 shadow
+contact. The Cloud native smoke also verifies resting/riding ownership, stable
+both sleep variations and blocked sleeping body clicks/headpat, mid-air
+drag/release, dismiss/freefall/landing,
+VRM 0.x replacement, Attention cleanup, and particle expiry. The debug executable
+is `target/debug/nera.exe`. Real multi-monitor,
+mixed-DPI, focus/tray, and extended-use checks remain necessary; the smoke runs
+do not establish those behaviors. See [PHASE_7_PLAN.md](PHASE_7_PLAN.md).
 
 Phase 5.9 completed the architecture-focused refactor without intentionally changing application behavior.
 
@@ -296,6 +488,45 @@ cargo test: 116 passed, 0 failed, 0 ignored
 ```
 
 The suite covers state transitions and pure decision logic, including animation priority, interaction hit testing, presentation, settings persistence, desktop support geometry, and native helper boundaries. It does not replace manual Windows GUI testing.
+
+Opt-in debug smoke runs exercise the new native features with bounded lifetimes:
+
+```powershell
+cargo build --bin nera
+.\target\debug\nera.exe --animation-manager-worker --expression-smoke
+.\target\debug\nera.exe --animation-manager-worker --roster-smoke
+.\target\debug\nera.exe --feature-smoke
+.\target\debug\nera.exe --feature-smoke --motion-smoke
+.\target\debug\nera.exe --feature-smoke --cloud-smoke
+```
+
+The expression run captures all eight heads at desktop and compact sizes. The
+feature run uses a separate settings profile, verifies two initialized companion
+avatars, sided limb reactions, stronger automatic anger, selective companion
+closure, and an alarm sound saved through the editor. Audio is muted for this
+run. Screenshots and reports go to `%TEMP%/nera-feature-smoke`; the owner exits
+and closes its companions when the run completes.
+The roster run captures the model picker at desktop and compact sizes. The motion
+run verifies a throw arc and landing, gravity-OFF coasting and stable placement,
+then loads a legacy character and checks the Death01 shadow's projected floor.
+The Cloud run uses an isolated settings profile and validates native Rest/Ride
+ownership, synthetic drag/release, mid-air release, gravity after dismissal,
+sleeping touch suppression/particle cleanup, VRM 0.x replacement, and alarm Attention handoff.
+An optional local reference model can verify real closed-eyelid morphs after
+legacy migration, without changing the main profile's active character:
+
+```powershell
+.\target\debug\nera.exe --feature-smoke --cloud-smoke --cloud-smoke-blink-model=C:\path\to\blink-capable.vrm
+```
+
+Use a VRM 0.x model with an authored Blink. This run checks the expression and
+rendered morph weights, and captures `cloud-rest-vrm0-blink.png`. The reference
+model is imported into the shared local character library, not bundled with Nera.
+The separately downloaded Alicia Solid reference passed this native check; the
+bundled Charlotte model has no eyelid morphs and cannot close its eyes.
+It captures `cloud-*.png` in the same temporary directory. Synthetic input does
+not replace the mixed-DPI, pointer-hit, edge, fullscreen, or extended soak checks
+in [the release checklist](PHASE_7_POLISH_VALIDATION.md).
 
 ## Known Limitations and Notes
 

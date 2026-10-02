@@ -1,28 +1,16 @@
 use bevy::prelude::*;
 
-use crate::platform::{
-    self,
-    MonitorInfo,
-    NativeMonitorHandle,
-    PhysicalRect,
-};
+use crate::platform::{self, MonitorInfo, NativeMonitorHandle, PhysicalRect};
 
 use super::DesktopEnvironment;
 
-const TASKBAR_REFRESH_INTERVAL: f32 =
-    1.0;
+const TASKBAR_REFRESH_INTERVAL: f32 = 1.0;
 
 // -----------------------------------------------------------------------------
 // Taskbar Edge
 // -----------------------------------------------------------------------------
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskbarEdge {
     Left,
     Top,
@@ -34,57 +22,33 @@ pub enum TaskbarEdge {
 // Taskbar Info
 // -----------------------------------------------------------------------------
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaskbarInfo {
-    pub monitor:
-        NativeMonitorHandle,
+    pub monitor: NativeMonitorHandle,
 
-    pub rect:
-        PhysicalRect,
+    pub rect: PhysicalRect,
 
-    pub edge:
-        TaskbarEdge,
+    pub edge: TaskbarEdge,
 
-    pub is_primary:
-        bool,
+    pub is_primary: bool,
 }
 
 // -----------------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------------
 
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TaskbarState {
-    pub taskbars:
-        Vec<TaskbarInfo>,
+    pub taskbars: Vec<TaskbarInfo>,
 
-    pub primary:
-        Option<TaskbarInfo>,
+    pub primary: Option<TaskbarInfo>,
 }
 
 impl TaskbarState {
-    pub fn for_monitor(
-        &self,
-        monitor: NativeMonitorHandle,
-    ) -> Option<&TaskbarInfo> {
+    pub fn for_monitor(&self, monitor: NativeMonitorHandle) -> Option<&TaskbarInfo> {
         self.taskbars
             .iter()
-            .find(|taskbar| {
-                taskbar.monitor
-                    == monitor
-            })
+            .find(|taskbar| taskbar.monitor == monitor)
     }
 }
 
@@ -101,11 +65,7 @@ pub(super) struct TaskbarTimer {
 impl Default for TaskbarTimer {
     fn default() -> Self {
         Self {
-            timer:
-                Timer::from_seconds(
-                    TASKBAR_REFRESH_INTERVAL,
-                    TimerMode::Repeating,
-                ),
+            timer: Timer::from_seconds(TASKBAR_REFRESH_INTERVAL, TimerMode::Repeating),
 
             initialized: false,
         }
@@ -116,37 +76,24 @@ impl Default for TaskbarTimer {
 // Detection
 // -----------------------------------------------------------------------------
 
-fn taskbar_from_monitor(
-    monitor: MonitorInfo,
-) -> Option<TaskbarInfo> {
-    let bounds =
-        monitor.bounds;
+fn taskbar_from_monitor(monitor: MonitorInfo) -> Option<TaskbarInfo> {
+    let bounds = monitor.bounds;
 
-    let work =
-        monitor.work_area;
+    let work = monitor.work_area;
 
     // Berapa pixel area yang "hilang"
     // dari work area pada masing-masing sisi.
-    let left =
-        (work.left - bounds.left)
-            .max(0);
+    let left = (work.left - bounds.left).max(0);
 
-    let top =
-        (work.top - bounds.top)
-            .max(0);
+    let top = (work.top - bounds.top).max(0);
 
-    let right =
-        (bounds.right - work.right)
-            .max(0);
+    let right = (bounds.right - work.right).max(0);
 
-    let bottom =
-        (bounds.bottom - work.bottom)
-            .max(0);
+    let bottom = (bounds.bottom - work.bottom).max(0);
 
     // Cari reserved edge terbesar.
     let mut thickness = left;
-    let mut edge =
-        TaskbarEdge::Left;
+    let mut edge = TaskbarEdge::Left;
 
     if top > thickness {
         thickness = top;
@@ -172,83 +119,56 @@ fn taskbar_from_monitor(
         return None;
     }
 
-    let rect =
-        match edge {
-            TaskbarEdge::Left => {
-                PhysicalRect {
-                    left:
-                        bounds.left,
+    let rect = match edge {
+        TaskbarEdge::Left => PhysicalRect {
+            left: bounds.left,
 
-                    top:
-                        bounds.top,
+            top: bounds.top,
 
-                    right:
-                        work.left,
+            right: work.left,
 
-                    bottom:
-                        bounds.bottom,
-                }
-            }
+            bottom: bounds.bottom,
+        },
 
-            TaskbarEdge::Top => {
-                PhysicalRect {
-                    left:
-                        bounds.left,
+        TaskbarEdge::Top => PhysicalRect {
+            left: bounds.left,
 
-                    top:
-                        bounds.top,
+            top: bounds.top,
 
-                    right:
-                        bounds.right,
+            right: bounds.right,
 
-                    bottom:
-                        work.top,
-                }
-            }
+            bottom: work.top,
+        },
 
-            TaskbarEdge::Right => {
-                PhysicalRect {
-                    left:
-                        work.right,
+        TaskbarEdge::Right => PhysicalRect {
+            left: work.right,
 
-                    top:
-                        bounds.top,
+            top: bounds.top,
 
-                    right:
-                        bounds.right,
+            right: bounds.right,
 
-                    bottom:
-                        bounds.bottom,
-                }
-            }
+            bottom: bounds.bottom,
+        },
 
-            TaskbarEdge::Bottom => {
-                PhysicalRect {
-                    left:
-                        bounds.left,
+        TaskbarEdge::Bottom => PhysicalRect {
+            left: bounds.left,
 
-                    top:
-                        work.bottom,
+            top: work.bottom,
 
-                    right:
-                        bounds.right,
+            right: bounds.right,
 
-                    bottom:
-                        bounds.bottom,
-                }
-            }
-        };
+            bottom: bounds.bottom,
+        },
+    };
 
     Some(TaskbarInfo {
-        monitor:
-            monitor.handle,
+        monitor: monitor.handle,
 
         rect,
 
         edge,
 
-        is_primary:
-            monitor.is_primary,
+        is_primary: monitor.is_primary,
     })
 }
 
@@ -258,73 +178,42 @@ fn taskbar_from_monitor(
 
 pub(super) fn refresh_taskbars(
     time: Res<Time>,
-    mut timer:
-        ResMut<TaskbarTimer>,
-    mut environment:
-        ResMut<DesktopEnvironment>,
+    mut timer: ResMut<TaskbarTimer>,
+    mut environment: ResMut<DesktopEnvironment>,
 ) {
-    let should_refresh =
-        if !timer.initialized {
-            timer.initialized = true;
-            true
-        } else {
-            timer.timer
-                .tick(time.delta())
-                .just_finished()
-        };
+    let should_refresh = if !timer.initialized {
+        timer.initialized = true;
+        true
+    } else {
+        timer.timer.tick(time.delta()).just_finished()
+    };
 
     if !should_refresh {
         return;
     }
 
-    let monitors =
-        platform::enumerate_monitors();
+    let monitors = platform::enumerate_monitors();
 
-    let mut taskbars:
-        Vec<TaskbarInfo> =
-        monitors
-            .into_iter()
-            .filter_map(
-                taskbar_from_monitor,
-            )
-            .collect();
+    let mut taskbars: Vec<TaskbarInfo> = monitors
+        .into_iter()
+        .filter_map(taskbar_from_monitor)
+        .collect();
 
     // Primary dulu supaya output/state
     // konsisten.
-    taskbars.sort_by_key(
-        |taskbar| {
-            !taskbar.is_primary
-        },
-    );
+    taskbars.sort_by_key(|taskbar| !taskbar.is_primary);
 
-    let primary =
-        taskbars
-            .iter()
-            .find(|taskbar| {
-                taskbar.is_primary
-            })
-            .copied();
+    let primary = taskbars.iter().find(|taskbar| taskbar.is_primary).copied();
 
-    let next_state =
-        TaskbarState {
-            taskbars,
-            primary,
-        };
+    let next_state = TaskbarState { taskbars, primary };
 
-    if next_state
-        == environment.taskbar
-    {
+    if next_state == environment.taskbar {
         return;
     }
 
-    environment.taskbar =
-        next_state;
+    environment.taskbar = next_state;
 
-    for taskbar in
-        &environment
-            .taskbar
-            .taskbars
-    {
+    for taskbar in &environment.taskbar.taskbars {
         info!(
             "Taskbar detected | monitor=0x{:X} primary={} edge={:?} rect={:?}",
             taskbar.monitor.as_raw(),

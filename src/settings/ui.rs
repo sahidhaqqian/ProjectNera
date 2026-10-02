@@ -12,6 +12,7 @@ use super::runtime::{
     PositionRuntime, StartupRuntime, save_settings_before_exit, save_settings_deferred,
 };
 use super::{NeraSettings, startup};
+use crate::utility_window::{UtilityWindow, spawn_window_controls};
 
 #[derive(Message, Default)]
 pub(crate) struct OpenSettingsWindow;
@@ -33,16 +34,17 @@ pub(crate) struct ReturnToActionMenu;
 #[derive(Resource, Default)]
 pub(crate) struct SettingsInputGate {
     window_open: bool,
+    minimized: bool,
     close_requested: bool,
     return_to_menu_requested: bool,
 }
 
 pub(crate) fn nera_input_available(gate: Res<SettingsInputGate>) -> bool {
-    !gate.window_open
+    !gate.window_open || gate.minimized
 }
 
 pub(crate) fn nera_input_blocked(gate: Res<SettingsInputGate>) -> bool {
-    gate.window_open
+    gate.window_open && !gate.minimized
 }
 // =============================================================================
 // Settings window
@@ -73,6 +75,27 @@ pub(super) struct CharacterSizeValue;
 
 #[derive(Component)]
 pub(super) struct GroundOffsetValue;
+
+#[derive(Component)]
+pub(super) struct WalkingEnabledValue;
+
+#[derive(Component)]
+pub(super) struct WalkingCheckmark;
+
+#[derive(Component)]
+pub(super) struct ActivityLevelValue;
+
+#[derive(Component)]
+pub(super) struct RoamingRadiusValue;
+
+#[derive(Component)]
+pub(super) struct PauseFullscreenValue;
+
+#[derive(Component)]
+pub(super) struct RoamingRadiusTrack;
+
+#[derive(Component)]
+pub(super) struct RoamingRadiusThumb;
 
 #[derive(Component)]
 pub(super) struct FollowMouseValue;
@@ -119,6 +142,26 @@ pub(super) struct SettingsDragRegion;
 #[derive(Component)]
 pub(super) struct SettingsScrollArea;
 
+#[derive(Component)]
+struct SettingsFooter;
+
+#[derive(Component)]
+pub(super) struct CharacterImportStatus;
+
+#[derive(Component)]
+pub(super) struct GravityValue;
+
+#[derive(Component)]
+pub(super) struct ThrowValue;
+#[derive(Component)]
+pub(super) struct ThrowCheckmark;
+#[derive(Component)]
+pub(super) struct ThrowIntensityValue;
+#[derive(Component)]
+pub(super) struct ThrowIntensityTrack;
+#[derive(Component)]
+pub(super) struct ThrowIntensityThumb;
+
 #[derive(Component, Clone, Copy)]
 pub(super) enum SettingsButtonAction {
     ToggleAlwaysOnTop,
@@ -127,6 +170,12 @@ pub(super) enum SettingsButtonAction {
     ToggleRememberPosition,
     CycleCharacterSize,
     CycleGroundOffset,
+    ToggleWalking,
+    ToggleGravity,
+    ToggleThrow,
+    OpenCharacterManager,
+    CycleActivityLevel,
+    TogglePauseFullscreen,
     ToggleFollowMouse,
     ToggleFollowEyes,
     ToggleFollowHead,
@@ -143,11 +192,12 @@ pub(super) enum SettingsButtonAction {
     ResetDefaults,
     CloseWindow,
     Exit,
+    ImportCharacter,
 }
 
 pub(super) fn open_settings_window(
     mut open: MessageReader<OpenSettingsWindow>,
-    existing: Query<Entity, With<SettingsWindow>>,
+    mut existing: Query<&mut Window, With<SettingsWindow>>,
     settings: Res<NeraSettings>,
     startup_state: Res<StartupRuntime>,
     mut input_gate: ResMut<SettingsInputGate>,
@@ -160,7 +210,12 @@ pub(super) fn open_settings_window(
     // One settings window only. If it is already open, do not create a second
     // copy with a separate camera/UI tree.
     if !existing.is_empty() {
+        for mut window in &mut existing {
+            window.set_minimized(false);
+            window.focused = true;
+        }
         input_gate.window_open = true;
+        input_gate.minimized = false;
         return;
     }
 
@@ -168,6 +223,7 @@ pub(super) fn open_settings_window(
     // Closing is deferred until the close-button mouse gesture has released,
     // so winit never loses the corresponding mouse-up event.
     input_gate.window_open = true;
+    input_gate.minimized = false;
     input_gate.close_requested = false;
     input_gate.return_to_menu_requested = false;
 
@@ -175,15 +231,15 @@ pub(super) fn open_settings_window(
         .spawn((
             Name::new("Nera Settings Window"),
             SettingsWindow,
+            UtilityWindow::new(14.0),
             Window {
                 title: "Nera Settings".into(),
                 resolution: (580, 820).into(),
                 resizable: true,
                 resize_constraints: WindowResizeConstraints {
-                    min_width: 460.0,
+                    min_width: 560.0,
                     min_height: 520.0,
-                    max_width: 960.0,
-                    max_height: 1200.0,
+                    ..default()
                 },
                 // The OS chrome is intentionally removed. The visible rounded
                 // shell is Bevy UI drawn on a transparent native window.
@@ -276,7 +332,7 @@ fn spawn_settings_ui(
                 ),
             ))
             .with_children(|panel| {
-                spawn_settings_header(panel);
+                spawn_settings_header(panel, window);
 
                 // The settings list is now a real clipped/scrollable viewport.
                 // Keep the draggable header and small footer fixed outside it.
@@ -296,7 +352,6 @@ fn spawn_settings_ui(
                         },
                     ))
                     .with_children(|scroll| {
-
                         settings_card(scroll, "GENERAL", |card| {
                             settings_row(
                                 card,
@@ -355,6 +410,30 @@ fn spawn_settings_ui(
                         });
 
                         settings_card(scroll, "BEHAVIOR", |card| {
+                            settings_row(card, "Gravity", if settings.gravity_enabled { "ON" } else { "OFF" }.into(), GravityValue, SettingsButtonAction::ToggleGravity);
+                            checkbox_row(card, "Throw Physics", if settings.throw_enabled { "ON" } else { "OFF" }, settings.throw_enabled, SettingsButtonAction::ToggleThrow, (ThrowValue, ThrowCheckmark));
+                            settings_slider(card, "Throw Intensity", settings.throw_intensity_label(), f32::from(settings.throw_intensity.min(100)) / 100.0, (ThrowIntensityValue, ThrowIntensityTrack, ThrowIntensityThumb));
+                            walking_checkbox(card, settings.walking_enabled);
+                            settings_row(
+                                card,
+                                "Activity",
+                                settings.activity_level().label().into(),
+                                ActivityLevelValue,
+                                SettingsButtonAction::CycleActivityLevel,
+                            );
+                            roaming_radius_slider(card, settings.roaming_radius_px());
+                            settings_row(
+                                card,
+                                "Pause in Fullscreen",
+                                if settings.pause_roaming_fullscreen { "ON" } else { "OFF" }.into(),
+                                PauseFullscreenValue,
+                                SettingsButtonAction::TogglePauseFullscreen,
+                            );
+                            card.spawn((
+                                Text::new("Drag Nera to set home · Roaming stays on the current monitor"),
+                                TextFont { font_size: FontSize::Px(11.0), ..default() },
+                                TextColor(Color::srgb(0.45, 0.5, 0.64)),
+                            ));
                             settings_row(
                                 card,
                                 "Follow mouse",
@@ -496,51 +575,44 @@ fn spawn_settings_ui(
                             );
                         });
 
-                        settings_card(scroll, "APP", |card| {
-                            action_button(
-                                card,
-                                "Reset to defaults",
-                                SettingsButtonAction::ResetDefaults,
-                            );
-
-                            card.spawn((
-                                Text::new("Reset restores app settings, startup state, audio, size, and saved position"),
-                                TextFont {
-                                    font_size: FontSize::Px(11.0),
-                                    ..default()
-                                },
-                                TextColor(Color::srgb(0.45, 0.5, 0.64)),
-                            ));
-
-                            action_button(
-                                card,
-                                "Exit Nera",
-                                SettingsButtonAction::Exit,
-                            );
-                        });
-
                     });
 
+                // A sibling of the scroll viewport, so these actions stay
+                // visible even at the minimum window height.
                 panel.spawn((
-                    Text::new(format!(
-                        "Project Nera v{}  ·  Drag window edges to resize  ·  Wheel / touchpad to scroll",
-                        env!("CARGO_PKG_VERSION"),
-                    )),
-                    TextFont {
-                        font_size: FontSize::Px(11.0),
+                    Name::new("Nera Settings Fixed Navigation"),
+                    SettingsFooter,
+                    Node {
+                        width: percent(100),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(8),
+                        padding: UiRect::top(px(8)),
                         ..default()
                     },
-                    TextColor(Color::srgb(0.32, 0.37, 0.5)),
-                ));
+                )).with_children(|footer| {
+                    action_button(footer, "Multi Character", SettingsButtonAction::OpenCharacterManager);
+                    action_button(footer, "Reset to defaults", SettingsButtonAction::ResetDefaults);
+                    action_button(footer, "Exit Nera", SettingsButtonAction::Exit);
+                    action_button(footer, "Import Character (.vrm)", SettingsButtonAction::ImportCharacter);
+                    footer.spawn((
+                        CharacterImportStatus,
+                        Text::new("Choose a VRM character (0.x or 1.0)"),
+                        TextFont { font_size: FontSize::Px(12.0), ..default() },
+                        TextColor(Color::srgb(0.60, 0.67, 0.82)),
+                        Node { max_height: px(48), overflow: Overflow::clip(), ..default() },
+                    ));
+                });
             });
         });
 }
 
-fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
+fn spawn_settings_header(parent: &mut ChildSpawnerCommands, window: Entity) {
     parent
         .spawn(Node {
             width: percent(100),
             height: px(58),
+            flex_shrink: 0.0,
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             column_gap: px(10),
@@ -554,6 +626,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     Node {
                         width: px(68),
                         height: px(42),
+                        flex_shrink: 0.0,
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         border_radius: BorderRadius::all(px(13)),
@@ -596,7 +669,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     title.spawn((
                         Text::new("NERA SETTINGS"),
                         TextFont {
-                            font_size: FontSize::Px(28.0),
+                            font_size: FontSize::Px(23.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.89, 0.91, 1.0)),
@@ -612,6 +685,8 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     ));
                 });
 
+            spawn_window_controls(header, window);
+
             header
                 .spawn((
                     Button,
@@ -619,6 +694,7 @@ fn spawn_settings_header(parent: &mut ChildSpawnerCommands) {
                     Node {
                         width: px(42),
                         height: px(42),
+                        flex_shrink: 0.0,
                         justify_content: JustifyContent::Center,
                         align_items: AlignItems::Center,
                         border_radius: BorderRadius::all(px(13)),
@@ -736,6 +812,207 @@ fn settings_row<M: Component>(
         });
 }
 
+fn walking_checkbox(parent: &mut ChildSpawnerCommands, enabled: bool) {
+    checkbox_row(
+        parent,
+        "Allow Roaming",
+        if enabled { "Yes" } else { "No" },
+        enabled,
+        SettingsButtonAction::ToggleWalking,
+        (WalkingEnabledValue, WalkingCheckmark),
+    );
+}
+
+fn checkbox_row<V: Component, C: Component>(
+    parent: &mut ChildSpawnerCommands,
+    label: &'static str,
+    value: &'static str,
+    enabled: bool,
+    action: SettingsButtonAction,
+    markers: (V, C),
+) {
+    let (value_marker, checkmark_marker) = markers;
+    parent
+        .spawn(Node {
+            width: percent(100),
+            height: px(42),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            column_gap: px(14),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(label),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.82, 0.85, 0.94)),
+            ));
+            row.spawn((
+                Button,
+                action,
+                Name::new(format!("{label} checkbox")),
+                Node {
+                    min_width: px(178),
+                    height: px(40),
+                    padding: UiRect::horizontal(px(16)),
+                    column_gap: px(10),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border_radius: BorderRadius::all(px(12)),
+                    ..default()
+                },
+                BackgroundColor(button_color(action, Interaction::None)),
+                Outline::new(px(1), Val::ZERO, Color::srgba(0.18, 0.23, 0.38, 0.9)),
+            ))
+            .with_children(|button| {
+                button
+                    .spawn((
+                        Node {
+                            width: px(22),
+                            height: px(22),
+                            justify_content: JustifyContent::Center,
+                            align_items: AlignItems::Center,
+                            border_radius: BorderRadius::all(px(4)),
+                            ..default()
+                        },
+                        Outline::new(px(1), Val::ZERO, Color::srgb(0.64, 0.73, 0.95)),
+                    ))
+                    .with_children(|checkbox| {
+                        checkbox
+                            .spawn((
+                                checkmark_marker,
+                                Node {
+                                    width: px(18),
+                                    height: px(18),
+                                    display: if enabled {
+                                        Display::Flex
+                                    } else {
+                                        Display::None
+                                    },
+                                    ..default()
+                                },
+                            ))
+                            .with_children(|tick| {
+                                // Draw the tick directly: the bundled font is a
+                                // subset and need not contain a checkmark glyph.
+                                for (left, top, width, angle) in
+                                    [(2.0, 9.5, 6.0, 45.0), (5.5, 7.5, 11.0, -45.0)]
+                                {
+                                    tick.spawn((
+                                        Node {
+                                            position_type: PositionType::Absolute,
+                                            left: px(left),
+                                            top: px(top),
+                                            width: px(width),
+                                            height: px(3),
+                                            border_radius: BorderRadius::all(px(1)),
+                                            ..default()
+                                        },
+                                        UiTransform::from_rotation(Rot2::degrees(angle)),
+                                        BackgroundColor(Color::srgb(0.61, 0.88, 0.74)),
+                                    ));
+                                }
+                            });
+                    });
+                button.spawn((
+                    value_marker,
+                    Text::new(value),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.88, 0.9, 0.98)),
+                ));
+            });
+        });
+}
+
+fn roaming_radius_slider(parent: &mut ChildSpawnerCommands, radius: f32) {
+    settings_slider(
+        parent,
+        "Roaming Distance",
+        format!("{radius:.0} px"),
+        (radius - 300.0) / 300.0,
+        (RoamingRadiusValue, RoamingRadiusTrack, RoamingRadiusThumb),
+    );
+}
+
+fn settings_slider<V: Component, T: Component, H: Component>(
+    parent: &mut ChildSpawnerCommands,
+    label: &'static str,
+    value: String,
+    position: f32,
+    markers: (V, T, H),
+) {
+    let (value_marker, track_marker, thumb_marker) = markers;
+    parent
+        .spawn(Node {
+            width: percent(100),
+            min_height: px(66),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(4),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn(Node {
+                width: percent(100),
+                justify_content: JustifyContent::SpaceBetween,
+                ..default()
+            })
+            .with_children(|labels| {
+                labels.spawn((
+                    Text::new(label),
+                    TextFont {
+                        font_size: FontSize::Px(16.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.82, 0.85, 0.94)),
+                ));
+                labels.spawn((
+                    value_marker,
+                    Text::new(value),
+                    TextFont {
+                        font_size: FontSize::Px(14.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.88, 0.9, 0.98)),
+                ));
+            });
+            row.spawn((
+                Button,
+                track_marker,
+                bevy::ui::RelativeCursorPosition::default(),
+                Node {
+                    width: percent(100),
+                    height: px(28),
+                    border_radius: BorderRadius::all(px(10)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.095, 0.12, 0.21)),
+            ))
+            .with_children(|track| {
+                track.spawn((
+                    thumb_marker,
+                    bevy::picking::Pickable::IGNORE,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: percent(position.clamp(0.0, 1.0) * 100.0),
+                        margin: UiRect::left(px(-7)),
+                        top: px(5),
+                        width: px(14),
+                        height: px(18),
+                        border_radius: BorderRadius::all(px(7)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.61, 0.73, 0.98)),
+                ));
+            });
+        });
+}
+
 fn info_row(parent: &mut ChildSpawnerCommands, label: &'static str, value: String) {
     parent
         .spawn(Node {
@@ -779,6 +1056,7 @@ fn action_button(
             Node {
                 width: percent(100),
                 height: px(46),
+                flex_shrink: 0.0,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border_radius: BorderRadius::all(px(13)),
@@ -818,6 +1096,11 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
             Interaction::Hovered => Color::srgb(0.35, 0.095, 0.14),
             Interaction::None => Color::srgb(0.24, 0.075, 0.11),
         },
+        SettingsButtonAction::ImportCharacter => match interaction {
+            Interaction::Pressed => Color::srgb(0.10, 0.27, 0.72),
+            Interaction::Hovered => Color::srgb(0.16, 0.39, 0.94),
+            Interaction::None => Color::srgb(0.12, 0.32, 0.82),
+        },
         SettingsButtonAction::CloseWindow | SettingsButtonAction::BackToMenu => match interaction {
             Interaction::Pressed => Color::srgb(0.20, 0.23, 0.34),
             Interaction::Hovered => Color::srgb(0.16, 0.19, 0.30),
@@ -829,6 +1112,12 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::ToggleRememberPosition
         | SettingsButtonAction::CycleCharacterSize
         | SettingsButtonAction::CycleGroundOffset
+        | SettingsButtonAction::ToggleWalking
+        | SettingsButtonAction::ToggleGravity
+        | SettingsButtonAction::ToggleThrow
+        | SettingsButtonAction::OpenCharacterManager
+        | SettingsButtonAction::CycleActivityLevel
+        | SettingsButtonAction::TogglePauseFullscreen
         | SettingsButtonAction::ToggleFollowMouse
         | SettingsButtonAction::ToggleFollowEyes
         | SettingsButtonAction::ToggleFollowHead
@@ -861,6 +1150,8 @@ pub(super) fn handle_settings_buttons(
     mut primary: Query<&mut Window, With<PrimaryWindow>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    mut restore_character: MessageWriter<crate::character::RestoreDefaultCharacter>,
+    mut characters: MessageWriter<crate::animation_manager::OpenCharacterManager>,
 ) {
     for (interaction, action, mut background) in &mut interactions {
         *background = BackgroundColor(button_color(*action, *interaction));
@@ -870,6 +1161,18 @@ pub(super) fn handle_settings_buttons(
         }
 
         match action {
+            SettingsButtonAction::OpenCharacterManager => {
+                characters.write_default();
+                input_gate.close_requested = true;
+            }
+            SettingsButtonAction::ToggleGravity => {
+                settings.gravity_enabled = !settings.gravity_enabled;
+                save_settings_deferred(&mut commands);
+            }
+            SettingsButtonAction::ToggleThrow => {
+                settings.throw_enabled = !settings.throw_enabled;
+                save_settings_deferred(&mut commands);
+            }
             SettingsButtonAction::ToggleAlwaysOnTop => {
                 settings.toggle_always_on_top();
                 save_settings_deferred(&mut commands);
@@ -933,6 +1236,26 @@ pub(super) fn handle_settings_buttons(
                     "Settings: Ground offset -> {}",
                     settings.ground_offset_label()
                 );
+            }
+            SettingsButtonAction::ToggleWalking => {
+                settings.walking_enabled = !settings.walking_enabled;
+                save_settings_deferred(&mut commands);
+                info!(
+                    "Settings: Allow Roaming {}",
+                    if settings.walking_enabled {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                );
+            }
+            SettingsButtonAction::CycleActivityLevel => {
+                settings.cycle_activity_level();
+                save_settings_deferred(&mut commands);
+            }
+            SettingsButtonAction::TogglePauseFullscreen => {
+                settings.pause_roaming_fullscreen = !settings.pause_roaming_fullscreen;
+                save_settings_deferred(&mut commands);
             }
             SettingsButtonAction::ToggleFollowMouse => {
                 settings.follow_mouse = !settings.follow_mouse;
@@ -1036,6 +1359,7 @@ pub(super) fn handle_settings_buttons(
             }
             SettingsButtonAction::ResetDefaults => {
                 *settings = NeraSettings::default();
+                restore_character.write(crate::character::RestoreDefaultCharacter);
 
                 if let Err(error) = startup::set_enabled(false) {
                     warn!("Settings: reset could not disable Start with Windows: {error}");
@@ -1066,7 +1390,248 @@ pub(super) fn handle_settings_buttons(
                 save_settings_before_exit(&mut commands);
                 exit.write(AppExit::Success);
             }
+            // The picker has its own system so it can use the utility HWND
+            // without borrowing the primary pet Window.
+            SettingsButtonAction::ImportCharacter => {}
         }
+    }
+}
+
+pub(super) fn import_character_from_settings(
+    actions: Query<(&Interaction, &SettingsButtonAction), Changed<Interaction>>,
+    windows: Query<&UtilityWindow, With<SettingsWindow>>,
+    mut status: ResMut<crate::character::CharacterImportStatus>,
+    mut imports: MessageWriter<crate::character::ImportCharacter>,
+) {
+    if status.loading
+        || !actions.iter().any(|(interaction, action)| {
+            *interaction == Interaction::Pressed
+                && matches!(action, SettingsButtonAction::ImportCharacter)
+        })
+    {
+        return;
+    }
+    let Some(owner) = windows.single().ok().and_then(UtilityWindow::native_handle) else {
+        status.message = "Window is still opening; try Import again.".into();
+        return;
+    };
+    match crate::platform::pick_asset_file(
+        owner,
+        "Import Character",
+        "VRM character (*.vrm)\0*.vrm\0\0",
+    ) {
+        Ok(Some(path)) => {
+            imports.write(crate::character::ImportCharacter(path));
+        }
+        Ok(None) => {}
+        Err(error) => status.message = error,
+    }
+}
+
+pub(super) fn update_gravity_label(
+    settings: Res<NeraSettings>,
+    mut labels: Query<&mut Text, With<GravityValue>>,
+) {
+    for mut label in &mut labels {
+        label.set_if_neq(Text::new(if settings.gravity_enabled {
+            "ON"
+        } else {
+            "OFF"
+        }));
+    }
+}
+
+fn throw_percent_from_cursor(x: f32) -> u8 {
+    ((x + 0.5).clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn smoke_throw_controls(world: &mut World, intensity: u8) {
+    use bevy::ecs::system::RunSystemOnce;
+    let toggle = world
+        .query::<(Entity, &SettingsButtonAction)>()
+        .iter(world)
+        .find_map(|(entity, action)| {
+            matches!(action, SettingsButtonAction::ToggleThrow).then_some(entity)
+        })
+        .unwrap();
+    *world.get_mut::<Interaction>(toggle).unwrap() = Interaction::Pressed;
+    world.run_system_once(handle_settings_buttons).unwrap();
+    *world.get_mut::<Interaction>(toggle).unwrap() = Interaction::None;
+
+    let track = world
+        .query_filtered::<Entity, With<ThrowIntensityTrack>>()
+        .single(world)
+        .unwrap();
+    *world.get_mut::<Interaction>(track).unwrap() = Interaction::Pressed;
+    world
+        .get_mut::<bevy::ui::RelativeCursorPosition>(track)
+        .unwrap()
+        .normalized = Some(Vec2::new(f32::from(intensity) / 100.0 - 0.5, 0.0));
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    world
+        .run_system_cached(handle_throw_intensity_slider)
+        .unwrap();
+    world
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .release(MouseButton::Left);
+    world
+        .run_system_cached(handle_throw_intensity_slider)
+        .unwrap();
+    world.resource_mut::<ButtonInput<MouseButton>>().clear();
+    *world.get_mut::<Interaction>(track).unwrap() = Interaction::None;
+}
+
+pub(super) fn handle_throw_intensity_slider(
+    mouse: Res<ButtonInput<MouseButton>>,
+    tracks: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<ThrowIntensityTrack>>,
+    mut dragging: Local<bool>,
+    mut settings: ResMut<NeraSettings>,
+    mut commands: Commands,
+) {
+    if !mouse.pressed(MouseButton::Left) {
+        if *dragging {
+            save_settings_deferred(&mut commands);
+        }
+        *dragging = false;
+        return;
+    }
+    let Ok((interaction, cursor)) = tracks.single() else {
+        *dragging = false;
+        return;
+    };
+    if mouse.just_pressed(MouseButton::Left) && *interaction == Interaction::Pressed {
+        *dragging = true;
+    }
+    if *dragging && let Some(cursor) = cursor.normalized {
+        let percent = throw_percent_from_cursor(cursor.x);
+        if settings.throw_intensity != percent {
+            settings.throw_intensity = percent;
+        }
+    }
+}
+
+pub(super) fn update_throw_settings_labels(
+    settings: Res<NeraSettings>,
+    mut labels: Query<(&mut Text, Option<&ThrowValue>, Option<&ThrowIntensityValue>)>,
+    mut checkmarks: Query<&mut Node, With<ThrowCheckmark>>,
+    mut thumbs: Query<&mut Node, (With<ThrowIntensityThumb>, Without<ThrowCheckmark>)>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (mut text, enabled, intensity) in &mut labels {
+        if enabled.is_some() {
+            text.0 = if settings.throw_enabled { "ON" } else { "OFF" }.into();
+        } else if intensity.is_some() {
+            text.0 = settings.throw_intensity_label();
+        }
+    }
+    for mut mark in &mut checkmarks {
+        mark.display = if settings.throw_enabled {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+    for mut thumb in &mut thumbs {
+        thumb.left = percent(f32::from(settings.throw_intensity.min(100)));
+    }
+}
+
+pub(super) fn update_character_import_status(
+    status: Res<crate::character::CharacterImportStatus>,
+    mut labels: Query<&mut Text, With<CharacterImportStatus>>,
+) {
+    let message = if status.message.is_empty() {
+        "Choose a VRM character (0.x or 1.0)"
+    } else {
+        &status.message
+    };
+    for mut text in &mut labels {
+        if text.0 != message {
+            text.0 = message.to_owned();
+        }
+    }
+}
+
+pub(super) fn sync_settings_minimized(
+    windows: Query<&UtilityWindow, With<SettingsWindow>>,
+    mut gate: ResMut<SettingsInputGate>,
+) {
+    let minimized = windows.iter().any(|window| {
+        window
+            .native_handle()
+            .is_some_and(crate::platform::is_window_minimized)
+    });
+    if gate.minimized != minimized {
+        gate.minimized = minimized;
+    }
+}
+
+pub(super) fn handle_roaming_radius_slider(
+    mouse: Res<ButtonInput<MouseButton>>,
+    tracks: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<RoamingRadiusTrack>>,
+    mut dragging: Local<bool>,
+    mut settings: ResMut<NeraSettings>,
+    mut commands: Commands,
+) {
+    if !mouse.pressed(MouseButton::Left) {
+        if *dragging {
+            save_settings_deferred(&mut commands);
+        }
+        *dragging = false;
+        return;
+    }
+    let Ok((interaction, cursor)) = tracks.single() else {
+        *dragging = false;
+        return;
+    };
+    if mouse.just_pressed(MouseButton::Left) && *interaction == Interaction::Pressed {
+        *dragging = true;
+    }
+    if *dragging {
+        if let Some(cursor) = cursor.normalized {
+            // Bevy 0.19 UI coordinates are normalized around the node center.
+            let radius = (300.0 + (cursor.x + 0.5).clamp(0.0, 1.0) * 300.0).round() as u16;
+            if settings.roaming_radius_px != radius {
+                settings.roaming_radius_px = radius;
+            }
+        }
+    }
+}
+
+pub(super) fn update_roaming_settings_labels(
+    settings: Res<NeraSettings>,
+    mut labels: Query<(
+        &mut Text,
+        Option<&ActivityLevelValue>,
+        Option<&RoamingRadiusValue>,
+        Option<&PauseFullscreenValue>,
+    )>,
+    mut thumbs: Query<&mut Node, With<RoamingRadiusThumb>>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (mut text, activity, radius, fullscreen) in &mut labels {
+        if activity.is_some() {
+            text.0 = settings.activity_level().label().into();
+        } else if radius.is_some() {
+            text.0 = format!("{:.0} px", settings.roaming_radius_px());
+        } else if fullscreen.is_some() {
+            text.0 = if settings.pause_roaming_fullscreen {
+                "ON"
+            } else {
+                "OFF"
+            }
+            .into();
+        }
+    }
+    for mut thumb in &mut thumbs {
+        thumb.left = percent((settings.roaming_radius_px() - 300.0) / 300.0 * 100.0);
     }
 }
 
@@ -1141,7 +1706,7 @@ pub(super) fn update_settings_labels(
         Option<&StartWithWindowsValue>,
         Option<&StartHiddenValue>,
         Option<&RememberPositionValue>,
-        Option<&FollowMouseValue>,
+        (Option<&WalkingEnabledValue>, Option<&FollowMouseValue>),
         Option<&FollowEyesValue>,
         Option<&FollowHeadValue>,
         Option<&FollowIntensityValue>,
@@ -1152,6 +1717,7 @@ pub(super) fn update_settings_labels(
         Option<&BrightnessValue>,
         Option<&FpsValue>,
     )>,
+    mut walking_checkmarks: Query<&mut Node, With<WalkingCheckmark>>,
 ) {
     if !settings.is_changed() && !startup_state.is_changed() {
         return;
@@ -1163,7 +1729,7 @@ pub(super) fn update_settings_labels(
         start_with_windows,
         start_hidden,
         remember_position,
-        follow_mouse,
+        (walking_enabled, follow_mouse),
         follow_eyes,
         follow_head,
         follow_intensity,
@@ -1188,6 +1754,13 @@ pub(super) fn update_settings_labels(
                 "OFF"
             }
             .into();
+        } else if walking_enabled.is_some() {
+            text.0 = if settings.walking_enabled {
+                "Yes"
+            } else {
+                "No"
+            }
+            .into();
         } else if follow_mouse.is_some() {
             text.0 = if settings.follow_mouse { "ON" } else { "OFF" }.into();
         } else if follow_eyes.is_some() {
@@ -1209,6 +1782,14 @@ pub(super) fn update_settings_labels(
         } else if fps.is_some() {
             text.0 = settings.fps_label();
         }
+    }
+
+    for mut node in &mut walking_checkmarks {
+        node.display = if settings.walking_enabled {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -1292,6 +1873,7 @@ pub(super) fn close_settings_after_mouse_release(
     let reopen_menu = gate.return_to_menu_requested;
 
     gate.window_open = false;
+    gate.minimized = false;
     gate.close_requested = false;
     gate.return_to_menu_requested = false;
 
@@ -1315,6 +1897,259 @@ pub(super) fn observe_settings_window_removed(
     }
 
     gate.window_open = false;
+    gate.minimized = false;
     gate.close_requested = false;
     gate.return_to_menu_requested = false;
+}
+
+#[cfg(test)]
+mod walking_checkbox_tests {
+    use super::*;
+
+    #[test]
+    fn throw_controls_refresh_and_reset_without_changing_gravity() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .add_systems(Update, update_throw_settings_labels);
+        let enabled = app.world_mut().spawn((Text::new(""), ThrowValue)).id();
+        let intensity = app
+            .world_mut()
+            .spawn((Text::new(""), ThrowIntensityValue))
+            .id();
+        let mark = app
+            .world_mut()
+            .spawn((Node::default(), ThrowCheckmark))
+            .id();
+        let thumb = app
+            .world_mut()
+            .spawn((Node::default(), ThrowIntensityThumb))
+            .id();
+        app.update();
+        assert_eq!(app.world().get::<Text>(enabled).unwrap().0, "ON");
+        assert_eq!(app.world().get::<Text>(intensity).unwrap().0, "50%");
+        assert_eq!(
+            app.world().get::<Node>(mark).unwrap().display,
+            Display::Flex
+        );
+        assert_eq!(app.world().get::<Node>(thumb).unwrap().left, percent(50));
+        {
+            let mut settings = app.world_mut().resource_mut::<NeraSettings>();
+            settings.throw_enabled = false;
+            settings.throw_intensity = 30;
+        }
+        app.update();
+        assert_eq!(app.world().get::<Text>(enabled).unwrap().0, "OFF");
+        assert_eq!(app.world().get::<Text>(intensity).unwrap().0, "30%");
+        assert_eq!(
+            app.world().get::<Node>(mark).unwrap().display,
+            Display::None
+        );
+        assert_eq!(app.world().get::<Node>(thumb).unwrap().left, percent(30));
+        assert!(app.world().resource::<NeraSettings>().gravity_enabled);
+        *app.world_mut().resource_mut::<NeraSettings>() = NeraSettings::default();
+        app.update();
+        assert_eq!(app.world().get::<Text>(enabled).unwrap().0, "ON");
+        assert_eq!(app.world().get::<Node>(thumb).unwrap().left, percent(50));
+    }
+
+    #[test]
+    fn throw_slider_tracks_cursor_from_zero_to_one_hundred_without_changing_roaming() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(Update, handle_throw_intensity_slider);
+        let track = app
+            .world_mut()
+            .spawn((
+                ThrowIntensityTrack,
+                Interaction::Pressed,
+                bevy::ui::RelativeCursorPosition {
+                    cursor_over: true,
+                    normalized: Some(Vec2::new(-0.17, 0.0)),
+                },
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        assert_eq!(app.world().resource::<NeraSettings>().throw_intensity, 33);
+        app.world_mut()
+            .get_mut::<bevy::ui::RelativeCursorPosition>(track)
+            .unwrap()
+            .normalized = Some(Vec2::new(1.0, 0.0));
+        app.update();
+        assert_eq!(app.world().resource::<NeraSettings>().throw_intensity, 100);
+        app.world_mut()
+            .get_mut::<bevy::ui::RelativeCursorPosition>(track)
+            .unwrap()
+            .normalized = Some(Vec2::new(-1.0, 0.0));
+        app.update();
+        assert_eq!(app.world().resource::<NeraSettings>().throw_intensity, 0);
+        assert_eq!(
+            app.world().resource::<NeraSettings>().roaming_radius_px,
+            400
+        );
+        assert!(app.world().resource::<NeraSettings>().gravity_enabled);
+    }
+
+    #[test]
+    fn reopening_minimized_settings_restores_existing_window_and_input_gate() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<StartupRuntime>()
+            .insert_resource(SettingsInputGate {
+                window_open: true,
+                minimized: true,
+                ..default()
+            })
+            .add_message::<OpenSettingsWindow>()
+            .add_systems(Update, open_settings_window);
+        let settings_window = app
+            .world_mut()
+            .spawn((
+                SettingsWindow,
+                Window {
+                    focused: false,
+                    ..default()
+                },
+            ))
+            .id();
+
+        assert!(
+            app.world_mut()
+                .run_system_once(nera_input_available)
+                .unwrap()
+        );
+        assert!(!app.world_mut().run_system_once(nera_input_blocked).unwrap());
+
+        app.world_mut().write_message(OpenSettingsWindow);
+        app.update();
+
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<SettingsWindow>>()
+                .iter(world)
+                .count(),
+            1
+        );
+        let mut window = world.get_mut::<Window>(settings_window).unwrap();
+        assert!(window.focused);
+        assert_eq!(window.internal.take_minimize_request(), Some(false));
+        assert!(!world.run_system_once(nera_input_available).unwrap());
+        assert!(world.run_system_once(nera_input_blocked).unwrap());
+    }
+
+    #[test]
+    fn navigation_actions_stay_outside_the_scrolling_settings_body() {
+        let mut app = App::new();
+        app.add_systems(Startup, |mut commands: Commands| {
+            let window = commands.spawn_empty().id();
+            let camera = commands.spawn_empty().id();
+            spawn_settings_ui(
+                &mut commands,
+                window,
+                camera,
+                &NeraSettings::default(),
+                &StartupRuntime::default(),
+            );
+        });
+        app.update();
+        let world = app.world_mut();
+        let footer = world
+            .query_filtered::<Entity, With<SettingsFooter>>()
+            .single(world)
+            .unwrap();
+        let scroll = world
+            .query_filtered::<Entity, With<SettingsScrollArea>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(
+            world.get::<ChildOf>(footer).unwrap().parent(),
+            world.get::<ChildOf>(scroll).unwrap().parent()
+        );
+        assert_eq!(world.get::<Node>(footer).unwrap().flex_shrink, 0.0);
+        let actions: Vec<_> = world
+            .get::<Children>(footer)
+            .unwrap()
+            .iter()
+            .filter_map(|entity| world.get::<SettingsButtonAction>(entity))
+            .collect();
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                SettingsButtonAction::OpenCharacterManager,
+                SettingsButtonAction::ResetDefaults,
+                SettingsButtonAction::Exit,
+                SettingsButtonAction::ImportCharacter,
+            ]
+        ));
+        let character_manager_count = world
+            .query::<&SettingsButtonAction>()
+            .iter(world)
+            .filter(|action| matches!(action, SettingsButtonAction::OpenCharacterManager))
+            .count();
+        assert_eq!(character_manager_count, 1);
+        let reset_count = world
+            .query::<&SettingsButtonAction>()
+            .iter(world)
+            .filter(|action| matches!(action, SettingsButtonAction::ResetDefaults))
+            .count();
+        assert_eq!(reset_count, 1);
+        let exit_count = world
+            .query::<&SettingsButtonAction>()
+            .iter(world)
+            .filter(|action| matches!(action, SettingsButtonAction::Exit))
+            .count();
+        assert_eq!(exit_count, 1);
+    }
+
+    #[test]
+    fn labels_and_checkbox_refresh_when_walking_is_enabled_and_reset() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<StartupRuntime>()
+            .add_systems(Update, update_settings_labels);
+        let value = app
+            .world_mut()
+            .spawn((Text::new(""), WalkingEnabledValue))
+            .id();
+        let checkmark = app
+            .world_mut()
+            .spawn((Node::default(), WalkingCheckmark))
+            .id();
+        let follow = app
+            .world_mut()
+            .spawn((Text::new(""), FollowMouseValue))
+            .id();
+
+        app.update();
+        assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
+        assert_eq!(
+            app.world().get::<Node>(checkmark).unwrap().display,
+            Display::None
+        );
+        assert_eq!(app.world().get::<Text>(follow).unwrap().0, "ON");
+
+        app.world_mut()
+            .resource_mut::<NeraSettings>()
+            .walking_enabled = true;
+        app.update();
+        assert_eq!(app.world().get::<Text>(value).unwrap().0, "Yes");
+        assert_eq!(
+            app.world().get::<Node>(checkmark).unwrap().display,
+            Display::Flex
+        );
+
+        *app.world_mut().resource_mut::<NeraSettings>() = NeraSettings::default();
+        app.update();
+        assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
+        assert_eq!(
+            app.world().get::<Node>(checkmark).unwrap().display,
+            Display::None
+        );
+    }
 }

@@ -21,23 +21,14 @@
 
 use bevy::{
     prelude::*,
-    window::{
-        CursorOptions,
-        PrimaryWindow,
-        WindowLevel,
-        WindowPosition,
-    },
+    window::{CursorOptions, PrimaryWindow, WindowLevel, WindowPosition},
 };
 
 use bevy_vrm1::prelude::VrmBone;
 
 use crate::{
     animation::NeraAnimationState,
-    environment::{
-        AvatarAnchor,
-        DesktopEnvironment,
-        PlacementState,
-    },
+    environment::{AvatarAnchor, DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, HeadPatGesture, HoveredBodyPart, NeraLiveBone},
 };
 
@@ -118,7 +109,6 @@ pub(crate) struct PresentationState {
 }
 
 impl PresentationState {
-
     pub(crate) fn is_attention(&self) -> bool {
         matches!(self.mode, PresentationMode::Attention(_))
     }
@@ -183,11 +173,10 @@ impl Plugin for PresentationPlugin {
             .add_message::<PresentationExited>()
             .add_systems(
                 Update,
-                (
-                    debug_toggle_attention,
-                    handle_presentation_commands,
-                )
-                    .chain(),
+                (debug_toggle_attention, handle_presentation_commands)
+                    .chain()
+                    .before(crate::cloud::update_cloud)
+                    .before(crate::startup_entrance::prepare_startup_entrance),
             )
             // Last intentionally wins over Phase 4 window-follow systems.
             // This avoids changing working sitting/tracking code in Phase 5.55.
@@ -207,10 +196,8 @@ fn debug_toggle_attention(
     // Do not use F9 here. On many laptops / screenshot tools the physical
     // screenshot key is multiplexed with a function key and could
     // accidentally exit Attention Mode while trying to capture it.
-    let ctrl = keyboard.pressed(KeyCode::ControlLeft)
-        || keyboard.pressed(KeyCode::ControlRight);
-    let alt = keyboard.pressed(KeyCode::AltLeft)
-        || keyboard.pressed(KeyCode::AltRight);
+    let ctrl = keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
+    let alt = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);
 
     if !(ctrl && alt && keyboard.just_pressed(KeyCode::KeyP)) {
         return;
@@ -219,9 +206,7 @@ fn debug_toggle_attention(
     if state.is_attention() {
         commands.write(PresentationCommand::ExitAttention);
     } else {
-        commands.write(PresentationCommand::EnterAttention(
-            AttentionKind::Alarm,
-        ));
+        commands.write(PresentationCommand::EnterAttention(AttentionKind::Alarm));
     }
 }
 
@@ -256,14 +241,8 @@ fn handle_presentation_commands(
     mut interaction: ResMut<DesktopPetInteraction>,
     mut hovered: ResMut<HoveredBodyPart>,
     mut head_pat: ResMut<HeadPatGesture>,
-    mut window_query: Query<
-        (&mut Window, &mut CursorOptions),
-        With<PrimaryWindow>,
-    >,
-    mut camera_query: Query<
-        (&Projection, &mut Transform),
-        With<crate::avatar::NeraMainCamera>,
-    >,
+    mut window_query: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+    mut camera_query: Query<(&Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
     bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) {
     for request in requests.read() {
@@ -280,24 +259,18 @@ fn handle_presentation_commands(
                     continue;
                 };
 
-                let Ok((projection, mut camera_transform)) =
-                    camera_query.single_mut()
-                else {
+                let Ok((projection, mut camera_transform)) = camera_query.single_mut() else {
                     warn!("Presentation: Nera camera unavailable");
                     continue;
                 };
 
                 let Some(rect) = environment.nera_rect else {
-                    warn!(
-                        "Presentation: Nera HWND rect unavailable; attention deferred"
-                    );
+                    warn!("Presentation: Nera HWND rect unavailable; attention deferred");
                     continue;
                 };
 
                 let Some(monitor) = environment.monitor else {
-                    warn!(
-                        "Presentation: current monitor unavailable; attention deferred"
-                    );
+                    warn!("Presentation: current monitor unavailable; attention deferred");
                     continue;
                 };
 
@@ -311,8 +284,7 @@ fn handle_presentation_commands(
                     camera_transform: camera_transform.clone(),
                     placement: environment.placement,
                     attached_anchor: environment.attached_anchor,
-                    hidden_for_target_suspend:
-                        environment.hidden_for_target_suspend,
+                    hidden_for_target_suspend: environment.hidden_for_target_suspend,
                 });
 
                 // Attention owns Nera completely. Do not keep the desktop
@@ -329,11 +301,7 @@ fn handle_presentation_commands(
                 // not part of the sitting state machine.
                 animation.suspend_support_for_attention();
 
-                reset_pointer_state(
-                    &mut interaction,
-                    &mut hovered,
-                    &mut head_pat,
-                );
+                reset_pointer_state(&mut interaction, &mut hovered, &mut head_pat);
 
                 state.mode = PresentationMode::Attention(kind);
                 state.attention_enter_progress = 0.0;
@@ -347,25 +315,17 @@ fn handle_presentation_commands(
                     None,
                 );
 
-                state.attention_locked_center = Some(
-                    Vec2::new(
-                        layout.camera_x,
-                        layout.camera_y,
-                    ),
-                );
+                state.attention_locked_center = Some(Vec2::new(layout.camera_x, layout.camera_y));
 
                 // Preallocate a wide, stable transparent canvas for the whole
                 // alarm presentation. This removes repeated HWND resizes when
                 // Wave moves its hands left/right.
-                state.attention_locked_window_width = (
-                    monitor.bounds.width().max(1) as f32
-                        * ATTENTION_MAX_WINDOW_WIDTH_RATIO
-                )
+                state.attention_locked_window_width = (monitor.bounds.width().max(1) as f32
+                    * ATTENTION_MAX_WINDOW_WIDTH_RATIO)
                     .round() as u32;
 
                 state.attention_locked_window_width =
-                    state.attention_locked_window_width
-                        .max(layout.window_width);
+                    state.attention_locked_window_width.max(layout.window_width);
 
                 state.attention_peak_camera_z = layout.camera_z;
 
@@ -404,16 +364,10 @@ fn handle_presentation_commands(
                 // Runs before the snapshot check on purpose: even a degraded
                 // exit that cannot restore the window must still hand input
                 // ownership back cleanly.
-                reset_pointer_state(
-                    &mut interaction,
-                    &mut hovered,
-                    &mut head_pat,
-                );
+                reset_pointer_state(&mut interaction, &mut hovered, &mut head_pat);
 
                 let Some(snapshot) = state.snapshot.take() else {
-                    warn!(
-                        "Presentation: attention mode had no restore snapshot"
-                    );
+                    warn!("Presentation: attention mode had no restore snapshot");
                     state.mode = PresentationMode::DesktopPet;
                     state.attention_locked_center = None;
                     state.attention_locked_window_width = 0;
@@ -421,29 +375,17 @@ fn handle_presentation_commands(
                     continue;
                 };
 
-                let Ok((mut window, mut cursor)) =
-                    window_query.single_mut()
-                else {
-                    warn!(
-                        "Presentation: primary Nera window unavailable during restore"
-                    );
+                let Ok((mut window, mut cursor)) = window_query.single_mut() else {
+                    warn!("Presentation: primary Nera window unavailable during restore");
                     continue;
                 };
 
-                let Ok((_projection, mut camera_transform)) =
-                    camera_query.single_mut()
-                else {
-                    warn!(
-                        "Presentation: Nera camera unavailable during restore"
-                    );
+                let Ok((_projection, mut camera_transform)) = camera_query.single_mut() else {
+                    warn!("Presentation: Nera camera unavailable during restore");
                     continue;
                 };
 
-                restore_desktop_window(
-                    &mut window,
-                    &mut cursor,
-                    &snapshot,
-                );
+                restore_desktop_window(&mut window, &mut cursor, &snapshot);
                 *camera_transform = snapshot.camera_transform;
 
                 // Restore the exact desktop attachment that existed before
@@ -451,8 +393,7 @@ fn handle_presentation_commands(
                 // instead of replaying SittingEnter.
                 environment.placement = snapshot.placement;
                 environment.set_attached_anchor(snapshot.attached_anchor);
-                environment.hidden_for_target_suspend =
-                    snapshot.hidden_for_target_suspend;
+                environment.hidden_for_target_suspend = snapshot.hidden_for_target_suspend;
 
                 let restored_sitting = matches!(
                     snapshot.placement,
@@ -462,9 +403,7 @@ fn handle_presentation_commands(
                         | PlacementState::Taskbar(_)
                 );
 
-                animation.restore_support_after_attention(
-                    restored_sitting,
-                );
+                animation.restore_support_after_attention(restored_sitting);
 
                 state.mode = PresentationMode::DesktopPet;
                 state.attention_enter_progress = 0.0;
@@ -618,22 +557,18 @@ fn upper_body_world_metrics(
     let mut max_x = max_x?;
     let animated_top = animated_top_y.unwrap_or(head);
 
-    let torso_span =
-        (head - hips).abs().max(MIN_UPPER_BODY_WORLD_HEIGHT);
+    let torso_span = (head - hips).abs().max(MIN_UPPER_BODY_WORLD_HEIGHT);
 
     // Mesh extends beyond the humanoid joints: sleeves/fingers are especially
     // obvious during wide-arm animations.
-    let horizontal_margin =
-        torso_span * UPPER_BODY_HORIZONTAL_MARGIN_RATIO;
+    let horizontal_margin = torso_span * UPPER_BODY_HORIZONTAL_MARGIN_RATIO;
 
     min_x -= horizontal_margin;
     max_x += horizontal_margin;
 
-    let top_y =
-        animated_top + torso_span * UPPER_BODY_TOP_MARGIN_RATIO;
+    let top_y = animated_top + torso_span * UPPER_BODY_TOP_MARGIN_RATIO;
 
-    let bottom_y =
-        hips - torso_span * UPPER_BODY_BOTTOM_MARGIN_RATIO;
+    let bottom_y = hips - torso_span * UPPER_BODY_BOTTOM_MARGIN_RATIO;
 
     Some(UpperBodyBounds {
         min_x,
@@ -664,133 +599,86 @@ fn compute_attention_layout(
     let monitor_width = monitor_bounds.width().max(1) as f32;
     let monitor_height = monitor_bounds.height().max(1) as f32;
 
-    let original_aspect =
-        original_width.max(1) as f32 / original_height.max(1) as f32;
+    let original_aspect = original_width.max(1) as f32 / original_height.max(1) as f32;
 
     // Do NOT clamp against the normal 600x950 pet window. On a 900px-tall
     // monitor that would force Attention back to almost full-screen height.
     // Presentation dimensions are derived from the active monitor instead.
-    let minimum_window_height =
-        (monitor_height * 0.52).max(420.0).min(monitor_height);
+    let minimum_window_height = (monitor_height * 0.52).max(420.0).min(monitor_height);
 
-    let window_height =
-        (monitor_height * ATTENTION_WINDOW_MONITOR_HEIGHT_RATIO)
-            .round()
-            .clamp(
-                minimum_window_height,
-                monitor_height,
-            ) as u32;
+    let window_height = (monitor_height * ATTENTION_WINDOW_MONITOR_HEIGHT_RATIO)
+        .round()
+        .clamp(minimum_window_height, monitor_height) as u32;
 
-    let minimum_window_width =
-        (monitor_width * 0.20).max(320.0).min(monitor_width);
+    let minimum_window_width = (monitor_width * 0.20).max(320.0).min(monitor_width);
 
-    let window_width =
-        (window_height as f32 * original_aspect)
-            .round()
-            .clamp(
-                minimum_window_width,
-                monitor_width,
-            ) as u32;
+    let window_width = (window_height as f32 * original_aspect)
+        .round()
+        .clamp(minimum_window_width, monitor_width) as u32;
 
-    let bounds =
-        upper_body_world_metrics(bone_query)
-            .unwrap_or(UpperBodyBounds {
-                min_x: -0.45,
-                max_x: 0.45,
-                bottom_y: 0.55,
-                top_y: 1.55,
-            });
+    let bounds = upper_body_world_metrics(bone_query).unwrap_or(UpperBodyBounds {
+        min_x: -0.45,
+        max_x: 0.45,
+        bottom_y: 0.55,
+        top_y: 1.55,
+    });
 
     let vertical_fov = match projection {
         Projection::Perspective(perspective) => perspective.fov,
         _ => std::f32::consts::FRAC_PI_4,
     };
 
-    let vertical_half_tan =
-        (vertical_fov * 0.5).tan().max(0.01);
+    let vertical_half_tan = (vertical_fov * 0.5).tan().max(0.01);
 
     // The first Attention frame chooses the composition center. Later frames
     // reuse it instead of following asymmetric arm motion.
-    let center = locked_center.unwrap_or_else(|| {
-        Vec2::new(
-            bounds.center_x(),
-            bounds.center_y(),
-        )
-    });
+    let center = locked_center.unwrap_or_else(|| Vec2::new(bounds.center_x(), bounds.center_y()));
 
     // Fit relative to the LOCKED center. This matters when one arm extends
     // farther than the other: the camera stays still and the pose consumes
     // more room on that side instead of dragging Nera across the screen.
-    let vertical_half_extent = (
-        (bounds.top_y - center.y)
-            .abs()
-            .max((center.y - bounds.bottom_y).abs())
-    )
-        .max(MIN_UPPER_BODY_WORLD_HEIGHT * 0.5);
+    let vertical_half_extent = ((bounds.top_y - center.y)
+        .abs()
+        .max((center.y - bounds.bottom_y).abs()))
+    .max(MIN_UPPER_BODY_WORLD_HEIGHT * 0.5);
 
-    let horizontal_half_extent = (
-        (bounds.max_x - center.x)
-            .abs()
-            .max((center.x - bounds.min_x).abs())
-    )
-        .max(0.10);
+    let horizontal_half_extent = ((bounds.max_x - center.x)
+        .abs()
+        .max((center.x - bounds.min_x).abs()))
+    .max(0.10);
 
     // Vertical framing remains authoritative for the large half-body look.
     let vertical_distance =
-        vertical_half_extent
-            / (
-                ATTENTION_UPPER_BODY_VIEW_FRACTION
-                    * vertical_half_tan
-            );
+        vertical_half_extent / (ATTENTION_UPPER_BODY_VIEW_FRACTION * vertical_half_tan);
 
     // At that same camera distance, widen the transparent canvas enough for
     // the current horizontal extent.
-    let required_aspect =
-        horizontal_half_extent
-            / (
-                vertical_distance.max(0.01)
-                    * vertical_half_tan
-                    * ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION
-            );
+    let required_aspect = horizontal_half_extent
+        / (vertical_distance.max(0.01)
+            * vertical_half_tan
+            * ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION);
 
-    let original_window_aspect =
-        window_width.max(1) as f32
-            / window_height.max(1) as f32;
+    let original_window_aspect = window_width.max(1) as f32 / window_height.max(1) as f32;
 
-    let desired_aspect =
-        original_window_aspect.max(required_aspect);
+    let desired_aspect = original_window_aspect.max(required_aspect);
 
-    let max_window_width =
-        (monitor_width * ATTENTION_MAX_WINDOW_WIDTH_RATIO)
-            .round()
-            .max(window_width as f32)
-            .min(monitor_width);
+    let max_window_width = (monitor_width * ATTENTION_MAX_WINDOW_WIDTH_RATIO)
+        .round()
+        .max(window_width as f32)
+        .min(monitor_width);
 
-    let widened_window_width =
-        (window_height as f32 * desired_aspect)
-            .round()
-            .clamp(
-                window_width as f32,
-                max_window_width,
-            ) as u32;
+    let widened_window_width = (window_height as f32 * desired_aspect)
+        .round()
+        .clamp(window_width as f32, max_window_width) as u32;
 
-    let final_aspect =
-        widened_window_width.max(1) as f32
-            / window_height.max(1) as f32;
+    let final_aspect = widened_window_width.max(1) as f32 / window_height.max(1) as f32;
 
-    let horizontal_half_tan =
-        (vertical_half_tan * final_aspect)
-            .max(0.01);
+    let horizontal_half_tan = (vertical_half_tan * final_aspect).max(0.01);
 
     let horizontal_distance =
-        horizontal_half_extent
-            / (
-                ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION
-                    * horizontal_half_tan
-            );
+        horizontal_half_extent / (ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION * horizontal_half_tan);
 
-    let camera_z =
-        vertical_distance.max(horizontal_distance);
+    let camera_z = vertical_distance.max(horizontal_distance);
 
     AttentionLayout {
         window_width: widened_window_width,
@@ -818,8 +706,7 @@ fn apply_attention_window(
     let monitor_width = monitor_bounds.width().max(1);
 
     // Horizontal center.
-    let left = monitor_bounds.left
-        + ((monitor_width - width as i32) / 2).max(0);
+    let left = monitor_bounds.left + ((monitor_width - width as i32) / 2).max(0);
 
     // Final position is bottom-anchored. This is what creates the
     // "Nera emerges from the bottom of the screen" composition.
@@ -829,18 +716,13 @@ fn apply_attention_window(
     let start_top = monitor_bounds.bottom;
 
     let eased = ease_out_cubic(enter_progress);
-    let top = (
-        start_top as f32
-            + (final_top - start_top) as f32 * eased
-    )
-        .round() as i32;
+    let top = (start_top as f32 + (final_top - start_top) as f32 * eased).round() as i32;
 
     window.position = WindowPosition::At(IVec2::new(left, top));
 
-    window.resolution.set_physical_resolution(
-        width.max(1),
-        height.max(1),
-    );
+    window
+        .resolution
+        .set_physical_resolution(width.max(1), height.max(1));
 
     window.transparent = true;
     window.window_level = WindowLevel::AlwaysOnTop;
@@ -854,15 +736,8 @@ fn apply_attention_camera(
     look_at_y: f32,
     camera_z: f32,
 ) {
-    *transform = Transform::from_xyz(
-        camera_x,
-        camera_y,
-        camera_z.max(0.16),
-    )
-    .looking_at(
-        Vec3::new(look_at_x, look_at_y, 0.0),
-        Vec3::Y,
-    );
+    *transform = Transform::from_xyz(camera_x, camera_y, camera_z.max(0.16))
+        .looking_at(Vec3::new(look_at_x, look_at_y, 0.0), Vec3::Y);
 }
 
 fn restore_desktop_window(
@@ -870,15 +745,11 @@ fn restore_desktop_window(
     cursor: &mut CursorOptions,
     snapshot: &PresentationSnapshot,
 ) {
-    window.position = WindowPosition::At(IVec2::new(
-        snapshot.window_left,
-        snapshot.window_top,
-    ));
+    window.position = WindowPosition::At(IVec2::new(snapshot.window_left, snapshot.window_top));
 
-    window.resolution.set_physical_resolution(
-        snapshot.window_width,
-        snapshot.window_height,
-    );
+    window
+        .resolution
+        .set_physical_resolution(snapshot.window_width, snapshot.window_height);
 
     window.window_level = snapshot.window_level;
     cursor.hit_test = snapshot.cursor_hit_test;
@@ -895,10 +766,7 @@ fn maintain_attention_presentation(
     mut state: ResMut<PresentationState>,
     environment: Res<DesktopEnvironment>,
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
-    mut camera_query: Query<
-        (&Projection, &mut Transform),
-        With<crate::avatar::NeraMainCamera>,
-    >,
+    mut camera_query: Query<(&Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
     bone_query: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
 ) {
     if !state.is_attention() {
@@ -916,18 +784,13 @@ fn maintain_attention_presentation(
     let original_width = snapshot.window_width;
     let original_height = snapshot.window_height;
 
-    state.attention_enter_progress =
-        (
-            state.attention_enter_progress
-                + time.delta_secs() / ATTENTION_ENTER_SECONDS
-        )
-            .clamp(0.0, 1.0);
+    state.attention_enter_progress = (state.attention_enter_progress
+        + time.delta_secs() / ATTENTION_ENTER_SECONDS)
+        .clamp(0.0, 1.0);
 
     let enter_progress = state.attention_enter_progress;
 
-    let Ok((projection, mut camera_transform)) =
-        camera_query.single_mut()
-    else {
+    let Ok((projection, mut camera_transform)) = camera_query.single_mut() else {
         return;
     };
 
@@ -944,12 +807,9 @@ fn maintain_attention_presentation(
     // presentation. Animation loops therefore cannot create resize/zoom
     // oscillation.
     state.attention_locked_window_width =
-        state.attention_locked_window_width
-            .max(layout.window_width);
+        state.attention_locked_window_width.max(layout.window_width);
 
-    state.attention_peak_camera_z =
-        state.attention_peak_camera_z
-            .max(layout.camera_z);
+    state.attention_peak_camera_z = state.attention_peak_camera_z.max(layout.camera_z);
 
     let stable_width = state.attention_locked_window_width;
     let stable_camera_z = state.attention_peak_camera_z;
@@ -984,12 +844,9 @@ fn maintain_attention_presentation(
 ///
 /// Phase 5.55 does not force this across old systems yet; the Last-stage
 /// attention authority is enough for the foundation test.
-pub(crate) fn desktop_pet_active(
-    state: Res<PresentationState>,
-) -> bool {
+pub(crate) fn desktop_pet_active(state: Res<PresentationState>) -> bool {
     state.is_desktop_pet()
 }
-
 
 // -----------------------------------------------------------------------------
 // Pure state tests
@@ -1003,10 +860,7 @@ mod tests {
     fn presentation_starts_as_desktop_pet() {
         let state = PresentationState::default();
 
-        assert_eq!(
-            state.mode,
-            PresentationMode::DesktopPet
-        );
+        assert_eq!(state.mode, PresentationMode::DesktopPet);
         assert!(state.is_desktop_pet());
         assert!(!state.is_attention());
     }
@@ -1014,9 +868,7 @@ mod tests {
     #[test]
     fn attention_mode_is_distinct_from_desktop_pet() {
         let state = PresentationState {
-            mode: PresentationMode::Attention(
-                AttentionKind::Alarm,
-            ),
+            mode: PresentationMode::Attention(AttentionKind::Alarm),
             ..Default::default()
         };
 
@@ -1028,12 +880,8 @@ mod tests {
     fn attention_is_upper_body_portrait() {
         // Bounds are inclusive: 0.80 is the tightest framing that still keeps
         // the hips/waist in shot, so a tuned-to-the-edge value is valid.
-        assert!(
-            ATTENTION_UPPER_BODY_VIEW_FRACTION >= 0.80
-        );
-        assert!(
-            ATTENTION_UPPER_BODY_VIEW_FRACTION <= 0.95
-        );
+        assert!(ATTENTION_UPPER_BODY_VIEW_FRACTION >= 0.80);
+        assert!(ATTENTION_UPPER_BODY_VIEW_FRACTION <= 0.95);
     }
 
     #[test]
@@ -1041,15 +889,10 @@ mod tests {
         let fov = std::f32::consts::FRAC_PI_4;
         let fraction = 0.80;
 
-        let distance_for_one =
-            1.0 / (2.0 * fraction * (fov * 0.5).tan());
-        let distance_for_two =
-            2.0 / (2.0 * fraction * (fov * 0.5).tan());
+        let distance_for_one = 1.0 / (2.0 * fraction * (fov * 0.5).tan());
+        let distance_for_two = 2.0 / (2.0 * fraction * (fov * 0.5).tan());
 
-        assert!(
-            (distance_for_two / distance_for_one - 2.0).abs()
-                < 0.001
-        );
+        assert!((distance_for_two / distance_for_one - 2.0).abs() < 0.001);
     }
     #[test]
     fn attention_entry_eases_from_below_to_final_position() {
@@ -1063,10 +906,7 @@ mod tests {
         // Real raised-hand extent is measured from the animated skeleton;
         // this ratio is now only a safety margin.
         assert!(UPPER_BODY_TOP_MARGIN_RATIO >= 0.15);
-        assert!(
-            ATTENTION_UPPER_BODY_VIEW_FRACTION
-                <= 0.82
-        );
+        assert!(ATTENTION_UPPER_BODY_VIEW_FRACTION <= 0.82);
     }
 
     #[test]
@@ -1075,14 +915,11 @@ mod tests {
         let vertical_distance = 1.0_f32;
         let body_width = 1.8_f32;
 
-        let required_aspect =
-            body_width
-                / (
-                    2.0
-                        * vertical_distance
-                        * vertical_half_tan
-                        * ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION
-                );
+        let required_aspect = body_width
+            / (2.0
+                * vertical_distance
+                * vertical_half_tan
+                * ATTENTION_UPPER_BODY_HORIZONTAL_FRACTION);
 
         assert!(required_aspect > 1.0);
         assert!(ATTENTION_MAX_WINDOW_WIDTH_RATIO < 1.0);
@@ -1141,15 +978,13 @@ mod tests {
     /// swallow desktop clicks for the rest of the session.
     #[test]
     fn attention_handoff_drops_a_frozen_drag_gesture() {
-        use crate::interaction::{
-            BodyPart,
-            InteractionState,
-        };
+        use crate::interaction::{BodyPart, InteractionState};
         use std::time::Instant;
 
         let now = Instant::now();
 
         let mut interaction = DesktopPetInteraction {
+            momentum: Default::default(),
             state: InteractionState::Dragging,
             pressed_body_part: Some(BodyPart::Head),
             right_pressed_body_part: Some(BodyPart::Torso),
@@ -1177,11 +1012,7 @@ mod tests {
             ..Default::default()
         };
 
-        reset_pointer_state(
-            &mut interaction,
-            &mut hovered,
-            &mut head_pat,
-        );
+        reset_pointer_state(&mut interaction, &mut hovered, &mut head_pat);
 
         assert_eq!(interaction.state, InteractionState::None);
         assert!(interaction.pressed_body_part.is_none());
@@ -1235,5 +1066,4 @@ mod tests {
         assert_eq!(interaction.guard_center, Some(IVec2::new(60, 70)));
         assert_eq!(interaction.recent_unsnap_surface_y, Some(900));
     }
-
 }

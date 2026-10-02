@@ -34,6 +34,11 @@ pub(super) struct PreviewAvatarRoot;
 #[derive(Component)]
 pub(super) struct PreviewClipReady;
 
+#[derive(Component)]
+pub(super) struct PreviewExpressionSelection(
+    Option<(crate::expression::NeraExpressionPreset, f32)>,
+);
+
 struct PreviewScene {
     root: Entity,
     camera: Entity,
@@ -45,17 +50,62 @@ struct PreviewScene {
     warmup_frames: u8,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(super) struct PreviewRuntime {
+    character_path: String,
     active: HashMap<String, PreviewScene>,
     light: Option<Entity>,
     requested: HashSet<String>,
     changed_at: Option<std::time::Instant>,
 }
 
+impl Default for PreviewRuntime {
+    fn default() -> Self {
+        Self::for_character(crate::character::DEFAULT_CHARACTER.to_owned())
+    }
+}
+
 impl PreviewRuntime {
+    pub(super) fn for_character(character_path: String) -> Self {
+        Self {
+            character_path,
+            active: HashMap::new(),
+            light: None,
+            requested: HashSet::new(),
+            changed_at: None,
+        }
+    }
+
+    pub(super) fn set_character(
+        &mut self,
+        path: String,
+        commands: &mut Commands,
+        images: &mut Assets<Image>,
+    ) {
+        if self.character_path != path {
+            self.clear(commands, images);
+            self.character_path = path;
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.active.is_empty()
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn capture_expression_heads(
+        &self,
+        commands: &mut Commands,
+        directory: &std::path::Path,
+    ) {
+        use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+        for preset in ["default", "angry", "timid", "exhausted"] {
+            if let Some(scene) = self.active.get(&format!("face/{preset}")) {
+                commands
+                    .spawn(Screenshot::image(scene.image.clone()))
+                    .observe(save_to_disk(directory.join(format!("face-{preset}.png"))));
+            }
+        }
     }
 
     pub fn remove(&mut self, key: &str, commands: &mut Commands, images: &mut Assets<Image>) {
@@ -149,6 +199,7 @@ pub(super) fn prepare_preview_rigs(
     mut runtime: ResMut<PreviewRuntime>,
     initialized: Query<(), With<Initialized>>,
     children: Query<&Children>,
+    names: Query<&Name>,
     mut targets: Query<&mut AnimationTargetId>,
     assets: Res<AssetServer>,
     mut commands: Commands,
@@ -159,19 +210,38 @@ pub(super) fn prepare_preview_rigs(
         }
         let layer = RenderLayers::layer(scene.slot + 1);
         let mut stack = vec![scene.root];
+        let mut body_meshes = Vec::new();
+        let mut separate_face = false;
         while let Some(entity) = stack.pop() {
             if let Ok(mut target) = targets.get_mut(entity) {
                 *target = instance_target(scene.root, *target);
             }
             commands.entity(entity).insert(layer.clone());
+            if let Ok(name) = names.get(entity) {
+                separate_face |= name.as_str() == "Face";
+                if name.as_str() == "Body" {
+                    body_meshes.push(entity);
+                }
+            }
             if let Ok(descendants) = children.get(entity) {
                 stack.extend(descendants.iter());
             }
         }
+        // VRoid separates Face/Hair from Body; hide only the expression-card body.
+        if key.starts_with("face/") && separate_face {
+            for entity in body_meshes {
+                commands.entity(entity).insert(Visibility::Hidden);
+            }
+        }
         commands.entity(scene.root).insert(Visibility::Inherited);
+        let path = if key.starts_with("face/") || key.starts_with("model/") {
+            "animations/animasi_basic/idle.vrma".to_owned()
+        } else {
+            format!("animations/{key}")
+        };
         commands
             .entity(scene.clip)
-            .insert(VrmaHandle(assets.load(format!("animations/{key}"))));
+            .insert(VrmaHandle(assets.load(path)));
         scene.prepared = true;
     }
 }
@@ -215,13 +285,16 @@ pub(super) fn sync_visible_previews(
     assets: Res<AssetServer>,
     mut commands: Commands,
 ) {
-    let Ok(computed) = scroll.single() else {
+    let facial = state.tab == super::GalleryTab::Expressions;
+    let computed = scroll.single().ok();
+    if !facial && computed.is_none() {
         return;
-    };
-    let viewport_height = computed.size().y * computed.inverse_scale_factor();
+    }
+    let viewport_height = computed.map_or(0.0, |node| node.size().y * node.inverse_scale_factor());
     let first_visible_row = (state.scroll_y / super::ui::ROW_HEIGHT).floor().max(0.0) as usize;
-    let total_rows = (computed.content_size().y * computed.inverse_scale_factor()
-        / super::ui::ROW_HEIGHT)
+    let total_rows = (computed.map_or(0.0, |node| {
+        node.content_size().y * node.inverse_scale_factor()
+    }) / super::ui::ROW_HEIGHT)
         .ceil() as usize;
     // Overscan cards are inexpensive UI; don't load whole VRM worlds for them.
     let first_active_row = first_visible_row.min(total_rows);
@@ -234,7 +307,7 @@ pub(super) fn sync_visible_previews(
     let mut needed = HashSet::new();
     for (slot, _) in &slots {
         let row = slot.index / PREVIEW_COLUMNS;
-        if row >= first_active_row && row < last_active_row {
+        if facial || (row >= first_active_row && row < last_active_row) {
             needed.insert(slot.key.clone());
         }
     }
@@ -294,9 +367,10 @@ pub(super) fn sync_visible_previews(
 
         // Render layers isolate unit-scale rigs without offsetting their rest pose.
         let layer = RenderLayers::layer(index + 1);
+        let model_preview = slot.key.starts_with("model/");
         let image = images.add(Image::new_target_texture(
-            512,
-            420,
+            if model_preview { 384 } else { 512 },
+            if model_preview { 512 } else { 420 },
             TextureFormat::Rgba8Unorm,
             Some(TextureFormat::Rgba8UnormSrgb),
         ));
@@ -325,9 +399,19 @@ pub(super) fn sync_visible_previews(
             .spawn((
                 Name::new("Nera Gallery Preview Avatar"),
                 PreviewAvatarRoot,
-                VrmHandle(assets.load("vrm/nera_256.vrm")),
+                VrmHandle(
+                    assets.load(
+                        slot.key
+                            .strip_prefix("model/")
+                            .and_then(|index| index.parse::<usize>().ok())
+                            .and_then(|index| state.characters.models.get(index))
+                            .map(|model| model.path.clone())
+                            .unwrap_or_else(|| runtime.character_path.clone()),
+                    ),
+                ),
                 Transform::default(),
                 Visibility::Hidden,
+                crate::expression::face::FacePose(None),
                 layer,
             ))
             .with_children(|parent| {
@@ -354,9 +438,264 @@ pub(super) fn sync_visible_previews(
     }
 }
 
+pub(super) fn sync_expression_previews(
+    runtime: Res<PreviewRuntime>,
+    state: Res<ManagerState>,
+    maps: Query<(
+        Ref<ExpressionEntityMap>,
+        Option<&PreviewExpressionSelection>,
+    )>,
+    mut commands: Commands,
+) {
+    for (key, scene) in &runtime.active {
+        let face_preset = key
+            .strip_prefix("face/")
+            .and_then(crate::expression::NeraExpressionPreset::from_wire);
+        let manual = face_preset.and_then(|preset| {
+            crate::expression::preview_selection(preset, f32::from(state.intensity) / 100.0)
+        });
+        let automatic = if face_preset.is_none() {
+            crate::expression::basic::for_clip(key)
+        } else {
+            None
+        };
+        if face_preset.is_none() && automatic.is_none() {
+            continue;
+        }
+        let selection = manual.or(automatic);
+        let Ok((map, last)) = maps.get(scene.root) else {
+            continue;
+        };
+        if !map.is_changed() && last.is_some_and(|last| last.0 == selection) {
+            continue;
+        }
+        commands.entity(scene.root).insert((
+            crate::expression::face::FacePose(manual),
+            crate::expression::face::AutomaticFace::settled(automatic),
+            PreviewExpressionSelection(selection),
+        ));
+        let weights = selection.map_or_else(Vec::new, |(preset, intensity)| {
+            crate::expression::presets::preset_weights(
+                preset,
+                intensity,
+                map.0.keys().map(|name| name.0.as_str()),
+            )
+        });
+        commands.trigger(SetExpressions::from_iter(
+            scene.root,
+            weights
+                .iter()
+                .map(|(name, weight)| (name.as_str(), *weight)),
+        ));
+    }
+}
+
+pub(super) fn frame_expression_heads(
+    runtime: Res<PreviewRuntime>,
+    heads: Query<&HeadBoneEntity>,
+    globals: Query<&GlobalTransform>,
+    mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
+) {
+    for (key, scene) in &runtime.active {
+        if !key.starts_with("face/") {
+            continue;
+        }
+        let Some(head) = heads
+            .get(scene.root)
+            .ok()
+            .and_then(|head| globals.get(head.0).ok())
+        else {
+            continue;
+        };
+        if let Ok((mut transform, mut projection)) = cameras.get_mut(scene.camera) {
+            let center = head.translation() + Vec3::Y * 0.08;
+            *transform =
+                Transform::from_translation(center + Vec3::Z * 0.72).looking_at(center, Vec3::Y);
+            if let Projection::Perspective(perspective) = &mut *projection {
+                perspective.fov = 28.0_f32.to_radians();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn face_previews_push_only_on_selection_or_binding_changes_and_release_at_zero() {
+        #[derive(Resource, Default)]
+        struct Pushes(Vec<usize>);
+        let mut app = App::new();
+        app.insert_resource(ManagerState::for_test())
+            .init_resource::<PreviewRuntime>()
+            .init_resource::<Pushes>()
+            .add_systems(Update, sync_expression_previews)
+            .add_observer(|event: On<SetExpressions>, mut pushes: ResMut<Pushes>| {
+                pushes.0.push(event.weights.len());
+            });
+        let root = app
+            .world_mut()
+            .spawn(crate::expression::face::FacePose(None))
+            .id();
+        app.world_mut()
+            .resource_mut::<PreviewRuntime>()
+            .active
+            .insert(
+                "face/angry".into(),
+                PreviewScene {
+                    root,
+                    camera: Entity::PLACEHOLDER,
+                    clip: Entity::PLACEHOLDER,
+                    image: default(),
+                    slot: 0,
+                    prepared: true,
+                    started: true,
+                    warmup_frames: 0,
+                },
+            );
+        app.update();
+        assert!(app.world().resource::<Pushes>().0.is_empty());
+
+        let expression = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(root).insert(ExpressionEntityMap(
+            [(VrmExpression::from("angry"), expression)].into(),
+        ));
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0, vec![1]);
+        assert_eq!(
+            app.world()
+                .get::<crate::expression::face::FacePose>(root)
+                .unwrap()
+                .0,
+            Some((crate::expression::NeraExpressionPreset::Angry, 1.0))
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<Pushes>().0.len(), 1);
+
+        app.world_mut().resource_mut::<ManagerState>().intensity = 75;
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0.len(), 2);
+        let replacement = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .get_mut::<ExpressionEntityMap>(root)
+            .unwrap()
+            .0
+            .insert(VrmExpression::from("angry"), replacement);
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0.len(), 3);
+
+        app.world_mut().resource_mut::<ManagerState>().intensity = 0;
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0, vec![1, 1, 1, 0]);
+        assert!(
+            app.world()
+                .get::<crate::expression::face::FacePose>(root)
+                .unwrap()
+                .0
+                .is_none()
+        );
+        let automatic = app
+            .world()
+            .get::<crate::expression::face::AutomaticFace>(root)
+            .unwrap();
+        assert!(automatic.current.is_none() && automatic.previous.is_none());
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0.len(), 4);
+
+        app.world_mut().resource_mut::<ManagerState>().intensity = 100;
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0.len(), 5);
+        let scene = app
+            .world_mut()
+            .resource_mut::<PreviewRuntime>()
+            .active
+            .remove("face/angry")
+            .unwrap();
+        app.world_mut()
+            .resource_mut::<PreviewRuntime>()
+            .active
+            .insert("face/default".into(), scene);
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0, vec![1, 1, 1, 0, 1, 0]);
+        assert!(
+            app.world()
+                .get::<crate::expression::face::FacePose>(root)
+                .unwrap()
+                .0
+                .is_none()
+        );
+        app.update();
+        assert_eq!(app.world().resource::<Pushes>().0.len(), 6);
+    }
+
+    #[test]
+    fn character_change_releases_old_preview_assets_once() {
+        #[derive(Resource)]
+        struct NextCharacter(String);
+
+        fn change_character(
+            character: Res<NextCharacter>,
+            mut previews: ResMut<PreviewRuntime>,
+            mut images: ResMut<Assets<Image>>,
+            mut commands: Commands,
+        ) {
+            previews.set_character(character.0.clone(), &mut commands, &mut images);
+        }
+
+        let mut app = App::new();
+        app.init_resource::<PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .insert_resource(NextCharacter(crate::character::DEFAULT_CHARACTER.into()))
+            .add_systems(Update, change_character);
+        let root = app.world_mut().spawn_empty().id();
+        let clip = app.world_mut().spawn(ChildOf(root)).id();
+        let camera = app.world_mut().spawn_empty().id();
+        let light = app.world_mut().spawn_empty().id();
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        let image_id = image.id();
+        {
+            let mut previews = app.world_mut().resource_mut::<PreviewRuntime>();
+            previews.light = Some(light);
+            previews.requested.insert("idle.vrma".into());
+            previews.active.insert(
+                "idle.vrma".into(),
+                PreviewScene {
+                    root,
+                    camera,
+                    clip,
+                    image,
+                    slot: 0,
+                    prepared: true,
+                    started: true,
+                    warmup_frames: PREVIEW_PLAYBACK_WARMUP_FRAMES,
+                },
+            );
+        }
+
+        app.update();
+        assert!(
+            app.world().get_entity(root).is_ok(),
+            "unchanged selection keeps previews"
+        );
+        assert!(app.world().resource::<Assets<Image>>().contains(image_id));
+
+        app.world_mut().resource_mut::<NextCharacter>().0 = "characters://custom.vrm".into();
+        app.update();
+        for entity in [root, clip, camera, light] {
+            assert!(app.world().get_entity(entity).is_err());
+        }
+        assert!(!app.world().resource::<Assets<Image>>().contains(image_id));
+        let previews = app.world().resource::<PreviewRuntime>();
+        assert!(previews.active.is_empty());
+        assert!(previews.requested.is_empty());
+        assert_eq!(previews.character_path, "characters://custom.vrm");
+    }
 
     #[test]
     #[ignore = "renders the full gallery and measures process memory"]
@@ -855,7 +1194,7 @@ mod tests {
         // the final selection remains bound to its own graph node.
         app.world_mut()
             .write_message(crate::animation::PlayLibraryAnimation {
-                path: "animations/VRMA/Relax.vrma".into(),
+                path: "animations/animasi_basic/Relax.vrma".into(),
             });
         app.update();
         app.world_mut()

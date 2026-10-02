@@ -1,7 +1,7 @@
 //! Filesystem-backed animation catalogue. Keys are paths relative to `assets/animations`.
 //! The manager owns only its bookmark metadata; production clip registration is untouched.
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -21,22 +21,42 @@ pub(super) struct AnimationRegistry {
     bookmark_file: PathBuf,
     pub entries: Vec<AnimationEntry>,
     pub bookmarks: BTreeSet<String>,
+    origins: BTreeMap<String, String>,
 }
 
 impl AnimationRegistry {
     pub fn new(root: PathBuf, bookmark_file: PathBuf) -> Self {
-        let bookmarks = fs::read_to_string(&bookmark_file)
+        let mut bookmarks = BTreeSet::new();
+        let mut origins = BTreeMap::new();
+        for line in fs::read_to_string(&bookmark_file)
             .unwrap_or_default()
             .lines()
-            .map(str::to_owned)
-            .collect();
+        {
+            let (key, origin) = line.split_once('\t').unwrap_or((line, ""));
+            if valid_relative_key(key) {
+                bookmarks.insert(key.to_owned());
+                if valid_relative_key(origin) {
+                    origins.insert(key.to_owned(), origin.to_owned());
+                }
+            }
+        }
         let mut registry = Self {
             root,
             bookmark_file,
             entries: Vec::new(),
             bookmarks,
+            origins,
         };
         registry.refresh();
+        // Older versions stored only a bookmark flag. Move those files into the
+        // dedicated directory when the manager starts, retaining their origin.
+        for key in registry.bookmarks.clone() {
+            if !key.starts_with("Bookmarks/") {
+                if let Err(error) = registry.move_into_bookmarks(&key) {
+                    eprintln!("Could not migrate animation bookmark {key}: {error}");
+                }
+            }
+        }
         registry
     }
 
@@ -78,9 +98,14 @@ impl AnimationRegistry {
             })
             .collect();
         self.entries.sort_by(|a, b| {
-            a.display_name
-                .to_ascii_lowercase()
-                .cmp(&b.display_name.to_ascii_lowercase())
+            super::base::base_order(&a.key)
+                .unwrap_or(usize::MAX)
+                .cmp(&super::base::base_order(&b.key).unwrap_or(usize::MAX))
+                .then_with(|| {
+                    a.display_name
+                        .to_ascii_lowercase()
+                        .cmp(&b.display_name.to_ascii_lowercase())
+                })
                 .then(a.key.cmp(&b.key))
         });
         let known: BTreeSet<_> = self
@@ -88,7 +113,14 @@ impl AnimationRegistry {
             .iter()
             .map(|entry| entry.key.as_str())
             .collect();
-        self.bookmarks.retain(|key| known.contains(key.as_str()));
+        self.bookmarks
+            .retain(|key| known.contains(key.as_str()) && !super::base::is_base_animation(key));
+        for key in known {
+            if key.starts_with("Bookmarks/") {
+                self.bookmarks.insert(key.to_owned());
+            }
+        }
+        self.origins.retain(|key, _| self.bookmarks.contains(key));
     }
 
     pub fn path(&self, key: &str) -> Option<PathBuf> {
@@ -98,20 +130,120 @@ impl AnimationRegistry {
             .then(|| self.root.join(key))
     }
 
-    pub fn toggle_bookmark(&mut self, key: &str) -> io::Result<()> {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn toggle_bookmark(&mut self, key: &str) -> io::Result<String> {
+        ensure_editable(key)?;
         if self.path(key).is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "Animation not found",
             ));
         }
-        if !self.bookmarks.remove(key) {
-            self.bookmarks.insert(key.to_owned());
+        if self.bookmarks.contains(key) {
+            if !key.starts_with("Bookmarks/") {
+                self.bookmarks.remove(key);
+                self.save_bookmarks()?;
+                return Ok(key.to_owned());
+            }
+            self.move_out_of_bookmarks(key)
+        } else {
+            self.move_into_bookmarks(key)
         }
-        self.save_bookmarks()
+    }
+
+    fn move_into_bookmarks(&mut self, key: &str) -> io::Result<String> {
+        let source = self
+            .path(key)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Animation not found"))?;
+        if key.starts_with("Bookmarks/") {
+            return Ok(key.to_owned());
+        }
+        if is_runtime_animation(key) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "This animation is used by Nera and cannot be moved",
+            ));
+        }
+        let directory = self.root.join("Bookmarks");
+        fs::create_dir_all(&directory)?;
+        let filename = source.file_name().unwrap().to_string_lossy();
+        let stem = source.file_stem().unwrap().to_string_lossy();
+        let mut destination = directory.join(filename.as_ref());
+        let mut suffix = 2;
+        while file_name_exists_case_insensitive(
+            &directory,
+            destination.file_name().unwrap().to_str().unwrap(),
+        )? {
+            destination = directory.join(format!("{stem} ({suffix}).vrma"));
+            suffix += 1;
+        }
+        let new_key = format!(
+            "Bookmarks/{}",
+            destination.file_name().unwrap().to_string_lossy()
+        );
+        fs::rename(&source, &destination)?;
+        let old_bookmarks = self.bookmarks.clone();
+        let old_origins = self.origins.clone();
+        self.bookmarks.remove(key);
+        self.bookmarks.insert(new_key.clone());
+        self.origins.insert(new_key.clone(), key.to_owned());
+        if let Err(error) = self.save_bookmarks() {
+            self.bookmarks = old_bookmarks;
+            self.origins = old_origins;
+            let _ = fs::rename(&destination, &source);
+            return Err(error);
+        }
+        self.refresh();
+        Ok(new_key)
+    }
+
+    fn move_out_of_bookmarks(&mut self, key: &str) -> io::Result<String> {
+        let source = self
+            .path(key)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Animation not found"))?;
+        let origin = self
+            .origins
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| key.trim_start_matches("Bookmarks/").to_owned());
+        if !valid_relative_key(&origin) || origin.starts_with("Bookmarks/") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid original animation path",
+            ));
+        }
+        let destination = self.root.join(&origin);
+        let directory = destination.parent().unwrap();
+        fs::create_dir_all(directory)?;
+        if file_name_exists_case_insensitive(
+            directory,
+            destination.file_name().unwrap().to_str().unwrap(),
+        )? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Original animation filename is already in use",
+            ));
+        }
+        fs::rename(&source, &destination)?;
+        let old_bookmarks = self.bookmarks.clone();
+        let old_origins = self.origins.clone();
+        self.bookmarks.remove(key);
+        self.origins.remove(key);
+        if let Err(error) = self.save_bookmarks() {
+            self.bookmarks = old_bookmarks;
+            self.origins = old_origins;
+            let _ = fs::rename(&destination, &source);
+            return Err(error);
+        }
+        self.refresh();
+        Ok(origin)
     }
 
     pub fn rename(&mut self, key: &str, proposed: &str) -> io::Result<String> {
+        ensure_editable(key)?;
         let old = self
             .path(key)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Animation not found"))?;
@@ -155,6 +287,14 @@ impl AnimationRegistry {
             .replace('\\', "/");
         if self.bookmarks.remove(key) {
             self.bookmarks.insert(new_key.clone());
+            if let Some(origin) = self.origins.remove(key) {
+                let original_parent = Path::new(&origin).parent().unwrap_or(Path::new(""));
+                let updated_origin = original_parent
+                    .join(&name)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                self.origins.insert(new_key.clone(), updated_origin);
+            }
             self.save_bookmarks()?;
         }
         self.refresh();
@@ -162,11 +302,13 @@ impl AnimationRegistry {
     }
 
     pub fn delete(&mut self, key: &str) -> io::Result<()> {
+        ensure_editable(key)?;
         let path = self
             .path(key)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Animation not found"))?;
         fs::remove_file(path)?;
         self.bookmarks.remove(key);
+        self.origins.remove(key);
         self.save_bookmarks()?;
         self.refresh();
         Ok(())
@@ -224,10 +366,53 @@ impl AnimationRegistry {
         let temporary = self.bookmark_file.with_extension("tmp");
         let mut output = fs::File::create(&temporary)?;
         for key in &self.bookmarks {
-            writeln!(output, "{key}")?;
+            if let Some(origin) = self.origins.get(key) {
+                writeln!(output, "{key}\t{origin}")?;
+            } else {
+                writeln!(output, "{key}")?;
+            }
         }
         output.sync_all()?;
         fs::rename(temporary, &self.bookmark_file)
+    }
+}
+
+fn valid_relative_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part
+                    .chars()
+                    .any(|c| c.is_control() || "<>:\"\\|?*".contains(c))
+        })
+        && key.to_ascii_lowercase().ends_with(".vrma")
+}
+
+fn file_name_exists_case_insensitive(directory: &Path, filename: &str) -> io::Result<bool> {
+    Ok(fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(filename)
+        }))
+}
+
+fn is_runtime_animation(key: &str) -> bool {
+    super::base::is_base_animation(key)
+}
+
+fn ensure_editable(key: &str) -> io::Result<()> {
+    if is_runtime_animation(key) {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Animasi Dasar belongs to Nera and cannot be renamed, deleted, or moved",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -307,14 +492,66 @@ mod tests {
         fs::write(root.join("assets/Idle.vrma"), b"vrma").unwrap();
         fs::write(root.join("assets/Other.vrma"), b"vrma").unwrap();
         let mut registry = AnimationRegistry::new(root.join("assets"), root.join("bookmarks.txt"));
-        registry.toggle_bookmark("Idle.vrma").unwrap();
-        assert!(registry.rename("Idle.vrma", "other").is_err());
-        let key = registry.rename("Idle.vrma", "New_Idle").unwrap();
-        assert_eq!(key, "New_Idle.vrma");
+        let bookmarked = registry.toggle_bookmark("Idle.vrma").unwrap();
+        assert_eq!(bookmarked, "Bookmarks/Idle.vrma");
+        assert!(registry.rename(&bookmarked, "other").is_err());
+        let key = registry.rename(&bookmarked, "New_Idle").unwrap();
+        assert_eq!(key, "Bookmarks/New_Idle.vrma");
         assert!(registry.bookmarks.contains(&key));
+        assert!(root.join("assets/Bookmarks/New_Idle.vrma").exists());
+        let restored = registry.toggle_bookmark(&key).unwrap();
+        assert_eq!(restored, "New_Idle.vrma");
         assert!(root.join("assets/New_Idle.vrma").exists());
+        let key = registry.toggle_bookmark(&restored).unwrap();
         registry.delete(&key).unwrap();
         assert!(!registry.bookmarks.contains(&key));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_bookmarks_move_to_folder_and_restore_original_paths() {
+        let root =
+            std::env::temp_dir().join(format!("nera-bookmark-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("assets/Mixamo")).unwrap();
+        fs::write(root.join("assets/Mixamo/Walk.vrma"), b"vrma").unwrap();
+        fs::write(root.join("bookmarks.txt"), b"Mixamo/Walk.vrma\n").unwrap();
+        let mut registry = AnimationRegistry::new(root.join("assets"), root.join("bookmarks.txt"));
+        assert!(root.join("assets/Bookmarks/Walk.vrma").exists());
+        assert!(!root.join("assets/Mixamo/Walk.vrma").exists());
+        assert!(registry.bookmarks.contains("Bookmarks/Walk.vrma"));
+        assert_eq!(
+            registry.toggle_bookmark("Bookmarks/Walk.vrma").unwrap(),
+            "Mixamo/Walk.vrma"
+        );
+        assert!(root.join("assets/Mixamo/Walk.vrma").exists());
+        assert!(registry.bookmarks.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bookmark_collision_gets_distinct_name_and_restores_source() {
+        let root =
+            std::env::temp_dir().join(format!("nera-bookmark-collision-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("assets/A")).unwrap();
+        fs::create_dir_all(root.join("assets/B")).unwrap();
+        fs::write(root.join("assets/A/Walk.vrma"), b"a").unwrap();
+        fs::write(root.join("assets/B/Walk.vrma"), b"b").unwrap();
+        let mut registry = AnimationRegistry::new(root.join("assets"), root.join("bookmarks.txt"));
+        assert_eq!(
+            registry.toggle_bookmark("A/Walk.vrma").unwrap(),
+            "Bookmarks/Walk.vrma"
+        );
+        let second = registry.toggle_bookmark("B/Walk.vrma").unwrap();
+        assert_eq!(second, "Bookmarks/Walk (2).vrma");
+        let mut registry = AnimationRegistry::new(root.join("assets"), root.join("bookmarks.txt"));
+        fs::write(root.join("assets/B/Walk.vrma"), b"conflict").unwrap();
+        assert!(registry.toggle_bookmark(&second).is_err());
+        assert!(root.join("assets/Bookmarks/Walk (2).vrma").exists());
+        fs::remove_file(root.join("assets/B/Walk.vrma")).unwrap();
+        assert_eq!(registry.toggle_bookmark(&second).unwrap(), "B/Walk.vrma");
+        assert_eq!(fs::read(root.join("assets/B/Walk.vrma")).unwrap(), b"b");
         fs::remove_dir_all(root).unwrap();
     }
 }

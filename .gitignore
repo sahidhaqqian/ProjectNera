@@ -24,5 +24,7 @@ tools/fbx2vrma-converter/
 # Local Mixamo VRMA library
 assets/animations/Mixamo-VRMA/
 
-# Local animation assets
-assets/animations/
+# Local animation library; ship the protected animations used by Nera.
+/assets/animations/*
+!/assets/animations/animasi_basic/
+!/assets/animations/animasi_basic/**
