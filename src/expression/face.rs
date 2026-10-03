@@ -19,6 +19,22 @@ pub(crate) struct AutomaticFace {
     pub(crate) previous: Option<(NeraExpressionPreset, f32)>,
     pub(crate) current: Option<(NeraExpressionPreset, f32)>,
     blend: f32,
+    previous_eyelids: Option<f32>,
+    current_eyelids: Option<f32>,
+}
+
+/// Rig capability derived from the existing morph cache, not a facial owner.
+#[derive(Component)]
+pub(super) struct NamedTimidEyelids;
+
+fn headpat_eyelids(phase: f32) -> f32 {
+    let ease = |t: f32| {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    // A relaxed smile-eye pose, gently closing and opening before the body
+    // finishes. Full blink plus full Joy eyelids previously double-deformed it.
+    0.55 * ease(phase / 0.18) * ease((1.0 - phase) / 0.24)
 }
 
 impl AutomaticFace {
@@ -27,40 +43,75 @@ impl AutomaticFace {
             previous: selection,
             current: selection,
             blend: 1.0,
+            previous_eyelids: None,
+            current_eyelids: None,
         }
     }
+    #[cfg(test)]
     pub(crate) fn advance(&mut self, selection: Option<(NeraExpressionPreset, f32)>, dt: f32) {
-        if selection != self.current {
+        self.advance_headpat(selection, dt, None);
+    }
+    pub(crate) fn advance_headpat(
+        &mut self,
+        selection: Option<(NeraExpressionPreset, f32)>,
+        dt: f32,
+        phase: Option<f32>,
+    ) {
+        let eyelids = phase.map(headpat_eyelids);
+        if selection != self.current || eyelids.is_some() != self.current_eyelids.is_some() {
             self.previous = self.current;
+            self.previous_eyelids = self.current_eyelids;
             self.current = selection;
             self.blend = 0.0;
         }
+        self.current_eyelids = eyelids;
         self.blend = (self.blend + dt.max(0.0) / 0.18).min(1.0);
         if self.blend >= 1.0 {
             self.previous = self.current;
+            self.previous_eyelids = self.current_eyelids;
         }
     }
-    fn selections(&self) -> impl Iterator<Item = (NeraExpressionPreset, f32)> {
+    fn contributions(&self) -> impl Iterator<Item = (NeraExpressionPreset, f32, Option<f32>)> {
         [
-            (self.previous, 1.0 - self.blend),
-            (self.current, self.blend),
+            (self.previous, 1.0 - self.blend, self.previous_eyelids),
+            (self.current, self.blend, self.current_eyelids),
         ]
         .into_iter()
-        .filter_map(|(selection, weight)| {
-            selection.map(|(preset, intensity)| (preset, intensity * weight))
+        .filter_map(|(selection, weight, eyelids)| {
+            selection.map(|(preset, intensity)| (preset, intensity * weight, eyelids))
         })
     }
+    #[cfg(test)]
     pub(crate) fn weights<'a>(
         &self,
         available: impl Iterator<Item = &'a str>,
     ) -> Vec<(String, f32)> {
+        self.weights_for_rig(available, false)
+    }
+    pub(crate) fn weights_for_rig<'a>(
+        &self,
+        available: impl Iterator<Item = &'a str>,
+        named_eyelids: bool,
+    ) -> Vec<(String, f32)> {
         let available: Vec<_> = available.collect();
         let mut weights = std::collections::BTreeMap::<String, f32>::new();
-        for (preset, intensity) in self.selections() {
+        for (preset, intensity, eyelids) in self.contributions() {
             for (name, value) in
                 super::presets::preset_weights(preset, intensity, available.iter().copied())
             {
-                *weights.entry(name).or_default() += value;
+                let value = if preset == NeraExpressionPreset::Timid
+                    && name.eq_ignore_ascii_case("blink")
+                    && let Some(closure) = eyelids
+                {
+                    // Named rigs use their Joy eyelid morph only; fallback rigs
+                    // get this same eased amount through their standard blink.
+                    if named_eyelids { 0.0 } else { value * closure }
+                } else {
+                    value
+                };
+                if value > 0.0 {
+                    *weights.entry(name).or_default() += value;
+                }
             }
         }
         weights
@@ -243,7 +294,10 @@ fn cache_facial_morphs(
                     || name.starts_with("Fcl_MTH_")
             })
             .map(|(index, name)| (name.clone(), index))
-            .collect();
+            .collect::<Vec<_>>();
+        if targets.iter().any(|(name, _)| name == "Fcl_EYE_Joy") {
+            commands.entity(root).insert(NamedTimidEyelids);
+        }
         commands.entity(entity).insert(FacialMorphs {
             root,
             targets,
@@ -370,9 +424,12 @@ fn apply_facial_morphs(
             continue;
         }
         let selections: Vec<_> = if detailed {
-            facial.unwrap().selections().collect()
+            facial.unwrap().contributions().collect()
         } else {
-            selection.into_iter().collect()
+            selection
+                .into_iter()
+                .map(|(preset, intensity)| (preset, intensity, None))
+                .collect()
         };
         let targets = face.targets.clone();
         // Automatic basic faces replace aggregate emotions but retain natural blinks.
@@ -392,13 +449,29 @@ fn apply_facial_morphs(
         }
         let mut applied = Vec::new();
         let mut values = std::collections::BTreeMap::<&str, f32>::new();
-        for (preset, intensity) in selections {
+        let natural_blink = targets
+            .iter()
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "Fcl_EYE_Close" | "Fcl_EYE_Close_L" | "Fcl_EYE_Close_R"
+                )
+            })
+            .filter_map(|(_, index)| weights.weights().get(*index).copied())
+            .fold(0.0_f32, f32::max)
+            .clamp(0.0, 1.0);
+        for (preset, intensity, eyelids) in selections {
             let intensity = if intensity.is_finite() {
                 intensity.clamp(0.0, 1.0)
             } else {
                 0.0
             };
             for (name, value) in recipe(preset) {
+                let value = if preset == NeraExpressionPreset::Timid && *name == "Fcl_EYE_Joy" {
+                    eyelids.map_or(*value, |closure| value * closure * (1.0 - natural_blink))
+                } else {
+                    *value
+                };
                 *values.entry(name).or_default() += value * intensity;
             }
         }
@@ -425,6 +498,64 @@ fn apply_facial_morphs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn headpat_eyes_ease_in_and_out_without_stacking_full_blink_and_joy() {
+        let selection = Some((NeraExpressionPreset::Timid, 1.0));
+        let mut face = AutomaticFace::default();
+        face.advance_headpat(selection, 0.18, Some(0.0));
+        assert_eq!(face.weights(["blink"].into_iter()), vec![]);
+        face.advance_headpat(selection, 0.1, Some(0.5));
+        assert_eq!(
+            face.weights(["blink"].into_iter()),
+            vec![("blink".into(), 0.55)]
+        );
+        assert_eq!(
+            face.weights_for_rig(["happy", "blink"].into_iter(), true),
+            vec![("happy".into(), 0.7)]
+        );
+        face.advance_headpat(selection, 0.1, Some(0.99));
+        let before_exit = face.weights(["blink"].into_iter())[0].1;
+        assert!(before_exit < 0.01);
+        face.advance(Some((NeraExpressionPreset::Default, 1.0)), 0.09);
+        assert!(face.weights(["blink"].into_iter())[0].1 < before_exit);
+        face.advance(Some((NeraExpressionPreset::Default, 1.0)), 0.09);
+        assert!(face.weights(["blink"].into_iter()).is_empty());
+        for i in 0..=100 {
+            let closure = headpat_eyelids(i as f32 / 100.0);
+            assert!((0.0..=0.55).contains(&closure));
+        }
+    }
+
+    #[test]
+    fn headpat_named_eyelids_allow_a_natural_blink_and_manual_preview_still_wins() {
+        let mut app = App::new();
+        app.add_systems(Update, apply_facial_morphs);
+        let mut automatic = AutomaticFace::default();
+        automatic.advance_headpat(Some((NeraExpressionPreset::Timid, 1.0)), 0.18, Some(0.5));
+        let root = app.world_mut().spawn((FacePose(None), automatic)).id();
+        let mesh = app
+            .world_mut()
+            .spawn((
+                MorphWeights::new(vec![0.9, 0.0], None).unwrap(),
+                FacialMorphs {
+                    root,
+                    targets: vec![("Fcl_EYE_Close".into(), 0), ("Fcl_EYE_Joy".into(), 1)],
+                    applied: Vec::new(),
+                },
+            ))
+            .id();
+        app.update();
+        let weights = app.world().get::<MorphWeights>(mesh).unwrap().weights();
+        assert_eq!(weights[0], 0.9);
+        assert!((weights[1] - 0.055).abs() < 0.0001);
+        app.world_mut().get_mut::<FacePose>(root).unwrap().0 =
+            Some((NeraExpressionPreset::Timid, 1.0));
+        app.update();
+        assert_eq!(
+            app.world().get::<MorphWeights>(mesh).unwrap().weights(),
+            &[0.0, 1.0]
+        );
+    }
     #[test]
     fn automatic_faces_fade_and_release_ownership_for_unmapped_clips() {
         let mut face = AutomaticFace::default();

@@ -122,6 +122,24 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    /// Read the existing action clock; feedback must not own a second VRMA timer.
+    pub(crate) fn head_stroke_progress(&self, state: &NeraAnimationState) -> Option<f32> {
+        if state.visual_state() != VisualState::HeadStroke {
+            return None;
+        }
+        let duration = self.head_stroke?.duration.as_secs_f32();
+        if duration <= 0.0 {
+            return None;
+        }
+        let remaining = state
+            .active_actions
+            .iter()
+            .find(|active| active.action == super::TemporaryAction::HeadStroke)?
+            .remaining?
+            .as_secs_f32();
+        Some((1.0 - remaining / duration).clamp(0.0, 1.0))
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn head_stroke_playing(&self, playback: &NeraAnimationPlayback) -> bool {
         self.head_stroke
@@ -905,6 +923,38 @@ mod cloud_sleep_tests {
         assert_eq!(clip.unwrap().entity, headpat.entity);
         assert_eq!(repeat, RepeatAnimation::Count(1));
         assert_eq!(label, "ShakeHeadNo1");
+    }
+
+    #[test]
+    fn headpat_feedback_phase_reads_the_clip_clock_and_releases_on_interruption() {
+        for seconds in [2, 4] {
+            let mut world = World::new();
+            let clip = ClipSlot {
+                entity: world.spawn_empty().id(),
+                duration: Duration::from_secs(seconds),
+            };
+            let clips = NeraAnimationClips {
+                head_stroke: Some(clip),
+                ..default()
+            };
+            let mut state = NeraAnimationState::default();
+            assert_eq!(clips.head_stroke_progress(&state), None);
+            state.request_one_shot(TemporaryAction::HeadStroke, clip.duration);
+            assert_eq!(clips.head_stroke_progress(&state), Some(0.0));
+            state.advance(clip.duration / 4);
+            assert_eq!(clips.head_stroke_progress(&state), Some(0.25));
+            state.request_one_shot(TemporaryAction::HeadStroke, clip.duration);
+            assert_eq!(clips.head_stroke_progress(&state), Some(0.0));
+            state.set_physics_falling(true);
+            assert_eq!(clips.head_stroke_progress(&state), None);
+            state.set_physics_falling(false);
+            state.advance(clip.duration);
+            assert_eq!(clips.head_stroke_progress(&state), None);
+            assert_eq!(
+                NeraAnimationClips::default().head_stroke_progress(&state),
+                None
+            );
+        }
     }
 
     #[test]

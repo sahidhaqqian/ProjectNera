@@ -380,7 +380,14 @@ fn drive_nera_expressions(
     mut state: ResMut<NeraExpressionState>,
     mut preview: ResMut<ExpressionPreviewOverride>,
     mut requests: MessageReader<ExpressionPreviewRequest>,
-    vrms: Query<(Entity, Ref<ExpressionEntityMap>), With<crate::avatar::NeraAvatar>>,
+    vrms: Query<
+        (
+            Entity,
+            Ref<ExpressionEntityMap>,
+            Has<face::NamedTimidEyelids>,
+        ),
+        With<crate::avatar::NeraAvatar>,
+    >,
     mut commands: Commands,
 ) {
     for request in requests.read() {
@@ -415,14 +422,20 @@ fn drive_nera_expressions(
     } else {
         basic::for_visual(visual, path)
     };
-    automatic.advance(selection, time.delta_secs());
+    automatic.advance_headpat(
+        selection,
+        time.delta_secs(),
+        clips
+            .as_ref()
+            .and_then(|clips| clips.head_stroke_progress(&animation)),
+    );
     let target = expression_for_visual(visual);
     state.advance(target, time.delta());
 
     // `iter().next()` rather than `single()`: while the VRM is still loading
     // there is no expression map yet, and `single()` would log an error every
     // frame. `bevy_vrm1` also warns if the event targets an uninitialized VRM.
-    let Some((vrm_entity, map)) = vrms.iter().next() else {
+    let Some((vrm_entity, map, named_eyelids)) = vrms.iter().next() else {
         // A later VRM may be a freshly spawned entity. Forget which entity
         // received the previous override so its current face is re-applied.
         state.bound_entity = None;
@@ -440,7 +453,7 @@ fn drive_nera_expressions(
             preset_weights(preset, intensity, map.0.keys().map(|name| name.0.as_str()))
         }
         None if automatic.current.is_some() || automatic.previous.is_some() => {
-            automatic.weights(map.0.keys().map(|name| name.0.as_str()))
+            automatic.weights_for_rig(map.0.keys().map(|name| name.0.as_str()), named_eyelids)
         }
         None => state
             .weights()

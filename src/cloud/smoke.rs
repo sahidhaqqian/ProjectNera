@@ -458,7 +458,10 @@ fn run(world: &mut World) {
                 face.current,
                 Some((crate::expression::NeraExpressionPreset::Timid, 1.0))
             );
-            assert_eq!(count, 3, "headpat must emit its three hearts");
+            assert_eq!(
+                count, 1,
+                "headpat begins with one heart; later pulses alternate"
+            );
             assert!(world.resource::<CloudRuntime>().is_riding());
             screenshot(world, "headpat-ride.png");
             eprintln!(

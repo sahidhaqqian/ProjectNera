@@ -238,8 +238,15 @@ crossfades the outgoing and incoming detailed recipes over 180 ms, replacing
 aggregate facial emotions but preserving natural blink. Gallery clips use the
 same table; unknown custom clips keep their own facial animation. Headpat loads
 `animations/animasi_basic/ShakeHeadNo1.vrma` through the existing controller.
-Headpat selects Timid at 100% and emits three short-lived `PetFxKind::Heart`
-particles plus the existing HeadPat SFX through the semantic feedback bridge.
+Headpat retains the Timid selection and existing HeadPat SFX. Its automatic
+eyelids ease into a partial smile-eye pose and reopen before ShakeHeadNo1 ends,
+using read-only progress from the animation owner's actual clip/action clock.
+Named eyelid rigs omit the standard blink override for this profile, preventing
+full Close and Joy morphs from stacking. Fallback rigs use the same eased amount
+through their available blink; natural blinks and manual face previews retain
+priority. Outgoing profile values participate in the existing facial crossfade.
+Four short-lived `PetFxKind::Heart` particles appear one at a time, alternating
+left/right across the clip, through the existing semantic feedback bridge.
 Blush remains an embarrassed idle clip.
 A manual preview takes precedence and
 survives gallery animation playback; only a release action or closing its owner
@@ -1031,9 +1038,14 @@ Cooldowns are fixed-size arrays; DESPAWN playback and a five-second safety expir
 bound voice entities. Audio features/dependencies are unchanged.
 
 Particles are unlit, shadow-free shared meshes with desktop-space motion, not
-emitters or a general simulation. Three headpat hearts, four landing/cloud
-puffs, one anger mark, or one Z are debounced at 250 ms, share a hard 32-entity
-budget, shrink during 0.75-1.8 second real-time lifetimes, and despawn on expiry,
+emitters or a general simulation. FxCooldown holds a single bounded headpat
+sequence and reads the existing animation progress, without a separate reaction
+timer. It schedules four alternating heart pulses, drops missed pulses after a
+long frame instead of producing a catch-up burst, and cancels on interruption.
+Hearts follow a frame-rate-independent outward/upward arc with a slight tilt
+and smooth appearance/disappearance over 850 ms. Other effects retain their
+existing drift and lifetimes. Four landing/cloud puffs, one anger mark, or one Z
+are debounced at 250 ms and all effects share a hard 32-entity budget. They despawn on expiry,
 hide, Attention, or character replacement. No filesystem polling or per-frame
 asset loading is added. Future mood callers can emit `CloudCommand`, `PetSfx`,
 and `PetFx` without implementing mood logic here. See

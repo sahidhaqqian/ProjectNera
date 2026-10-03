@@ -49,7 +49,10 @@ fn interaction_feedback(
     let visual = animation.visual_state();
     let headpat = pats.read().count() > 0;
     if presentation.is_desktop_pet() {
-        if headpat && cloud.mode() != Some(crate::cloud::CloudMode::Rest) {
+        if headpat
+            && visual == VisualState::HeadStroke
+            && cloud.mode() != Some(crate::cloud::CloudMode::Rest)
+        {
             sfx.write(PetSfx(PetSfxKind::HeadPat));
             fx.write(PetFx {
                 kind: PetFxKind::Heart,
@@ -129,6 +132,12 @@ mod tests {
     #[test]
     fn headpat_burst_is_consumed_once_not_replayed_on_subsequent_updates() {
         let mut app = app();
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .request_action_for_test(
+                crate::animation::TemporaryAction::HeadStroke,
+                std::time::Duration::from_secs(2),
+            );
         for _ in 0..100 {
             app.world_mut().write_message(NeraHeadPatted {
                 pointer: crate::interaction::NeraPointerPosition {
@@ -152,6 +161,28 @@ mod tests {
             .collect();
         assert_eq!(sounds.len(), 1);
         assert_eq!(sounds[0].0, PetSfxKind::HeadPat);
+        app.update();
+        assert!(app.world().resource::<Messages<PetFx>>().is_empty());
+        assert!(app.world().resource::<Messages<PetSfx>>().is_empty());
+    }
+    #[test]
+    fn an_overridden_headpat_does_not_start_hearts_or_sound() {
+        let mut app = app();
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .request_action_for_test(
+                crate::animation::TemporaryAction::HeadStroke,
+                std::time::Duration::from_secs(2),
+            );
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .set_physics_falling(true);
+        app.world_mut().write_message(NeraHeadPatted {
+            pointer: crate::interaction::NeraPointerPosition {
+                screen: IVec2::ZERO,
+                local: Vec2::ZERO,
+            },
+        });
         app.update();
         assert!(app.world().resource::<Messages<PetFx>>().is_empty());
         assert!(app.world().resource::<Messages<PetSfx>>().is_empty());
