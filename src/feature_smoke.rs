@@ -16,7 +16,9 @@ struct Smoke {
 }
 
 pub(crate) fn install(app: &mut App) {
-    if std::env::args().any(|arg| arg == "--chibi-smoke") {
+    if std::env::args().any(|arg| arg == "--touch-smoke") {
+        crate::animation::touch::smoke::install(app);
+    } else if std::env::args().any(|arg| arg == "--chibi-smoke") {
         crate::avatar::body_mode::install_smoke(app);
     } else if std::env::args().any(|arg| arg == "--cloud-smoke") {
         crate::cloud::install_smoke(app);
@@ -372,12 +374,12 @@ fn run(world: &mut World) {
             world.resource_mut::<Smoke>().stage = 4;
         }
         4 if elapsed > 17.45 => {
-            assert_eq!(
+            assert!(matches!(
                 world
                     .resource::<crate::animation::NeraAnimationState>()
                     .visual_state(),
-                crate::animation::VisualState::LimbReaction(BodyPart::LeftHand)
-            );
+                crate::animation::VisualState::TouchReaction(_)
+            ));
             let window = world
                 .query_filtered::<Entity, With<PrimaryWindow>>()
                 .single(world)

@@ -20,6 +20,7 @@ mod limbs;
 mod playback;
 mod state;
 mod systems;
+pub(crate) mod touch;
 mod walking_loop;
 
 pub(crate) use library::{LibraryAnimationError, LibraryPlayback, PlayLibraryAnimation};
@@ -37,10 +38,20 @@ pub(crate) fn reset_for_character_change(world: &mut World) {
     world.insert_resource(NeraAnimationPlayback::default());
     world.insert_resource(library::LibraryPlayback::default());
     world.insert_resource(walking_loop::WalkingCycle::default());
+    world.insert_resource(touch::TouchReactionRuntime::default());
+    if let Some(mut accepted) = world.get_resource_mut::<Messages<touch::TouchReactionAccepted>>() {
+        accepted.clear();
+    }
+    touch::seated::clear(world);
     world
         .resource_mut::<NeraAnimationState>()
         .active_actions
-        .retain(|active| !matches!(active.action, TemporaryAction::LibraryAnimation(_)));
+        .retain(|active| {
+            !matches!(
+                active.action,
+                TemporaryAction::LibraryAnimation(_) | TemporaryAction::TouchReaction(_)
+            )
+        });
 }
 
 pub(crate) fn character_animation_ready(world: &World) -> bool {
@@ -55,13 +66,12 @@ pub(crate) fn character_animation_ready(world: &World) -> bool {
 
 #[cfg(test)]
 pub(crate) fn head_stroke_test_clips(world: &mut World) -> NeraAnimationClips {
-    NeraAnimationClips {
-        head_stroke: Some(playback::ClipSlot {
-            entity: world.spawn_empty().id(),
-            duration: Duration::from_secs(1),
-        }),
-        ..default()
-    }
+    let mut clips = touch_test_clips(world);
+    clips.head_stroke = Some(playback::ClipSlot {
+        entity: world.spawn_empty().id(),
+        duration: Duration::from_secs(1),
+    });
+    clips
 }
 
 #[cfg(test)]
@@ -124,7 +134,10 @@ pub(crate) fn install_library_test_systems(app: &mut App) {
 impl Plugin for NeraAnimationPlugin {
     fn build(&self, app: &mut App) {
         limbs::install(app);
+        touch::seated::install(app);
         app.init_resource::<NeraAnimationState>()
+            .init_resource::<touch::TouchReactionRuntime>()
+            .add_message::<touch::TouchReactionAccepted>()
             .init_resource::<NeraAnimationClips>()
             .init_resource::<NeraAnimationPlayback>()
             .init_resource::<AlarmAnimationRuntime>()

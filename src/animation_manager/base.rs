@@ -110,6 +110,38 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
         key: "animasi_basic/161_Waving.vrma",
         label: "Greeting / alarm wave",
     },
+    BaseAnimation {
+        key: "animasi_basic/wave1.vrma",
+        label: "Hand touch: wave 1",
+    },
+    BaseAnimation {
+        key: "animasi_basic/wave2.vrma",
+        label: "Hand touch: wave 2",
+    },
+    BaseAnimation {
+        key: "animasi_basic/salute.vrma",
+        label: "Hand touch: salute",
+    },
+    BaseAnimation {
+        key: "animasi_basic/thankful.vrma",
+        label: "Hand touch: thankful",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Dismissive Gesture.vrma",
+        label: "Hand touch: dismissive gesture",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Shrugging.vrma",
+        label: "Hand touch: shrugging",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Arm Stretching.vrma",
+        label: "Arm touch: stretching",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Shoulder Rubbing.vrma",
+        label: "Arm touch: shoulder rubbing",
+    },
 ];
 
 pub(super) fn is_base_animation(key: &str) -> bool {
@@ -173,13 +205,57 @@ mod tests {
 
     #[test]
     fn base_keys_are_unique() {
-        assert_eq!(BASE_ANIMATIONS.len(), 25);
+        assert_eq!(BASE_ANIMATIONS.len(), 33);
         for (index, entry) in BASE_ANIMATIONS.iter().enumerate() {
             assert_eq!(base_order(entry.key), Some(index));
             assert!(!entry.label.is_empty());
         }
         assert!(!is_base_animation("Imported/idle.vrma"));
         assert!(!is_base_animation("animasi_basic/Sitting_Exit.vrma"));
+    }
+
+    #[test]
+    fn touch_runtime_copies_do_not_claim_or_move_the_users_bookmarks() {
+        let directory = TestDirectory::new();
+        let copies = [
+            ("wave1.vrma", "Wave.vrma"),
+            ("wave2.vrma", "Wave2.vrma"),
+            ("salute.vrma", "Salute.vrma"),
+            ("thankful.vrma", "156_Thankful.vrma"),
+            ("Dismissive Gesture.vrma", "Dismissing_Gesture.vrma"),
+            ("Shrugging.vrma", "145_Shrugging.vrma"),
+            ("Arm Stretching.vrma", "Arm_Stretching.vrma"),
+            ("Shoulder Rubbing.vrma", "Shoulder_Rubbing.vrma"),
+        ];
+        let metadata = copies
+            .iter()
+            .map(|(_, original)| format!("Bookmarks/{original}\tLibrary/{original}\n"))
+            .collect::<String>();
+        fs::write(directory.0.join("bookmarks.txt"), metadata).unwrap();
+        for (copy, original) in copies {
+            directory.write_animation(&format!("animasi_basic/{copy}"), b"runtime copy");
+            directory.write_animation(&format!("Bookmarks/{original}"), b"user original");
+        }
+        let mut registry = directory.registry();
+        for (copy, original) in copies {
+            let key = format!("animasi_basic/{copy}");
+            let original_key = format!("Bookmarks/{original}");
+            assert!(is_base_animation(&key.to_ascii_uppercase()));
+            assert!(!is_base_animation(&original_key));
+            assert!(registry.bookmarks.contains(&original_key));
+            assert_eq!(
+                registry.toggle_bookmark(&key).unwrap_err().kind(),
+                ErrorKind::PermissionDenied
+            );
+            assert_eq!(
+                fs::read(registry.path(&key).unwrap()).unwrap(),
+                b"runtime copy"
+            );
+            assert_eq!(
+                fs::read(registry.path(&original_key).unwrap()).unwrap(),
+                b"user original"
+            );
+        }
     }
 
     #[test]

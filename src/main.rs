@@ -133,6 +133,10 @@ fn main() {
     let mut app = App::new();
     #[cfg(debug_assertions)]
     let feature_smoke = std::env::args().any(|arg| arg == "--feature-smoke");
+    #[cfg(debug_assertions)]
+    let touch_smoke = feature_smoke && std::env::args().any(|arg| arg == "--touch-smoke");
+    #[cfg(not(debug_assertions))]
+    let touch_smoke = false;
 
     // Load persistent Nera settings before the native window is created.
     //
@@ -256,6 +260,7 @@ fn main() {
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window
+                    .run_if(move || !touch_smoke)
                     .run_if(presentation::desktop_pet_active)
                     .run_if(startup_entrance::pet_is_revealed)
                     .run_if(nera_utility_input_available),
@@ -295,6 +300,7 @@ fn main() {
         .add_systems(
             PostUpdate,
             update_click_through
+                .run_if(move || !touch_smoke)
                 .after(VrmSystemSets::SpringBone)
                 .run_if(startup_entrance::pet_is_revealed)
                 .run_if(presentation::desktop_pet_active)
@@ -303,6 +309,7 @@ fn main() {
         .add_systems(
             PostUpdate,
             detect_head_pat
+                .run_if(move || !touch_smoke)
                 .after(update_click_through)
                 .run_if(startup_entrance::pet_is_revealed)
                 .run_if(presentation::desktop_pet_active)

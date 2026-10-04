@@ -28,36 +28,27 @@ fn restore_limb_pose(mut bones: Query<(&mut Transform, &mut LimbOffset)>) {
 }
 
 fn reaction_angles(part: BodyPart, bone: &str, progress: f32) -> Vec3 {
+    if !matches!(
+        part,
+        BodyPart::LeftLeg | BodyPart::RightLeg | BodyPart::LeftFoot | BodyPart::RightFoot
+    ) {
+        return Vec3::ZERO;
+    }
     let t = progress.clamp(0.0, 1.0);
     let envelope = (std::f32::consts::PI * t).sin().powi(2);
     let wiggle = (t * std::f32::consts::TAU * 2.0).sin() * envelope;
-    let left = matches!(
-        part,
-        BodyPart::LeftArm | BodyPart::LeftHand | BodyPart::LeftLeg | BodyPart::LeftFoot
-    );
+    let left = matches!(part, BodyPart::LeftLeg | BodyPart::LeftFoot);
     let side = if left { "left" } else { "right" };
     let sign = if left { 1.0 } else { -1.0 };
     if !bone.starts_with(side) {
         return Vec3::ZERO;
     }
-    if matches!(
-        part,
-        BodyPart::LeftArm | BodyPart::RightArm | BodyPart::LeftHand | BodyPart::RightHand
-    ) {
-        match bone.strip_prefix(side).unwrap_or_default() {
-            "UpperArm" => Vec3::new(-0.45 * envelope, 0.12 * wiggle, -sign * 0.28 * envelope),
-            "LowerArm" => Vec3::new(-0.8 * envelope, 0.0, sign * 0.12 * envelope),
-            "Hand" => Vec3::new(0.16 * wiggle, sign * 0.2 * wiggle, sign * 0.24 * wiggle),
-            _ => Vec3::ZERO,
-        }
-    } else {
-        match bone.strip_prefix(side).unwrap_or_default() {
-            "UpperLeg" => Vec3::new(-0.22 * envelope, 0.0, sign * 0.06 * envelope),
-            "LowerLeg" => Vec3::new(0.45 * envelope, 0.0, 0.0),
-            "Foot" => Vec3::new(-0.22 * wiggle, sign * 0.1 * wiggle, 0.0),
-            "Toes" => Vec3::new(0.12 * wiggle, 0.0, 0.0),
-            _ => Vec3::ZERO,
-        }
+    match bone.strip_prefix(side).unwrap_or_default() {
+        "UpperLeg" => Vec3::new(-0.22 * envelope, 0.0, sign * 0.06 * envelope),
+        "LowerLeg" => Vec3::new(0.45 * envelope, 0.0, 0.0),
+        "Foot" => Vec3::new(-0.22 * wiggle, sign * 0.1 * wiggle, 0.0),
+        "Toes" => Vec3::new(0.12 * wiggle, 0.0, 0.0),
+        _ => Vec3::ZERO,
     }
 }
 
@@ -98,29 +89,71 @@ fn apply_limb_pose(
 mod tests {
     use super::*;
     #[test]
+    fn arms_and_hands_have_no_procedural_offsets() {
+        for part in [
+            BodyPart::LeftArm,
+            BodyPart::RightArm,
+            BodyPart::LeftHand,
+            BodyPart::RightHand,
+        ] {
+            for bone in ["leftUpperArm", "leftLowerArm", "rightHand", "rightUpperLeg"] {
+                for progress in [0.0, 0.125, 0.5, 0.875, 1.0] {
+                    assert_eq!(reaction_angles(part, bone, progress), Vec3::ZERO);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leg_and_foot_reactions_keep_their_original_numeric_shape() {
+        for (part, side, sign) in [
+            (BodyPart::LeftLeg, "left", 1.0),
+            (BodyPart::LeftFoot, "left", 1.0),
+            (BodyPart::RightLeg, "right", -1.0),
+            (BodyPart::RightFoot, "right", -1.0),
+        ] {
+            for (bone, progress, expected) in [
+                ("UpperLeg", 0.25, Vec3::new(-0.11, 0.0, sign * 0.03)),
+                ("LowerLeg", 0.25, Vec3::new(0.225, 0.0, 0.0)),
+                (
+                    "Foot",
+                    0.125,
+                    Vec3::new(-0.032218255, sign * 0.014644661, 0.0),
+                ),
+                ("Toes", 0.125, Vec3::new(0.017573593, 0.0, 0.0)),
+            ] {
+                assert!(
+                    reaction_angles(part, &format!("{side}{bone}"), progress).distance(expected)
+                        < 0.000001
+                );
+            }
+        }
+    }
+
+    #[test]
     fn limb_reactions_are_side_specific_and_return_to_the_base_pose() {
-        for part in [BodyPart::LeftHand, BodyPart::LeftFoot] {
-            let bone = if part == BodyPart::LeftHand {
-                "leftLowerArm"
+        for part in [BodyPart::LeftLeg, BodyPart::LeftFoot] {
+            let bone = if part == BodyPart::LeftLeg {
+                "leftUpperLeg"
             } else {
                 "leftLowerLeg"
             };
             assert_eq!(reaction_angles(part, bone, 0.0), Vec3::ZERO);
             assert!(reaction_angles(part, bone, 0.5).length() > 0.1);
             assert!(reaction_angles(part, bone, 1.0).length() < 0.00001);
-            assert_eq!(reaction_angles(part, "rightLowerArm", 0.5), Vec3::ZERO);
+            assert_eq!(reaction_angles(part, "rightLowerLeg", 0.5), Vec3::ZERO);
         }
     }
     #[test]
     fn limb_clicks_expire_and_yield_to_dragging_and_alarms() {
         let mut state = NeraAnimationState::default();
         state.request_one_shot(
-            TemporaryAction::LimbReaction(BodyPart::RightHand),
+            TemporaryAction::LimbReaction(BodyPart::RightFoot),
             REACTION_DURATION,
         );
         assert_eq!(
             state.visual_state(),
-            VisualState::LimbReaction(BodyPart::RightHand)
+            VisualState::LimbReaction(BodyPart::RightFoot)
         );
         state.start_persistent_action(TemporaryAction::Floating);
         assert_eq!(state.visual_state(), VisualState::Floating);

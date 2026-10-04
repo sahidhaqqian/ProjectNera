@@ -4,6 +4,7 @@ use std::time::Duration;
 use bevy::{animation::RepeatAnimation, prelude::*};
 use bevy_vrm1::prelude::*;
 
+use super::state::TouchReactionClip;
 use crate::environment::{AvatarAnchor, DesktopEnvironment};
 
 use super::{
@@ -38,6 +39,13 @@ pub(crate) fn grounding_policy(visual: VisualState, library_path: Option<&str>) 
         VisualState::IdleMicro(action) if action.base_pose() == BasePose::Sitting => Authored,
         VisualState::LibraryAnimation(_) => match library_path {
             Some(DEATH_VRMA_PATH) => BodyContact,
+            Some(path)
+                if TouchReactionClip::ALL
+                    .iter()
+                    .any(|clip| clip.path() == path) =>
+            {
+                Grounded
+            }
             // The bundled library includes intentionally airborne and seated
             // clips. Unknown imports retain their authored motion too: guessing
             // contact from a filename could erase a custom jump.
@@ -106,6 +114,8 @@ pub(crate) struct NeraAnimationClips {
     pub(super) idle_bored: Option<ClipSlot>,
     pub(super) idle_angry_gesture: Option<ClipSlot>,
     pub(super) idle_sitting_rubbing_arm: Option<ClipSlot>,
+    /// Authored touch performances, registered only after their VRMA is ready.
+    pub(super) touch_reactions: [Option<ClipSlot>; 8],
 
     // Legacy menu resolver slots remain empty. The current radial menu has no
     // animation buttons, so these stock clips are not preloaded.
@@ -122,6 +132,27 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    fn touch_reaction(&self, clip: TouchReactionClip) -> Option<ClipSlot> {
+        self.touch_reactions[clip.index()].filter(|slot| !slot.duration.is_zero())
+    }
+
+    pub(crate) fn touch_reaction_duration(&self, clip: TouchReactionClip) -> Option<Duration> {
+        self.touch_reaction(clip).map(|slot| slot.duration)
+    }
+
+    pub(crate) fn touch_reaction_entity(&self, clip: TouchReactionClip) -> Option<Entity> {
+        self.touch_reaction(clip).map(|slot| slot.entity)
+    }
+
+    pub(crate) fn touch_reaction_playing(
+        &self,
+        clip: TouchReactionClip,
+        playback: &NeraAnimationPlayback,
+    ) -> bool {
+        self.touch_reaction_entity(clip)
+            .is_some_and(|entity| playback.current_clip == Some(entity))
+    }
+
     /// Read the existing action clock; feedback must not own a second VRMA timer.
     pub(crate) fn head_stroke_progress(&self, state: &NeraAnimationState) -> Option<f32> {
         if state.visual_state() != VisualState::HeadStroke {
@@ -253,6 +284,29 @@ macro_rules! register_clip {
             info!(concat!($label, " VRMA loaded | duration={:?}"), duration);
         }
     };
+}
+
+#[derive(Component)]
+struct TouchReactionLoader(TouchReactionClip);
+
+fn register_touch_reaction_animation(
+    trigger: On<LoadedVrma>,
+    loaders: Query<&TouchReactionLoader>,
+    durations: Query<&VrmaDuration>,
+    mut clips: ResMut<NeraAnimationClips>,
+) {
+    let Ok(loader) = loaders.get(trigger.vrma) else {
+        return;
+    };
+    let duration = durations
+        .get(trigger.vrma)
+        .map(|duration| duration.0)
+        .unwrap_or(Duration::ZERO);
+    clips.touch_reactions[loader.0.index()] = Some(ClipSlot {
+        entity: trigger.vrma,
+        duration,
+    });
+    info!("{} VRMA loaded | duration={duration:?}", loader.0.label());
 }
 
 register_clip!(register_idle_animation, idle, "Idle");
@@ -454,6 +508,16 @@ pub(crate) fn spawn_animation_library(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands<'_>,
     asset_server: &AssetServer,
 ) {
+    for clip in TouchReactionClip::ALL {
+        parent
+            .spawn((
+                Name::new(clip.label()),
+                TouchReactionLoader(clip),
+                VrmaHandle(asset_server.load(clip.path())),
+            ))
+            .observe(register_touch_reaction_animation);
+    }
+
     parent
         .spawn((
             Name::new("Nera Idle"),
@@ -632,6 +696,18 @@ pub(crate) struct NeraAnimationPlayback {
     revision: u64,
 }
 
+#[cfg(test)]
+pub(crate) fn touch_test_clips(world: &mut World) -> NeraAnimationClips {
+    let mut clips = NeraAnimationClips::default();
+    for clip in TouchReactionClip::ALL {
+        clips.touch_reactions[clip.index()] = Some(ClipSlot {
+            entity: world.spawn_empty().id(),
+            duration: Duration::from_secs(2),
+        });
+    }
+    clips
+}
+
 pub(super) fn clip_for_visual(
     visual: VisualState,
     clips: &NeraAnimationClips,
@@ -668,6 +744,11 @@ pub(super) fn clip_for_visual(
         ),
         VisualState::HitHead => (clips.hit_head, RepeatAnimation::Count(1), "HitHead"),
         VisualState::HitChest => (clips.hit_chest, RepeatAnimation::Count(1), "HitChest"),
+        VisualState::TouchReaction(clip) => (
+            clips.touch_reaction(clip),
+            RepeatAnimation::Count(1),
+            clip.label(),
+        ),
         VisualState::DodgeWhileSitting => (
             clips.dodge_while_sitting,
             RepeatAnimation::Count(1),
@@ -751,7 +832,7 @@ fn base_fallback(state: &NeraAnimationState, clips: &NeraAnimationClips) -> Opti
 
 pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
     match visual {
-        VisualState::LimbReaction(_) => REACTION_BLEND,
+        VisualState::LimbReaction(_) | VisualState::TouchReaction(_) => REACTION_BLEND,
         VisualState::LibraryAnimation(_) => REACTION_BLEND,
         VisualState::HeadStroke => HEAD_STROKE_BLEND,
         VisualState::Falling | VisualState::Landing => SUPPORT_BLEND,
@@ -860,6 +941,165 @@ pub(crate) fn apply_animation_state(
         "Nera playback -> {} | anchor={:?} | clip_duration={:?} | blend={:?}",
         label, anchor, clip.duration, transition_duration
     );
+}
+
+#[cfg(test)]
+mod touch_playback_tests {
+    use super::*;
+    use crate::animation::TemporaryAction;
+
+    #[derive(Resource, Default)]
+    struct Played(Vec<(Entity, RepeatAnimation, Duration)>);
+
+    #[test]
+    fn each_loaded_touch_slot_has_its_own_actual_duration_and_one_shot_dispatch() {
+        let mut world = World::new();
+        world.init_resource::<NeraAnimationClips>();
+        let avatar = world.spawn_empty().id();
+        for (index, clip) in TouchReactionClip::ALL.into_iter().enumerate() {
+            let duration = Duration::from_millis(1300 + index as u64 * 137);
+            let entity = world
+                .spawn((TouchReactionLoader(clip), VrmaDuration(duration)))
+                .observe(register_touch_reaction_animation)
+                .id();
+            world.trigger(LoadedVrma {
+                vrm: avatar,
+                vrma: entity,
+            });
+            let clips = world.resource::<NeraAnimationClips>();
+            assert_eq!(clips.touch_reaction_duration(clip), Some(duration));
+            assert_eq!(clips.touch_reaction_entity(clip), Some(entity));
+            let mut state = NeraAnimationState::default();
+            assert!(state.request_touch_reaction(clip, duration));
+            let (slot, repeat, label) = clip_for_state(&state, clips);
+            assert_eq!(slot.unwrap().entity, entity);
+            assert_eq!(repeat, RepeatAnimation::Count(1));
+            assert_eq!(label, clip.label());
+            assert_eq!(transition_for_visual(state.visual_state()), REACTION_BLEND);
+            assert_eq!(
+                grounding_policy(state.visual_state(), None),
+                GroundingPolicy::Grounded
+            );
+            assert_eq!(
+                grounding_policy(VisualState::LibraryAnimation(entity), Some(clip.path())),
+                GroundingPolicy::Grounded
+            );
+            state.advance(duration);
+            assert_eq!(state.visual_state(), VisualState::Idle);
+        }
+    }
+
+    #[test]
+    fn unavailable_and_zero_duration_touch_clips_never_report_a_ready_capability() {
+        let mut world = World::new();
+        let mut clips = NeraAnimationClips::default();
+        for clip in TouchReactionClip::ALL {
+            assert_eq!(clips.touch_reaction_duration(clip), None);
+            assert_eq!(clips.touch_reaction_entity(clip), None);
+            let entity = world.spawn_empty().id();
+            clips.touch_reactions[clip.index()] = Some(ClipSlot {
+                entity,
+                duration: Duration::ZERO,
+            });
+            assert_eq!(clips.touch_reaction_duration(clip), None);
+            assert_eq!(clips.touch_reaction_entity(clip), None);
+            assert!(!clips.touch_reaction_playing(
+                clip,
+                &NeraAnimationPlayback {
+                    current_clip: Some(entity),
+                    ..default()
+                }
+            ));
+            assert!(
+                clip_for_visual(VisualState::TouchReaction(clip), &clips)
+                    .0
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_touch_dispatches_and_replays_then_restores_the_selected_seated_clip() {
+        let mut app = App::new();
+        let mut clips = touch_test_clips(app.world_mut());
+        let seated = app.world_mut().spawn_empty().id();
+        clips.sitting_2 = Some(ClipSlot {
+            entity: seated,
+            duration: Duration::from_secs(5),
+        });
+        let touch = TouchReactionClip::ShoulderRubbing;
+        let touch_entity = clips.touch_reaction_entity(touch).unwrap();
+        app.insert_resource(clips)
+            .init_resource::<NeraAnimationState>()
+            .init_resource::<NeraAnimationPlayback>()
+            .init_resource::<DesktopEnvironment>()
+            .init_resource::<Played>()
+            .add_systems(Update, apply_animation_state)
+            .add_observer(|trigger: On<PlayVrma>, mut played: ResMut<Played>| {
+                played
+                    .0
+                    .push((trigger.vrma, trigger.repeat, trigger.transition_duration));
+            });
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .enter_cloud_seat(SittingPose::Sitting2);
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationPlayback>().current_clip,
+            Some(seated)
+        );
+        for _ in 0..2 {
+            assert!(
+                app.world_mut()
+                    .resource_mut::<NeraAnimationState>()
+                    .request_touch_reaction(touch, Duration::from_secs(2))
+            );
+            app.update();
+            assert_eq!(
+                app.world().resource::<NeraAnimationPlayback>().current_clip,
+                Some(touch_entity)
+            );
+            assert!(
+                app.world()
+                    .resource::<NeraAnimationClips>()
+                    .touch_reaction_playing(touch, app.world().resource::<NeraAnimationPlayback>())
+            );
+        }
+        let played = &app.world().resource::<Played>().0;
+        assert_eq!(
+            played
+                .iter()
+                .filter(|(entity, _, _)| *entity == touch_entity)
+                .count(),
+            2
+        );
+        assert!(
+            played
+                .iter()
+                .filter(|(entity, _, _)| *entity == touch_entity)
+                .all(|(_, repeat, blend)| *repeat == RepeatAnimation::Count(1)
+                    && *blend == REACTION_BLEND)
+        );
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .advance(Duration::from_secs(2));
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationPlayback>().current_clip,
+            Some(seated)
+        );
+        assert_eq!(
+            app.world().resource::<DesktopEnvironment>().attached_anchor,
+            AvatarAnchor::Seat
+        );
+        assert!(
+            !app.world()
+                .resource::<NeraAnimationState>()
+                .active_actions
+                .iter()
+                .any(|active| matches!(active.action, TemporaryAction::TouchReaction(_)))
+        );
+    }
 }
 
 #[cfg(test)]

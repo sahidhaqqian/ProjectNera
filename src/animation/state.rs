@@ -152,6 +152,64 @@ impl PersonalityAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TouchReactionClip {
+    Wave1,
+    Wave2,
+    Salute,
+    Thankful,
+    Dismissive,
+    Shrugging,
+    ArmStretching,
+    ShoulderRubbing,
+}
+
+impl TouchReactionClip {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Wave1,
+        Self::Wave2,
+        Self::Salute,
+        Self::Thankful,
+        Self::Dismissive,
+        Self::Shrugging,
+        Self::ArmStretching,
+        Self::ShoulderRubbing,
+    ];
+    pub(crate) const NORMAL_HAND: [Self; 4] =
+        [Self::Wave1, Self::Wave2, Self::Salute, Self::Thankful];
+    pub(crate) const ARM: [Self; 2] = [Self::ArmStretching, Self::ShoulderRubbing];
+
+    pub(super) fn index(self) -> usize {
+        self as usize
+    }
+
+    pub(crate) fn path(self) -> &'static str {
+        match self {
+            Self::Wave1 => "animations/animasi_basic/wave1.vrma",
+            Self::Wave2 => "animations/animasi_basic/wave2.vrma",
+            Self::Salute => "animations/animasi_basic/salute.vrma",
+            Self::Thankful => "animations/animasi_basic/thankful.vrma",
+            Self::Dismissive => "animations/animasi_basic/Dismissive Gesture.vrma",
+            Self::Shrugging => "animations/animasi_basic/Shrugging.vrma",
+            Self::ArmStretching => "animations/animasi_basic/Arm Stretching.vrma",
+            Self::ShoulderRubbing => "animations/animasi_basic/Shoulder Rubbing.vrma",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Wave1 => "Touch/Wave1",
+            Self::Wave2 => "Touch/Wave2",
+            Self::Salute => "Touch/Salute",
+            Self::Thankful => "Touch/Thankful",
+            Self::Dismissive => "Touch/Dismissive",
+            Self::Shrugging => "Touch/Shrugging",
+            Self::ArmStretching => "Touch/ArmStretching",
+            Self::ShoulderRubbing => "Touch/ShoulderRubbing",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
     Walking,
     StartupGreeting,
@@ -161,6 +219,7 @@ pub(crate) enum TemporaryAction {
     HitHead,
     HitChest,
     LimbReaction(crate::interaction::BodyPart),
+    TouchReaction(TouchReactionClip),
     DodgeWhileSitting,
     HeadStroke,
     Death,
@@ -209,7 +268,8 @@ impl TemporaryAction {
             | Self::HitChest
             | Self::DodgeWhileSitting
             | Self::HeadStroke
-            | Self::LimbReaction(_) => AnimationPriority::Reaction,
+            | Self::LimbReaction(_)
+            | Self::TouchReaction(_) => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
             #[cfg(target_os = "windows")]
@@ -267,6 +327,7 @@ pub(crate) enum VisualState {
     HitHead,
     HitChest,
     LimbReaction(crate::interaction::BodyPart),
+    TouchReaction(TouchReactionClip),
     DodgeWhileSitting,
     HeadStroke,
     Death,
@@ -421,6 +482,8 @@ impl NeraAnimationState {
     pub(super) fn start_persistent_action(&mut self, action: TemporaryAction) {
         if action.priority() > AnimationPriority::Reaction {
             self.finish_action(TemporaryAction::DodgeWhileSitting);
+            self.active_actions
+                .retain(|active| !matches!(active.action, TemporaryAction::TouchReaction(_)));
         }
         if action.priority() > AnimationPriority::StartupGreeting {
             self.cancel_startup_greeting();
@@ -456,6 +519,11 @@ impl NeraAnimationState {
         if duration.is_zero() {
             warn!("Nera ignored {:?}: VRMA duration unavailable/zero", action);
             return;
+        }
+
+        if action.priority() > AnimationPriority::Reaction {
+            self.active_actions
+                .retain(|active| !matches!(active.action, TemporaryAction::TouchReaction(_)));
         }
 
         self.finish_action(TemporaryAction::Walking);
@@ -612,6 +680,38 @@ impl NeraAnimationState {
 
     pub(crate) fn cancel_startup_greeting(&mut self) {
         self.finish_action(TemporaryAction::StartupGreeting);
+    }
+
+    /// A touch plays immediately or is rejected. Inspect every live action,
+    /// including Floating suppressed by a seated pose, so it cannot queue
+    /// beneath another owner and unexpectedly appear later.
+    pub(crate) fn can_request_touch_reaction(&self) -> bool {
+        self.support_transition.is_none()
+            && self
+                .active_actions
+                .iter()
+                .all(|active| active.action.priority() <= AnimationPriority::Reaction)
+    }
+
+    pub(crate) fn request_touch_reaction(
+        &mut self,
+        clip: TouchReactionClip,
+        duration: Duration,
+    ) -> bool {
+        if duration.is_zero() || !self.can_request_touch_reaction() {
+            return false;
+        }
+        self.request_one_shot(TemporaryAction::TouchReaction(clip), duration);
+        true
+    }
+
+    pub(crate) fn cancel_touch_reaction(&mut self) {
+        let before = self.active_actions.len();
+        self.active_actions
+            .retain(|active| !matches!(active.action, TemporaryAction::TouchReaction(_)));
+        if self.active_actions.len() != before {
+            self.bump_revision();
+        }
     }
 
     /// Phase 5.8 idle variation entry point.
@@ -837,6 +937,7 @@ impl NeraAnimationState {
                 TemporaryAction::HitHead => VisualState::HitHead,
                 TemporaryAction::HitChest => VisualState::HitChest,
                 TemporaryAction::LimbReaction(part) => VisualState::LimbReaction(part),
+                TemporaryAction::TouchReaction(clip) => VisualState::TouchReaction(clip),
                 TemporaryAction::DodgeWhileSitting => VisualState::DodgeWhileSitting,
                 TemporaryAction::HeadStroke => VisualState::HeadStroke,
                 TemporaryAction::Death => VisualState::Death,
@@ -936,6 +1037,7 @@ impl NeraAnimationState {
             | VisualState::Landing
             | VisualState::HitHead
             | VisualState::HitChest
+            | VisualState::TouchReaction(_)
             | VisualState::DodgeWhileSitting
             | VisualState::IdleMicro(IdleMicroAction::LookAround)
             | VisualState::HeadStroke
@@ -953,5 +1055,133 @@ impl NeraAnimationState {
 
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod touch_reaction_tests {
+    use super::*;
+
+    #[test]
+    fn touch_uses_the_actual_duration_and_replaces_the_reaction_layer() {
+        for clip in TouchReactionClip::ALL {
+            let mut state = NeraAnimationState::default();
+            assert!(state.set_walking(true));
+            let duration = Duration::from_millis(2300);
+            assert!(state.request_touch_reaction(clip, duration));
+            assert_eq!(state.visual_state(), VisualState::TouchReaction(clip));
+            assert_eq!(state.active_actions.len(), 1);
+            assert!(state.suppresses_look_at());
+            state.advance(duration - Duration::from_millis(1));
+            assert_eq!(state.visual_state(), VisualState::TouchReaction(clip));
+            state.advance(Duration::from_millis(1));
+            assert_eq!(state.visual_state(), VisualState::Idle);
+        }
+        let mut state = NeraAnimationState::default();
+        state.request_one_shot(TemporaryAction::HeadStroke, Duration::from_secs(8));
+        assert!(state.request_touch_reaction(TouchReactionClip::Salute, Duration::from_secs(2)));
+        assert!(state.request_touch_reaction(TouchReactionClip::Wave2, Duration::from_secs(3)));
+        assert_eq!(state.active_actions.len(), 1);
+        assert_eq!(
+            state.visual_state(),
+            VisualState::TouchReaction(TouchReactionClip::Wave2)
+        );
+    }
+
+    #[test]
+    fn touch_rejects_zero_duration_higher_owners_and_support_transitions_without_queueing() {
+        let mut state = NeraAnimationState::default();
+        assert!(state.request_startup_greeting(Duration::from_secs(4)));
+        let revision = state.revision;
+        assert!(!state.request_touch_reaction(TouchReactionClip::Wave1, Duration::ZERO));
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.visual_state(), VisualState::StartupGreeting);
+        for owner in [
+            TemporaryAction::Praying,
+            TemporaryAction::Floating,
+            TemporaryAction::Falling,
+            TemporaryAction::Landing,
+            TemporaryAction::Death,
+            TemporaryAction::AlarmWave,
+            TemporaryAction::AlarmJump,
+        ] {
+            let mut state = NeraAnimationState::default();
+            state.start_persistent_action(owner);
+            let revision = state.revision;
+            assert!(!state.can_request_touch_reaction());
+            assert!(
+                !state.request_touch_reaction(TouchReactionClip::Thankful, Duration::from_secs(2))
+            );
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.active_actions.len(), 1);
+        }
+        let mut state = NeraAnimationState::default();
+        state.begin_support_transition(SupportTransition::SittingEnter, Duration::from_secs(1));
+        assert!(!state.can_request_touch_reaction());
+        assert!(!state.request_touch_reaction(TouchReactionClip::Wave1, Duration::from_secs(2)));
+        assert!(state.active_actions.is_empty());
+    }
+
+    #[test]
+    fn a_pose_suppressed_drag_still_blocks_touch_but_a_settled_seat_can_react() {
+        let mut state = NeraAnimationState::default();
+        state.enter_cloud_seat(SittingPose::Default);
+        assert!(state.request_touch_reaction(TouchReactionClip::Salute, Duration::from_secs(1)));
+        assert_eq!(state.base_pose(), BasePose::Sitting);
+        state.cancel_touch_reaction();
+        state.start_persistent_action(TemporaryAction::Floating);
+        assert_eq!(state.visual_state(), VisualState::SittingLoop);
+        assert!(!state.can_request_touch_reaction());
+        assert!(!state.request_touch_reaction(TouchReactionClip::Wave1, Duration::from_secs(2)));
+        assert_eq!(state.active_actions.len(), 1);
+    }
+
+    #[test]
+    fn drag_alarm_physics_and_critical_interruptions_never_uncover_an_old_touch_tail() {
+        for owner in [
+            TemporaryAction::Floating,
+            TemporaryAction::Falling,
+            TemporaryAction::AlarmWave,
+        ] {
+            let mut state = NeraAnimationState::default();
+            assert!(
+                state.request_touch_reaction(TouchReactionClip::Wave1, Duration::from_secs(20))
+            );
+            state.start_persistent_action(owner);
+            state.finish_action(owner);
+            assert_eq!(state.visual_state(), VisualState::Idle);
+            assert!(state.active_actions.is_empty());
+        }
+        for owner in [
+            TemporaryAction::Death,
+            TemporaryAction::AlarmJump,
+            TemporaryAction::Landing,
+        ] {
+            let mut state = NeraAnimationState::default();
+            assert!(
+                state
+                    .request_touch_reaction(TouchReactionClip::Dismissive, Duration::from_secs(20))
+            );
+            state.request_one_shot(owner, Duration::from_secs(1));
+            state.advance(Duration::from_secs(1));
+            assert_eq!(state.visual_state(), VisualState::Idle);
+            assert!(state.active_actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn explicit_touch_cancel_preserves_other_owners_and_is_idempotent() {
+        let mut state = NeraAnimationState::default();
+        assert!(
+            state.request_touch_reaction(TouchReactionClip::ArmStretching, Duration::from_secs(3))
+        );
+        state.start_persistent_action(TemporaryAction::Walking);
+        let before = state.revision;
+        state.cancel_touch_reaction();
+        assert_eq!(state.visual_state(), VisualState::Walking);
+        assert_eq!(state.revision, before + 1);
+        state.cancel_touch_reaction();
+        assert_eq!(state.revision, before + 1);
+        assert_eq!(state.active_actions.len(), 1);
     }
 }

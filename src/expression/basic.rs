@@ -30,6 +30,10 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         "Bored.vrma" => (Face::Exhausted, 0.35),
         "jump_happy.vrma" => (Face::Joy, 0.85),
         "161_Waving.vrma" => (Face::Joy, 0.8),
+        "wave1.vrma" | "wave2.vrma" => (Face::Joy, 0.8),
+        "salute.vrma" | "Arm Stretching.vrma" => (Face::Default, 1.0),
+        "thankful.vrma" | "Shoulder Rubbing.vrma" => (Face::Timid, 0.65),
+        "Dismissive Gesture.vrma" | "Shrugging.vrma" => (Face::Angry, 0.9),
         _ => return None,
     })
 }
@@ -37,6 +41,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
 pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Option<(Face, f32)> {
     use VisualState as Body;
     let file = match visual {
+        Body::TouchReaction(clip) => return for_clip(clip.path()),
         Body::HeadStroke => "ShakeHeadNo1.vrma",
         Body::HitChest => "Hit_Chest.vrma",
         Body::HitHead => "Hit_Head.vrma",
@@ -105,8 +110,39 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 25);
+        assert_eq!(count, 33);
     }
+    #[test]
+    fn authored_touch_clips_share_faces_with_basic_animation_previews() {
+        for (file, face, intensity) in [
+            ("wave1.vrma", Face::Joy, 0.8),
+            ("wave2.vrma", Face::Joy, 0.8),
+            ("salute.vrma", Face::Default, 1.0),
+            ("thankful.vrma", Face::Timid, 0.65),
+            ("Dismissive Gesture.vrma", Face::Angry, 0.9),
+            ("Shrugging.vrma", Face::Angry, 0.9),
+            ("Arm Stretching.vrma", Face::Default, 1.0),
+            ("Shoulder Rubbing.vrma", Face::Timid, 0.65),
+        ] {
+            let expected = Some((face, intensity));
+            assert_eq!(for_clip(&format!("animasi_basic/{file}")), expected);
+            assert_eq!(
+                for_clip(&format!("animations/animasi_basic/{file}")),
+                expected
+            );
+        }
+        for clip in crate::animation::TouchReactionClip::ALL {
+            let expected = for_clip(clip.path()).expect("Registered touch clip has a face");
+            assert_eq!(
+                for_visual(VisualState::TouchReaction(clip), None),
+                Some(expected)
+            );
+        }
+        // The library originals keep their existing expression ownership.
+        assert_eq!(for_clip("Bookmarks/145_Shrugging.vrma"), None);
+        assert_eq!(for_clip("Mixamo-VRMA/Wave.vrma"), None);
+    }
+
     #[test]
     fn requested_pairs_and_unknown_clip_ownership() {
         assert_eq!(

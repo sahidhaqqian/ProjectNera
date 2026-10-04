@@ -83,6 +83,7 @@ pub(crate) fn sync_interaction_animation_actions(
     mut environment: ResMut<DesktopEnvironment>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
     cloud_pose: Option<Res<crate::cloud::CloudSeatPose>>,
+    mut touch: super::touch::TouchReactionContext,
 ) {
     let cloud_seated = cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
     let resting = cloud
@@ -93,13 +94,64 @@ pub(crate) fn sync_interaction_animation_actions(
             .as_ref()
             .is_some_and(|pose| pose.is_ready_for(cloud))
     });
-    if drag_started.read().next().is_some() && !cloud_seated {
+    let dragging_started = drag_started.read().next().is_some();
+    let touch_blocked = touch.blocked() || resting || dragging_started;
+    let now = touch
+        .time
+        .as_ref()
+        .map(|time| time.elapsed())
+        .unwrap_or_default();
+    if let Some(runtime) = touch.runtime.as_mut() {
+        runtime.expire(now);
+        if touch_blocked || !state.can_request_touch_reaction() {
+            runtime.break_hand_streak();
+        }
+    }
+    if touch_blocked {
+        state.cancel_touch_reaction();
+    }
+    if dragging_started && !cloud_seated {
         state.start_persistent_action(TemporaryAction::Floating);
     }
 
     for event in clicked.read() {
         if resting {
             continue;
+        }
+        let authored_touch = matches!(
+            event.body_part,
+            BodyPart::LeftHand | BodyPart::RightHand | BodyPart::LeftArm | BodyPart::RightArm
+        );
+        if authored_touch {
+            if touch_blocked
+                || (cloud_seated && !cloud_ready)
+                || (!cloud_seated
+                    && on_sitting_surface(environment.placement)
+                    && !touch.seat_pose.as_ref().is_some_and(|pose| {
+                        pose.is_ready_for(environment.placement, state.selected_sitting_pose())
+                    }))
+            {
+                continue;
+            }
+            if let Some(runtime) = touch.runtime.as_mut() {
+                if let Some(reaction) = runtime.accept(event.body_part, now, &clips, &mut state) {
+                    info!(
+                        "Nera accepted touch {:?} -> {:?} hand_step={}",
+                        event.body_part, reaction.clip, reaction.hand_step
+                    );
+                    if let Some(messages) = touch.accepted.as_mut() {
+                        messages.write(reaction);
+                    }
+                }
+            }
+            continue;
+        }
+        // A different admitted semantic region breaks consecutive Hand touches.
+        // Its existing damage/dodge/leg behavior is otherwise unchanged.
+        if !touch_blocked && (!cloud_seated || cloud_ready) && state.can_request_touch_reaction() {
+            if let Some(runtime) = touch.runtime.as_mut() {
+                runtime.break_hand_streak();
+            }
         }
         if matches!(event.body_part, BodyPart::Head | BodyPart::Torso)
             && (cloud_seated || on_sitting_surface(environment.placement))
@@ -190,6 +242,11 @@ pub(crate) fn sync_interaction_animation_actions(
     if head_patted.read().count() > 0 && !resting && (!cloud_seated || cloud_ready) {
         if let Some(clip) = clips.head_stroke {
             state.request_one_shot(TemporaryAction::HeadStroke, clip.duration);
+            if state.visual_state() == super::VisualState::HeadStroke {
+                if let Some(runtime) = touch.runtime.as_mut() {
+                    runtime.break_hand_streak();
+                }
+            }
         } else {
             warn!("HeadStroke requested before ShakeHeadNo1.vrma was loaded");
         }

@@ -172,6 +172,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         // and the short transitional clips are moments where a held emotion
         // would read as stuck rather than as expression.
         Body::Idle
+        | Body::TouchReaction(_)
         | Body::Walking
         | Body::SittingExit
         | Body::Landing

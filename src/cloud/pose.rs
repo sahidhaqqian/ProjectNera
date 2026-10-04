@@ -155,6 +155,8 @@ mod tests {
         for expected in [RestPose::Lying, RestPose::Seated] {
             let mut app = App::new();
             app.init_resource::<NeraAnimationState>()
+                .init_resource::<crate::animation::touch::TouchReactionRuntime>()
+                .add_message::<crate::animation::touch::TouchReactionAccepted>()
                 .init_resource::<DesktopEnvironment>()
                 .init_resource::<crate::desktop_physics::DesktopPhysicsState>()
                 .add_message::<NeraClicked>()
@@ -208,6 +210,17 @@ mod tests {
                     app.world().resource::<NeraAnimationState>().visual_state(),
                     VisualState::SittingLoop
                 );
+                assert_eq!(
+                    app.world()
+                        .resource::<crate::animation::touch::TouchReactionRuntime>()
+                        .hand_streak(),
+                    0
+                );
+                assert!(
+                    app.world()
+                        .resource::<Messages<crate::animation::touch::TouchReactionAccepted>>()
+                        .is_empty()
+                );
             }
             assert_eq!(
                 app.world().resource::<CloudRuntime>().rest_pose(),
@@ -257,10 +270,10 @@ mod tests {
                 body_part: BodyPart::LeftHand,
             });
             app.update();
-            assert_eq!(
+            assert!(matches!(
                 app.world().resource::<NeraAnimationState>().visual_state(),
-                VisualState::LimbReaction(BodyPart::LeftHand)
-            );
+                VisualState::TouchReaction(clip) if crate::animation::TouchReactionClip::NORMAL_HAND.contains(&clip)
+            ));
             app.world_mut().resource_mut::<CloudRuntime>().summon(
                 CloudMode::Ride,
                 avatar,

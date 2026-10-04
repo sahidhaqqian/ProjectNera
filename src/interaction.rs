@@ -26,6 +26,53 @@ use std::time::{Duration, Instant};
 pub(crate) use headpat::{HeadPatGesture, detect_head_pat};
 pub(crate) use hit_testing::attach_bone_colliders;
 
+/// Read-only probes of the production hit route for native validation.
+#[cfg(debug_assertions)]
+pub(crate) fn smoke_parts_at_cursor(
+    world: &mut World,
+    cursors: Vec<Vec2>,
+) -> Vec<Option<BodyPart>> {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(
+            move |settings: Res<NeraSettings>,
+                  proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
+                  camera: Query<
+                (&Camera, &GlobalTransform),
+                With<crate::avatar::NeraMainCamera>,
+            >,
+                  colliders: Query<(&GlobalTransform, &NeraCollider)>,
+                  bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>| {
+                let Ok((camera, view)) = camera.single() else {
+                    return vec![None; cursors.len()];
+                };
+                let body_scale = proportions.as_ref().map_or(1.0, |body| body.body_scale());
+                let head_scale = proportions.as_ref().map_or(1.0, |body| body.head_scale());
+                let scale = settings.character_scale() * body_scale;
+                cursors
+                    .iter()
+                    .copied()
+                    .map(|cursor| {
+                        if head_part_at_cursor(cursor, camera, view, &bones, scale * head_scale) {
+                            Some(BodyPart::Head)
+                        } else {
+                            camera.viewport_to_world(view, cursor).ok().and_then(|ray| {
+                                nearest_nera_body_part(
+                                    ray.origin,
+                                    ray.direction.into(),
+                                    &colliders,
+                                    &bones,
+                                    scale,
+                                )
+                            })
+                        }
+                    })
+                    .collect()
+            },
+        )
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum InteractionState {
     #[default]
