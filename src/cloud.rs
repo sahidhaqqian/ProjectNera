@@ -219,6 +219,9 @@ impl Plugin for CloudPlugin {
         app.add_systems(
             PostUpdate,
             pose::stabilize_cloud_pose
+                // The cached cloud seat is an animation pose. Proportions are
+                // applied afterward, so toggling cannot rescale a cached pose.
+                .before(crate::avatar::body_mode::BodyProportionSet::Apply)
                 .after(bevy::app::AnimationSystems)
                 .after(crate::avatar::preserve_seated_hips)
                 .before(bevy_vrm1::prelude::VrmSystemSets::Constraints),

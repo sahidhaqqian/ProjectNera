@@ -217,6 +217,7 @@ fn main() {
         character::CharacterPlugin,
         cloud::CloudPlugin,
         pet_feedback::PetFeedbackPlugin,
+        avatar::body_mode::AvatarBodyModePlugin,
     ));
 
     #[cfg(target_os = "windows")]

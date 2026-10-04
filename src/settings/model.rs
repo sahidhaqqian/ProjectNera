@@ -247,6 +247,9 @@ pub(crate) struct NeraSettings {
     pub(crate) character_size: u16,
     /// Empty selects bundled Nera; imported models use the private characters asset source.
     pub(crate) character_asset: String,
+    /// Passive saved body-mode preference. `AvatarBodyMode` owns runtime mode;
+    /// its proportion layer restores this after humanoid data becomes ready.
+    pub(crate) body_mode: String,
     /// Standing support offset in logical pixels. Positive values keep the visible
     /// feet slightly above the desktop support line; negative values sink them lower.
     pub(crate) ground_offset: i16,
@@ -355,6 +358,7 @@ impl Default for NeraSettings {
             window_y: 200,
             character_size: 100,
             character_asset: String::new(),
+            body_mode: "normal".to_string(),
             ground_offset: 0,
             walking_enabled: false,
             gravity_enabled: true,
@@ -1001,5 +1005,26 @@ mod alarm_book_tests {
 
         let alarm = alarm.normalized();
         assert!(!alarm.enabled);
+    }
+}
+
+#[cfg(test)]
+mod body_mode_settings_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_profiles_default_to_normal_and_saved_chibi_is_reflectable() {
+        let mut legacy = bevy::reflect::structs::DynamicStruct::default();
+        legacy.insert("character_size", 125_u16);
+        let mut settings = NeraSettings::default();
+        settings.apply(&legacy);
+        assert_eq!(settings.body_mode, "normal");
+        assert_eq!(settings.character_size, 125);
+
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("body_mode", "chibi".to_string());
+        settings.apply(&saved);
+        assert_eq!(settings.body_mode, "chibi");
+        assert_eq!(settings.character_size, 125);
     }
 }

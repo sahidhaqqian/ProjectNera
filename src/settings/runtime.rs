@@ -542,6 +542,7 @@ mod tests {
             window_y: 150,
             character_size: 100,
             character_asset: String::new(),
+            body_mode: "normal".to_string(),
             ground_offset: 0,
             walking_enabled: false,
             gravity_enabled: true,

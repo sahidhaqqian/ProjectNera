@@ -16,7 +16,9 @@ struct Smoke {
 }
 
 pub(crate) fn install(app: &mut App) {
-    if std::env::args().any(|arg| arg == "--cloud-smoke") {
+    if std::env::args().any(|arg| arg == "--chibi-smoke") {
+        crate::avatar::body_mode::install_smoke(app);
+    } else if std::env::args().any(|arg| arg == "--cloud-smoke") {
         crate::cloud::install_smoke(app);
     } else if std::env::args().any(|arg| arg == "--motion-smoke") {
         app.init_resource::<MotionSmoke>()

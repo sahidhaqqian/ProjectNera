@@ -1,7 +1,7 @@
 //! Project the live pose into desktop anchors and preserve its selected support plane.
 use std::time::Duration;
 
-use super::NeraAvatar;
+use super::{NeraAvatar, body_mode::BodyProportions};
 use crate::{
     animation::{BasePose, NeraAnimationState, VisualState},
     desktop_physics,
@@ -71,6 +71,21 @@ fn death_fallback_floor_y_logical(environment: &DesktopEnvironment) -> Option<f3
     Some(rect.height().max(1) as f32 / scale * DEATH_FALLBACK_FLOOR_RATIO)
 }
 
+fn standing_support_offset(settings: &NeraSettings, body_scale: f32) -> f32 {
+    FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale() * body_scale
+        + settings.ground_offset_logical()
+}
+
+/// The footprint can change while a gait owns the pose; its contact plane cannot.
+fn standing_anchor_after_body_change(standing: Vec2, feet: &[Vec2]) -> Option<Vec2> {
+    let valid: Vec<_> = feet.iter().filter(|point| point.is_finite()).collect();
+    if valid.is_empty() || !standing.is_finite() {
+        return None;
+    }
+    let x = valid.iter().map(|point| point.x).sum::<f32>() / valid.len() as f32;
+    Some(Vec2::new(x, standing.y))
+}
+
 fn support_anchor_geometry(settings: &NeraSettings, hips: Entity) -> (Entity, f32, f32) {
     (
         hips,
@@ -136,6 +151,7 @@ pub(crate) fn assert_smoke_ground_contact(world: &mut World) {
             |physics: Res<desktop_physics::DesktopPhysicsState>,
              environment: Res<DesktopEnvironment>,
              settings: Res<NeraSettings>,
+             proportions: Option<Res<BodyProportions>>,
              camera: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
              bones: Query<(&VrmBone, &GlobalTransform), With<crate::interaction::NeraLiveBone>>| {
                 assert!(!physics.falling && physics.support.is_some());
@@ -152,8 +168,10 @@ pub(crate) fn assert_smoke_ground_contact(world: &mut World) {
                     .or(environment.feet_anchor_logical)
                     .unwrap();
                 let target = anchor.y
-                    - FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale()
-                    - settings.ground_offset_logical();
+                    - standing_support_offset(
+                        &settings,
+                        proportions.as_ref().map_or(1.0, |body| body.body_scale()),
+                    );
                 assert!(
                     (foot_y - target).abs() < 2.0,
                     "rendered grounded foot escaped support: foot={foot_y} target={target}"
@@ -248,7 +266,14 @@ pub(crate) fn preserve_grounded_pose(
         else {
             return;
         };
-        anchor.y - FOOT_SOLE_OFFSET_LOGICAL * character_scale - settings.ground_offset_logical()
+        anchor.y
+            - standing_support_offset(
+                &settings,
+                owners
+                    .proportions
+                    .as_ref()
+                    .map_or(1.0, |body| body.body_scale()),
+            )
     };
     let contact = bones
         .iter()
@@ -383,6 +408,15 @@ pub(crate) struct AnchorOwners<'w> {
     library: Option<Res<'w, crate::animation::LibraryPlayback>>,
     cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
     clips: Option<Res<'w, crate::animation::NeraAnimationClips>>,
+    proportions: Option<Res<'w, BodyProportions>>,
+}
+
+/// Projection caches remember which applied geometry they have sampled. A
+/// seated/airborne change leaves standing calibration pending until it is safe.
+#[derive(Default)]
+pub(crate) struct BodyAnchorRevision {
+    standing: Option<u64>,
+    seat: Option<u64>,
 }
 
 #[cfg(target_os = "windows")]
@@ -398,6 +432,7 @@ pub(crate) fn update_avatar_anchors(
     mut environment: ResMut<DesktopEnvironment>,
     mut standing_sample: Local<StandingAnchorSampling>,
     mut seat_sample: Local<SeatAnchorSampling>,
+    mut body_revision: Local<BodyAnchorRevision>,
     camera_query: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
     mut avatar_query: Query<
         (
@@ -447,9 +482,19 @@ pub(crate) fn update_avatar_anchors(
         return;
     };
 
-    let character_scale = settings.character_scale();
-    let standing_support_offset =
-        FOOT_SOLE_OFFSET_LOGICAL * character_scale + settings.ground_offset_logical();
+    let revision = owners
+        .proportions
+        .as_ref()
+        .map_or(0, |body| body.revision());
+    let body_geometry_changed = body_revision.seat != Some(revision);
+    let standing_geometry_changed = body_revision.standing != Some(revision);
+    let support_offset = standing_support_offset(
+        &settings,
+        owners
+            .proportions
+            .as_ref()
+            .map_or(1.0, |body| body.body_scale()),
+    );
 
     let mut feet = Vec::with_capacity(2);
     let mut seat = None;
@@ -498,6 +543,27 @@ pub(crate) fn update_avatar_anchors(
         }
     }
 
+    // A body transition changes the horizontal footprint even during walking.
+    // Keep physics' rigid contact plane and support identity; the pose-grounding
+    // pass has already aligned the resized feet with that same plane.
+    if standing_geometry_changed
+        && environment.placement == PlacementState::Free
+        && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement())
+        && interaction.state != InteractionState::Dragging
+        && interaction.drag_offset.is_none()
+        && !physics.falling
+        && grounding.support_geometry
+            == Some(support_anchor_geometry(&settings, hips_bone_entity.0))
+        && let Some(standing) = physics
+            .support_anchor_logical()
+            .or(environment.feet_anchor_logical)
+        && let Some(anchor) = standing_anchor_after_body_change(standing, &feet)
+    {
+        environment.set_feet_anchor(anchor);
+        physics.refresh_support_anchor(Some(anchor));
+        body_revision.standing = Some(revision);
+    }
+
     // Feet means *standing support*. A sideways walking gait must not replace
     // this cache either: a drag begun mid-walk resets physics and later reuses
     // this standing sample when acquiring support after release.
@@ -514,7 +580,7 @@ pub(crate) fn update_avatar_anchors(
             .iter()
             .map(|point| point.y)
             .fold(f32::NEG_INFINITY, f32::max)
-            + standing_support_offset;
+            + support_offset;
 
         environment.set_feet_anchor(Vec2::new(x, y));
 
@@ -529,12 +595,21 @@ pub(crate) fn update_avatar_anchors(
             physics.refresh_support_anchor(environment.feet_anchor_logical);
             grounding.support_geometry = Some(geometry);
         }
+        if !physics.falling {
+            body_revision.standing = Some(revision);
+        }
     }
 
     // Calibrate normal sitting/entry, but retain its support through seated
     // gestures and their outgoing blend. Free probes still follow live hips.
-    if seat_sample_ready && let Some(seat) = seat {
+    if (seat_sample_ready || body_geometry_changed)
+        && let Some(seat) = seat
+    {
         environment.set_seat_anchor(seat);
+        if body_geometry_changed {
+            environment.realign_sitting_attachment();
+        }
+        body_revision.seat = Some(revision);
     }
 }
 
@@ -599,6 +674,45 @@ mod tests {
         world.init_resource::<DesktopPetInteraction>();
         world.init_resource::<crate::presentation::PresentationState>();
         (world, avatar, hips, feet, camera, view, root)
+    }
+
+    #[test]
+    fn body_mode_footprint_refresh_preserves_support_plane_over_repeated_toggles() {
+        let standing = Vec2::new(300.0, 780.0);
+        let mut cached = standing;
+        for factor in [0.62, 1.0].into_iter().cycle().take(100) {
+            let feet = [
+                Vec2::new(300.0 - 30.0 * factor, 720.0 * factor),
+                Vec2::new(300.0 + 30.0 * factor, 725.0 * factor),
+            ];
+            cached = standing_anchor_after_body_change(cached, &feet).unwrap();
+            assert_eq!(cached, standing);
+        }
+        assert!(standing_anchor_after_body_change(standing, &[]).is_none());
+        assert!(standing_anchor_after_body_change(standing, &[Vec2::NAN]).is_none());
+    }
+
+    #[test]
+    fn body_mode_scales_the_existing_sole_margin_without_scaling_user_ground_offset() {
+        let settings = NeraSettings {
+            character_size: 150,
+            ground_offset: 10,
+            ..default()
+        };
+        assert!(
+            (standing_support_offset(&settings, 0.62)
+                - (FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale() * 0.62
+                    + settings.ground_offset_logical()))
+            .abs()
+                < 0.0001
+        );
+        assert!(
+            (standing_support_offset(&settings, 1.0)
+                - (FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale()
+                    + settings.ground_offset_logical()))
+            .abs()
+                < 0.0001
+        );
     }
 
     #[test]

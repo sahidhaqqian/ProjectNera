@@ -1,6 +1,7 @@
 //! Avatar scene, gaze ownership, and pose-derived support anchors.
 //! Scheduling remains in main so cross-subsystem ordering stays explicit.
 mod anchors;
+pub(crate) mod body_mode;
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
 pub(crate) use anchors::assert_smoke_ground_contact;

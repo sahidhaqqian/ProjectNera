@@ -262,6 +262,7 @@ fn handle_presentation_commands(
     mut camera_query: Query<(&mut Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
     bone_query: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
     avatar_query: PortraitAvatars,
+    body_proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
 ) {
     for request in requests.read() {
         match *request {
@@ -325,7 +326,19 @@ fn handle_presentation_commands(
                 state.mode = PresentationMode::Attention(kind);
                 state.attention_enter_progress = 0.0;
 
-                let bounds = canonical_upper_body_bounds(&bone_query, &avatar_query);
+                let bounds = canonical_upper_body_bounds(
+                    &bone_query,
+                    &avatar_query,
+                    body_proportions
+                        .as_ref()
+                        .map_or(1.0, |body| body.body_scale()),
+                    body_proportions
+                        .as_ref()
+                        .map_or(1.0, |body| body.head_scale()),
+                    body_proportions
+                        .as_ref()
+                        .map_or(0.0, |body| body.standing_root_offset_y()),
+                );
                 let layout = compute_attention_layout_for_bounds(
                     monitor.bounds,
                     rect.width().max(1) as u32,
@@ -617,6 +630,9 @@ fn upper_body_world_metrics<'a>(
 fn canonical_upper_body_bounds(
     bones: &Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
     avatar: &PortraitAvatars,
+    body_scale: f32,
+    head_scale: f32,
+    root_offset_y: f32,
 ) -> UpperBodyBounds {
     let rest_to_world = avatar.single().ok().map(|(_, root, rest, _, _)| {
         root.compute_affine()
@@ -624,7 +640,7 @@ fn canonical_upper_body_bounds(
                 rest.0.affine().inverse()
             })
     });
-    let positions: Vec<_> = bones
+    let mut positions: Vec<_> = bones
         .iter()
         .map(|(bone, rest)| {
             let point = rest_to_world.map_or(rest.0.translation(), |mapping| {
@@ -633,6 +649,21 @@ fn canonical_upper_body_bounds(
             (bone.clone(), GlobalTransform::from_translation(point))
         })
         .collect();
+    proportion_canonical_positions(&mut positions, body_scale);
+    // PreUpdate restores the body layer before Alarm reads the canonical rig.
+    // Predict its rest-derived root correction so the portrait follows the
+    // rendered Chibi body, including rotated/non-unit avatar roots.
+    let root_offset = avatar
+        .single()
+        .ok()
+        .map_or(Vec3::ZERO, |(_, root, _, _, _)| {
+            root.rotation * (root.scale * Vec3::Y * root_offset_y)
+        });
+    if root_offset.is_finite() {
+        for (_, pose) in &mut positions {
+            *pose = GlobalTransform::from_translation(pose.translation() + root_offset);
+        }
+    }
     let mut bounds = upper_body_world_metrics(positions.iter().map(|(b, t)| (b, t))).unwrap_or(
         UpperBodyBounds {
             min_x: -0.45,
@@ -651,6 +682,24 @@ fn canonical_upper_body_bounds(
         .zip(point("hips"))
         .map_or(MIN_UPPER_BODY_WORLD_HEIGHT, |(h, p)| (h.y - p.y).abs())
         .max(MIN_UPPER_BODY_WORLD_HEIGHT);
+    // A larger head extends beyond the compressed body joints. Keep the
+    // existing crown/hair margin proportional to the actual head overlay,
+    // while canonical rest data continues to prevent alarm animation jitter.
+    if let Some(head) = point("head") {
+        let head_margin = torso_span * head_scale.max(1.0);
+        bounds.top_y = bounds
+            .top_y
+            .max(head.y + head_margin * UPPER_BODY_TOP_MARGIN_RATIO);
+        bounds.min_x = bounds
+            .min_x
+            .min(head.x - head_margin * UPPER_BODY_HORIZONTAL_MARGIN_RATIO);
+        bounds.max_x = bounds
+            .max_x
+            .max(head.x + head_margin * UPPER_BODY_HORIZONTAL_MARGIN_RATIO);
+        bounds.front_z = bounds
+            .front_z
+            .max(head.z + head_margin * UPPER_BODY_HORIZONTAL_MARGIN_RATIO);
+    }
     for chain in [
         ["leftUpperArm", "leftLowerArm", "leftHand"],
         ["rightUpperArm", "rightLowerArm", "rightHand"],
@@ -667,6 +716,23 @@ fn canonical_upper_body_bounds(
         }
     }
     bounds
+}
+
+/// The body overlay scales the actual hips subtree, keeping its origin fixed.
+/// Reproduce that same mapping for the immutable rest landmarks used by Alarm.
+fn proportion_canonical_positions(positions: &mut [(VrmBone, GlobalTransform)], body_scale: f32) {
+    if !body_scale.is_finite() || body_scale <= 0.0 {
+        return;
+    }
+    let Some(hips) = positions
+        .iter()
+        .find_map(|(bone, pose)| (bone.as_str() == "hips").then(|| pose.translation()))
+    else {
+        return;
+    };
+    for (_, pose) in positions {
+        *pose = GlobalTransform::from_translation(hips + (pose.translation() - hips) * body_scale);
+    }
 }
 
 /// Perspective camera distance for a target portrait height:
@@ -885,6 +951,7 @@ fn maintain_attention_presentation(
     mut camera_query: Query<(&mut Projection, &mut Transform), With<crate::avatar::NeraMainCamera>>,
     bone_query: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
     avatar_query: PortraitAvatars,
+    body_proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
 ) {
     if !state.is_attention() {
         return;
@@ -898,7 +965,19 @@ fn maintain_attention_presentation(
         && state.attention_avatar != Some(entity)
         && let Some(snapshot) = state.snapshot.as_ref()
     {
-        let bounds = canonical_upper_body_bounds(&bone_query, &avatar_query);
+        let bounds = canonical_upper_body_bounds(
+            &bone_query,
+            &avatar_query,
+            body_proportions
+                .as_ref()
+                .map_or(1.0, |body| body.body_scale()),
+            body_proportions
+                .as_ref()
+                .map_or(1.0, |body| body.head_scale()),
+            body_proportions
+                .as_ref()
+                .map_or(0.0, |body| body.standing_root_offset_y()),
+        );
         let layout = compute_attention_layout_for_bounds(
             monitor.bounds,
             snapshot.window_width,
@@ -1074,6 +1153,68 @@ mod tests {
             ));
         }
         (app, window, camera, avatar, camera_transform, perspective)
+    }
+
+    #[test]
+    fn alarm_canonical_chibi_landmarks_keep_the_original_hips_pivot_without_drift() {
+        let rest = vec![
+            (
+                VrmBone::from("hips"),
+                GlobalTransform::from_translation(Vec3::new(0.2, 0.3, 0.4)),
+            ),
+            (
+                VrmBone::from("head"),
+                GlobalTransform::from_translation(Vec3::new(0.2, 1.3, 0.4)),
+            ),
+            (
+                VrmBone::from("leftHand"),
+                GlobalTransform::from_translation(Vec3::new(-0.6, 0.9, 0.5)),
+            ),
+        ];
+        for factor in [0.62, 1.0].into_iter().cycle().take(100) {
+            let mut positions = rest.clone();
+            proportion_canonical_positions(&mut positions, factor);
+            assert_eq!(positions[0].1, rest[0].1);
+            for (original, changed) in rest.iter().zip(&positions) {
+                let expected = rest[0].1.translation()
+                    + (original.1.translation() - rest[0].1.translation()) * factor;
+                assert!(changed.1.translation().distance(expected) < 0.00001);
+            }
+        }
+    }
+
+    #[test]
+    fn alarm_canonical_center_follows_rendered_chibi_root_correction() {
+        let (mut app, _, _, avatar, _, _) = presentation_app();
+        let root = Transform {
+            rotation: Quat::from_euler(EulerRot::XYZ, 0.16, 0.24, 0.12),
+            scale: Vec3::new(1.3, 0.8, 1.1),
+            ..*app.world().get::<Transform>(avatar).unwrap()
+        };
+        *app.world_mut().get_mut::<Transform>(avatar).unwrap() = root;
+        let root_offset_y = -0.3;
+        let rendered_delta = root.rotation * (root.scale * Vec3::Y * root_offset_y);
+        let (without_offset, corrected) = app
+            .world_mut()
+            .run_system_once(
+                move |bones: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
+                      avatars: PortraitAvatars| {
+                    (
+                        canonical_upper_body_bounds(&bones, &avatars, 0.62, 1.9, 0.0),
+                        canonical_upper_body_bounds(&bones, &avatars, 0.62, 1.9, root_offset_y),
+                    )
+                },
+            )
+            .unwrap();
+        assert!(
+            (corrected.center_x() - without_offset.center_x() - rendered_delta.x).abs() < 0.00001
+        );
+        assert!(
+            (corrected.center_y() - without_offset.center_y() - rendered_delta.y).abs() < 0.00001
+        );
+        assert!((corrected.front_z - without_offset.front_z - rendered_delta.z).abs() < 0.00001);
+        assert!((corrected.height() - without_offset.height()).abs() < 0.00001);
+        assert!((corrected.width() - without_offset.width()).abs() < 0.00001);
     }
 
     #[test]

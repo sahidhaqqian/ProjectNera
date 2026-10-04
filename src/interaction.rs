@@ -417,6 +417,7 @@ pub(crate) fn suspend_nera_interaction_for_settings(
 #[cfg(target_os = "windows")]
 pub(crate) fn update_click_through(
     settings: Res<NeraSettings>,
+    proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
     environment: Res<DesktopEnvironment>,
     mut interaction: ResMut<DesktopPetInteraction>,
@@ -434,6 +435,8 @@ pub(crate) fn update_click_through(
         return;
     };
     let character_scale = settings.character_scale();
+    let body_scale = proportions.as_ref().map_or(1.0, |body| body.body_scale());
+    let head_scale = proportions.as_ref().map_or(1.0, |body| body.head_scale());
 
     let hovered_body_part = cursor_position_in_nera_window(&environment).and_then(|cursor_pos| {
         // Head gets a visual screen-space test first. Other body regions
@@ -443,7 +446,7 @@ pub(crate) fn update_click_through(
             camera,
             camera_transform,
             &bone_query,
-            character_scale,
+            character_scale * body_scale * head_scale,
         ) {
             return Some(BodyPart::Head);
         }
@@ -457,7 +460,7 @@ pub(crate) fn update_click_through(
                     ray.direction.into(),
                     &colliders_query,
                     &bone_query,
-                    character_scale,
+                    character_scale * body_scale,
                 )
             })
     });

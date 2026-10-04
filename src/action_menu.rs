@@ -48,6 +48,7 @@ use windows::{
 use crate::{
     alarm_settings::OpenAlarmSettingsWindow,
     animation::NeraAnimationState,
+    avatar::body_mode::{AvatarBodyMode, ToggleBodyMode},
     environment::{DesktopEnvironment, PlacementState},
     interaction::NeraRightClicked,
     settings::{OpenSettingsWindow, ReturnToActionMenu},
@@ -88,6 +89,7 @@ pub(crate) enum NeraActionMenuCommand {
     Cloud(crate::cloud::CloudCommand),
     Animation(AnimationMenuChoice),
     AnimationManager,
+    Chibi,
     Alarm(AlarmMenuChoice),
     AlarmSettings,
     Settings,
@@ -156,7 +158,7 @@ impl RadialItem {
     }
 }
 
-const ROOT_ITEMS: [RadialItem; 5] = [
+const ROOT_ITEMS: [RadialItem; 6] = [
     RadialItem {
         glyph: "☁",
         label: "Cloud",
@@ -181,6 +183,11 @@ const ROOT_ITEMS: [RadialItem; 5] = [
         glyph: "◆",
         label: "Games",
         action: RadialItemAction::Disabled,
+    },
+    RadialItem {
+        glyph: "✦",
+        label: "Chibi",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Chibi),
     },
 ];
 
@@ -264,6 +271,35 @@ impl Default for NativeRadialState {
 static NATIVE_STATE: OnceLock<Mutex<NativeRadialState>> = OnceLock::new();
 static RADIAL_HWND: AtomicIsize = AtomicIsize::new(0);
 static CLASS_READY: OnceLock<()> = OnceLock::new();
+/// Native painting caches only presentation text. `AvatarBodyMode` owns the
+/// selection; the menu never changes or resolves the body mode itself.
+static CHIBI_LABEL: OnceLock<Mutex<&'static str>> = OnceLock::new();
+
+fn chibi_label(mode: AvatarBodyMode) -> &'static str {
+    match mode {
+        AvatarBodyMode::Normal => "Chibi: Off",
+        AvatarBodyMode::Chibi => "Chibi: On",
+    }
+}
+
+fn native_chibi_label() -> &'static Mutex<&'static str> {
+    CHIBI_LABEL.get_or_init(|| Mutex::new(chibi_label(AvatarBodyMode::Normal)))
+}
+
+fn sync_chibi_menu_label(mode: Res<AvatarBodyMode>) {
+    let next = chibi_label(*mode);
+    let changed = native_chibi_label().lock().is_ok_and(|mut label| {
+        if *label == next {
+            return false;
+        }
+        *label = next;
+        true
+    });
+    let raw = RADIAL_HWND.load(Ordering::Acquire);
+    if changed && raw != 0 {
+        let _ = unsafe { InvalidateRect(Some(HWND(raw as *mut c_void)), None, false) };
+    }
+}
 
 fn native_state() -> &'static Mutex<NativeRadialState> {
     NATIVE_STATE.get_or_init(|| Mutex::new(NativeRadialState::default()))
@@ -310,6 +346,7 @@ impl Plugin for ActionMenuPlugin {
             .add_systems(
                 Update,
                 (
+                    sync_chibi_menu_label,
                     open_action_menu,
                     reopen_action_menu_from_settings,
                     poll_action_menu_result,
@@ -445,6 +482,7 @@ pub(crate) fn poll_action_menu_result(
     mut animation: ResMut<NeraAnimationState>,
     tray: Option<Res<TrayRuntime>>,
     mut commands: MessageWriter<NeraActionMenuCommand>,
+    mut toggle_body_mode: MessageWriter<ToggleBodyMode>,
     mut open_settings: MessageWriter<OpenSettingsWindow>,
     mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
     mut open_animation_manager: MessageWriter<crate::animation_manager::OpenAnimationManager>,
@@ -465,6 +503,10 @@ pub(crate) fn poll_action_menu_result(
         match command {
             NeraActionMenuCommand::Cloud(choice) => {
                 info!("Nera radial menu -> Cloud::{choice:?}");
+            }
+            NeraActionMenuCommand::Chibi => {
+                info!("Nera radial menu -> Chibi toggle");
+                toggle_body_mode.write(ToggleBodyMode);
             }
             NeraActionMenuCommand::AnimationManager => {
                 info!("Nera radial menu -> Animation Manager");
@@ -688,14 +730,25 @@ unsafe fn paint_wheel(hwnd: HWND) {
 
         let glyph_text = item.glyph;
         let glyph = wide(glyph_text);
-        let label = wide(item.label);
+        let label_text = if matches!(
+            item.action,
+            RadialItemAction::Command(NeraActionMenuCommand::Chibi)
+        ) {
+            native_chibi_label()
+                .lock()
+                .map(|label| *label)
+                .unwrap_or(item.label)
+        } else {
+            item.label
+        };
+        let label = wide(label_text);
 
         // Default GUI font is intentionally used: no font asset needs to be
         // shipped and Windows can font-link many Unicode symbols.
         let glyph_x = cx - (glyph_text.chars().count() as i32 * 4);
         let _ = unsafe { TextOutW(hdc, glyph_x, cy - 15, &glyph) };
 
-        let label_x = cx - (item.label.chars().count() as i32 * 3);
+        let label_x = cx - (label_text.chars().count() as i32 * 3);
         let _ = unsafe { TextOutW(hdc, label_x, cy + 7, &label) };
     }
 
@@ -1041,8 +1094,26 @@ mod tests {
     }
 
     #[test]
-    fn root_has_five_wheel_segments() {
-        assert_eq!(items_for(RadialPage::Root).len(), 5);
+    fn root_has_six_wheel_segments() {
+        assert_eq!(items_for(RadialPage::Root).len(), 6);
+    }
+
+    #[test]
+    fn chibi_is_one_direct_root_command_with_a_resource_derived_label() {
+        let chibi_entries: Vec<_> = ROOT_ITEMS
+            .iter()
+            .chain(CLOUD_ITEMS.iter())
+            .filter(|item| {
+                matches!(
+                    item.action,
+                    RadialItemAction::Command(NeraActionMenuCommand::Chibi)
+                )
+            })
+            .collect();
+        assert_eq!(chibi_entries.len(), 1);
+        assert!(ROOT_ITEMS.iter().any(|item| item.label == "Chibi"));
+        assert_eq!(chibi_label(AvatarBodyMode::Normal), "Chibi: Off");
+        assert_eq!(chibi_label(AvatarBodyMode::Chibi), "Chibi: On");
     }
 
     #[test]

@@ -176,6 +176,72 @@ impl DesktopEnvironment {
         }
     }
 
+    /// A new body footprint must meet the existing support in the same frame
+    /// that its live seat is sampled. Keep surface identity/offset ownership in
+    /// the attachment system and reuse its normal placement math.
+    pub(crate) fn realign_sitting_attachment(&mut self) {
+        let (Some(hwnd), Some(rect)) = (self.nera_hwnd, self.nera_rect) else {
+            return;
+        };
+        let Some((desired, placement)) = self.sitting_alignment(rect) else {
+            return;
+        };
+        if (desired.x == rect.left && desired.y == rect.top)
+            || platform::move_window(hwnd, desired).is_ok()
+        {
+            self.placement = placement;
+            if desired.x != rect.left || desired.y != rect.top {
+                self.nera_rect = platform::window_rect(hwnd);
+            }
+        }
+    }
+
+    fn sitting_alignment(&self, rect: PhysicalRect) -> Option<(PhysicalPoint, PlacementState)> {
+        match self.placement {
+            PlacementState::Window(attachment) => {
+                let target = self.target_window.as_ref().filter(|target| {
+                    target.handle == attachment.target
+                        && target.alive
+                        && !target.minimized
+                        && !target.cloaked
+                })?;
+                let anchor = self.attachment_anchor_for_rect(rect);
+                let (desired, support_offset_x) = position_on_window(
+                    target.rect,
+                    anchor,
+                    attachment.support_offset_x,
+                    self.window_edge_margin(),
+                );
+                Some((
+                    desired,
+                    PlacementState::Window(WindowAttachment {
+                        support_offset_x,
+                        ..attachment
+                    }),
+                ))
+            }
+            PlacementState::Taskbar(attachment) => {
+                let taskbar = self
+                    .taskbar
+                    .for_monitor(attachment.monitor)
+                    .copied()
+                    .filter(|taskbar| taskbar.edge == attachment.edge)?;
+                let anchor =
+                    self.taskbar_anchor_for_rect(rect, attachment.edge, self.attached_anchor);
+                let (desired, along_offset) =
+                    position_on_taskbar(taskbar, anchor, attachment.along_offset);
+                Some((
+                    desired,
+                    PlacementState::Taskbar(TaskbarAttachment {
+                        along_offset,
+                        ..attachment
+                    }),
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn sit_probe_radius(&self) -> i32 {
         (SIT_PROBE_RADIUS_AT_96_DPI * self.nera_scale_factor)
             .round()
@@ -958,6 +1024,129 @@ fn follow_taskbar_attachment(
     if refresh_z_order {
         if let Err(error) = platform::place_window_topmost_noactivate(nera_hwnd) {
             debug!("Failed to refresh taskbar sitting z-order: {error}");
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod body_geometry_tests {
+    use super::*;
+    use crate::environment::TrackedWindow;
+
+    #[test]
+    fn resized_seat_preserves_window_support_identity_and_desktop_contact() {
+        let target = NativeWindowHandle::from_raw(19);
+        let target_rect = PhysicalRect {
+            left: 100,
+            top: 600,
+            right: 1800,
+            bottom: 1000,
+        };
+        let placement = PlacementState::Window(WindowAttachment {
+            target,
+            support_offset_x: 540,
+        });
+        let rect = PhysicalRect {
+            left: 400,
+            top: 100,
+            right: 1300,
+            bottom: 1525,
+        };
+        let mut environment = DesktopEnvironment {
+            nera_scale_factor: 1.5,
+            attached_anchor: AvatarAnchor::Seat,
+            placement,
+            target_window: Some(TrackedWindow {
+                handle: target,
+                rect: target_rect,
+                previous_rect: target_rect,
+                alive: true,
+                minimized: false,
+                cloaked: false,
+                moved: false,
+                resized: false,
+                monitor: None,
+                previous_monitor: None,
+                monitor_changed: false,
+            }),
+            ..default()
+        };
+        for seat in [Vec2::new(300.0, 540.0), Vec2::new(285.0, 465.0)]
+            .into_iter()
+            .cycle()
+            .take(100)
+        {
+            environment.set_seat_anchor(seat);
+            let (desired, updated) = environment.sitting_alignment(rect).unwrap();
+            let anchor = environment.attachment_anchor_for_rect(rect);
+            assert_eq!(desired.x + anchor.x, target_rect.left + 540);
+            assert_eq!(desired.y + anchor.y, target_rect.top);
+            assert_eq!(updated, placement);
+        }
+    }
+
+    #[test]
+    fn resized_seat_preserves_each_taskbar_support_and_along_offset() {
+        let monitor = NativeMonitorHandle::from_raw(7);
+        let rect = PhysicalRect {
+            left: 200,
+            top: 100,
+            right: 800,
+            bottom: 1050,
+        };
+        for edge in [
+            TaskbarEdge::Bottom,
+            TaskbarEdge::Top,
+            TaskbarEdge::Left,
+            TaskbarEdge::Right,
+        ] {
+            let taskbar = TaskbarInfo {
+                monitor,
+                rect: PhysicalRect {
+                    left: 0,
+                    top: 1000,
+                    right: 1920,
+                    bottom: 1040,
+                },
+                edge,
+                is_primary: true,
+            };
+            let placement = PlacementState::Taskbar(TaskbarAttachment {
+                monitor,
+                edge,
+                along_offset: if matches!(edge, TaskbarEdge::Left | TaskbarEdge::Right) {
+                    20
+                } else {
+                    800
+                },
+            });
+            let mut environment = DesktopEnvironment {
+                attached_anchor: AvatarAnchor::Seat,
+                placement,
+                ..default()
+            };
+            environment.taskbar.taskbars.push(taskbar);
+            for seat in [Vec2::new(300.0, 540.0), Vec2::new(285.0, 465.0)] {
+                environment.set_seat_anchor(seat);
+                let anchor = environment.taskbar_anchor_for_rect(rect, edge, AvatarAnchor::Seat);
+                let (desired, updated) = environment.sitting_alignment(rect).unwrap();
+                let expected = position_on_taskbar(
+                    taskbar,
+                    anchor,
+                    match placement {
+                        PlacementState::Taskbar(attachment) => attachment.along_offset,
+                        _ => unreachable!(),
+                    },
+                );
+                assert_eq!(desired, expected.0);
+                assert_eq!(updated, placement);
+                match edge {
+                    TaskbarEdge::Bottom => assert_eq!(desired.y + anchor.y, taskbar.rect.top),
+                    TaskbarEdge::Top => assert_eq!(desired.y + anchor.y, taskbar.rect.bottom),
+                    TaskbarEdge::Left => assert_eq!(desired.x + anchor.x, taskbar.rect.right),
+                    TaskbarEdge::Right => assert_eq!(desired.x + anchor.x, taskbar.rect.left),
+                }
+            }
         }
     }
 }
