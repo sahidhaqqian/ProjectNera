@@ -44,10 +44,30 @@ pub(crate) struct LibraryPlayback {
     source_bytes: u64,
     access_clock: u64,
     requested: Option<String>,
+    requested_auto: bool,
     loading: Option<LoadingClip>,
 }
 
 impl LibraryPlayback {
+    pub(crate) fn request_auto_dance(&mut self, path: String) {
+        if self.manual_pending() {
+            return;
+        }
+        self.requested = Some(path);
+        self.requested_auto = true;
+    }
+    pub(crate) fn cancel_auto_dance(&mut self) {
+        if self.requested_auto {
+            self.requested = None;
+            self.requested_auto = false;
+        }
+    }
+    pub(crate) fn auto_dance_pending(&self, path: &str) -> bool {
+        self.requested_auto && self.requested.as_deref() == Some(path)
+    }
+    pub(crate) fn manual_pending(&self) -> bool {
+        self.requested.is_some() && !self.requested_auto
+    }
     pub(crate) fn path_for(&self, entity: Entity) -> Option<&str> {
         self.clips
             .iter()
@@ -227,6 +247,8 @@ pub(super) fn sync_library_animation(
     // Last click wins, including when the previous selection is still loading.
     if let Some(request) = requests.read().last() {
         runtime.requested = Some(request.path.clone());
+        runtime.requested_auto = false;
+        state.cancel_auto_dance();
     }
     for (_, mut loaded) in &mut ready {
         loaded.warmup = loaded.warmup.saturating_sub(1);
@@ -304,13 +326,22 @@ pub(super) fn sync_library_animation(
         }
         runtime.requested = None;
         if loaded.duration.is_zero() {
+            runtime.reject(
+                path,
+                "Animation has no playable duration.".into(),
+                &mut errors,
+            );
             return;
         }
         clips.library = Some(ClipSlot {
             entity,
             duration: loaded.duration,
         });
-        state.request_one_shot(TemporaryAction::LibraryAnimation(entity), loaded.duration);
+        if runtime.requested_auto {
+            state.request_auto_dance(entity, loaded.duration);
+        } else {
+            state.request_one_shot(TemporaryAction::LibraryAnimation(entity), loaded.duration);
+        }
         return;
     }
     let Ok(root) = avatar.single() else {
@@ -357,6 +388,61 @@ pub(super) fn sync_library_animation(
 mod tests {
     use super::*;
     use crate::animation::{BasePose, VisualState, playback::clip_for_visual};
+
+    #[test]
+    fn auto_dance_uses_cached_library_duration_and_manual_playback_wins() {
+        let mut app = library_app(crate::nera_asset_path());
+        app.finish();
+        app.cleanup();
+        let entity = app
+            .world_mut()
+            .spawn(LibraryClipReady {
+                duration: Duration::from_secs(2),
+                warmup: 0,
+            })
+            .id();
+        let path = "animations/test-selected.vrma";
+        {
+            let mut library = app.world_mut().resource_mut::<LibraryPlayback>();
+            library.cache_clip(path.into(), entity, 100);
+            library.request_auto_dance(path.into());
+        }
+        app.update();
+        assert!(
+            app.world()
+                .resource::<NeraAnimationState>()
+                .auto_dance_active()
+        );
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            VisualState::LibraryAnimation(entity)
+        );
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .advance(Duration::from_secs(2));
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            VisualState::Idle
+        );
+        app.world_mut()
+            .resource_mut::<LibraryPlayback>()
+            .request_auto_dance(path.into());
+        app.world_mut()
+            .write_message(PlayLibraryAnimation { path: path.into() });
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<NeraAnimationState>()
+                .auto_dance_active()
+        );
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .cancel_auto_dance();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            VisualState::LibraryAnimation(entity)
+        );
+    }
 
     fn library_app(asset_path: String) -> App {
         let mut app = App::new();

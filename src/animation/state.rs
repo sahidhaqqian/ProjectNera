@@ -228,6 +228,7 @@ pub(crate) enum TemporaryAction {
     #[cfg(target_os = "windows")]
     MenuAnimation(AnimationMenuChoice),
     LibraryAnimation(Entity),
+    AutoDance(Entity),
     /// Phase 5.5: persistent while the right-click menu is open.
     Praying,
     /// Phase 5.8: scheduled fidget, always outranked by real interaction.
@@ -245,6 +246,7 @@ pub(super) enum SupportTransition {
 pub(super) enum AnimationPriority {
     /// Autonomous movement yields to every existing animation request.
     Walking = 30,
+    AutoDance = 35,
     /// Phase 5.8 idle fidgets. Below every real interaction layer, so a
     /// micro-action can never delay a reaction, a drag, physics, or the alarm.
     IdleVariation = 40,
@@ -272,6 +274,7 @@ impl TemporaryAction {
             | Self::TouchReaction(_) => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
+            Self::AutoDance(_) => AnimationPriority::AutoDance,
             #[cfg(target_os = "windows")]
             Self::MenuAnimation(_) => AnimationPriority::Reaction,
             Self::Floating => AnimationPriority::Floating,
@@ -411,6 +414,42 @@ impl NeraAnimationState {
         self.base_pose
     }
 
+    /// Conservative V1: standing only. A dance never detaches a seated support
+    /// or overlays a manual reaction, physics, drag, startup or presentation.
+    pub(crate) fn can_auto_dance(&self) -> bool {
+        self.base_pose == BasePose::Idle
+            && self.support_transition.is_none()
+            && self.active_actions.iter().all(|a| {
+                matches!(
+                    a.action,
+                    TemporaryAction::AutoDance(_)
+                        | TemporaryAction::IdleMicro(_)
+                        | TemporaryAction::Walking
+                )
+            })
+    }
+    pub(crate) fn auto_dance_active(&self) -> bool {
+        self.active_actions
+            .iter()
+            .any(|a| matches!(a.action, TemporaryAction::AutoDance(_)))
+    }
+    pub(crate) fn request_auto_dance(&mut self, entity: Entity, duration: Duration) -> bool {
+        if !self.can_auto_dance() || duration.is_zero() {
+            return false;
+        }
+        self.cancel_auto_dance();
+        self.request_one_shot(TemporaryAction::AutoDance(entity), duration);
+        true
+    }
+    pub(crate) fn cancel_auto_dance(&mut self) {
+        let count = self.active_actions.len();
+        self.active_actions
+            .retain(|a| !matches!(a.action, TemporaryAction::AutoDance(_)));
+        if count != self.active_actions.len() {
+            self.bump_revision();
+        }
+    }
+
     pub(super) fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -480,6 +519,9 @@ impl NeraAnimationState {
     }
 
     pub(super) fn start_persistent_action(&mut self, action: TemporaryAction) {
+        if !matches!(action, TemporaryAction::AutoDance(_)) {
+            self.cancel_auto_dance();
+        }
         if action.priority() > AnimationPriority::Reaction {
             self.finish_action(TemporaryAction::DodgeWhileSitting);
             self.active_actions
@@ -511,6 +553,9 @@ impl NeraAnimationState {
     }
 
     pub(super) fn request_one_shot(&mut self, action: TemporaryAction, duration: Duration) {
+        if !matches!(action, TemporaryAction::AutoDance(_)) {
+            self.cancel_auto_dance();
+        }
         // A real interaction ends the greeting even when its own clip failed
         // to load. It must never uncover the old wave when it finishes.
         if action.priority() > AnimationPriority::StartupGreeting {
@@ -834,7 +879,7 @@ impl NeraAnimationState {
         }
     }
 
-    pub(super) fn advance(&mut self, delta: Duration) {
+    pub(crate) fn advance(&mut self, delta: Duration) {
         let mut expired_actions = Vec::new();
 
         for active in &mut self.active_actions {
@@ -947,6 +992,7 @@ impl NeraAnimationState {
                 TemporaryAction::MenuAnimation(choice) => VisualState::MenuAnimation(choice),
                 TemporaryAction::Praying => VisualState::Praying,
                 TemporaryAction::LibraryAnimation(entity) => VisualState::LibraryAnimation(entity),
+                TemporaryAction::AutoDance(entity) => VisualState::LibraryAnimation(entity),
                 TemporaryAction::IdleMicro(action) => VisualState::IdleMicro(action),
             };
         }

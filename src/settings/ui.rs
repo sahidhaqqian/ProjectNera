@@ -131,6 +131,9 @@ pub(super) struct MasterVolumeValue;
 pub(super) struct AudioMutedValue;
 
 #[derive(Component)]
+pub(super) struct AudioReactiveDanceValue;
+
+#[derive(Component)]
 pub(super) struct FpsValue;
 
 #[derive(Component)]
@@ -187,6 +190,7 @@ pub(super) enum SettingsButtonAction {
     CycleBrightness,
     CycleMasterVolume,
     ToggleAudioMute,
+    ToggleAudioReactiveDance,
     CycleFps,
     BackToMenu,
     ResetDefaults,
@@ -517,6 +521,12 @@ fn spawn_settings_ui(
                         });
 
                         settings_card(scroll, "AUDIO", |card| {
+                            settings_row(card, "Audio Reactive Dance",
+                                if settings.audio_reactive_dance { "ON" } else { "OFF" }.into(),
+                                AudioReactiveDanceValue, SettingsButtonAction::ToggleAudioReactiveDance);
+                            card.spawn((Text::new("Detects music playing on Windows locally and lets Nera dance automatically."),
+                                TextFont { font_size: FontSize::Px(11.0), ..default() },
+                                TextColor(Color::srgb(0.45, 0.5, 0.64))));
                             settings_row(
                                 card,
                                 "Master volume",
@@ -1134,6 +1144,7 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::CycleBrightness
         | SettingsButtonAction::CycleMasterVolume
         | SettingsButtonAction::ToggleAudioMute
+        | SettingsButtonAction::ToggleAudioReactiveDance
         | SettingsButtonAction::CycleFps
         | SettingsButtonAction::ResetDefaults => match interaction {
             Interaction::Pressed => Color::srgb(0.18, 0.22, 0.36),
@@ -1352,6 +1363,10 @@ pub(super) fn handle_settings_buttons(
                     "Settings: Audio mute {}",
                     if settings.audio_muted { "ON" } else { "OFF" }
                 );
+            }
+            SettingsButtonAction::ToggleAudioReactiveDance => {
+                settings.audio_reactive_dance = !settings.audio_reactive_dance;
+                save_settings_deferred(&mut commands);
             }
             SettingsButtonAction::CycleFps => {
                 settings.cycle_fps_limit();
@@ -1820,6 +1835,14 @@ pub(super) fn update_audio_settings_labels(
     settings: Res<NeraSettings>,
     mut volume_labels: Query<&mut Text, With<MasterVolumeValue>>,
     mut mute_labels: Query<&mut Text, (With<AudioMutedValue>, Without<MasterVolumeValue>)>,
+    mut dance_labels: Query<
+        &mut Text,
+        (
+            With<AudioReactiveDanceValue>,
+            Without<MasterVolumeValue>,
+            Without<AudioMutedValue>,
+        ),
+    >,
 ) {
     if !settings.is_changed() {
         return;
@@ -1831,6 +1854,14 @@ pub(super) fn update_audio_settings_labels(
 
     for mut text in &mut mute_labels {
         text.0 = if settings.audio_muted { "ON" } else { "OFF" }.into();
+    }
+    for mut text in &mut dance_labels {
+        text.0 = if settings.audio_reactive_dance {
+            "ON"
+        } else {
+            "OFF"
+        }
+        .into();
     }
 }
 

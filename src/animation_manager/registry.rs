@@ -22,6 +22,8 @@ pub(super) struct AnimationRegistry {
     pub entries: Vec<AnimationEntry>,
     pub bookmarks: BTreeSet<String>,
     origins: BTreeMap<String, String>,
+    pub(crate) dance_pool: crate::dance_pool::DancePool,
+    dance_file: PathBuf,
 }
 
 impl AnimationRegistry {
@@ -40,7 +42,10 @@ impl AnimationRegistry {
                 }
             }
         }
+        let dance_file = bookmark_file.with_file_name("dance_pool.json");
         let mut registry = Self {
+            dance_pool: crate::dance_pool::DancePool::load(&dance_file),
+            dance_file,
             root,
             bookmark_file,
             entries: Vec::new(),
@@ -130,6 +135,33 @@ impl AnimationRegistry {
             .then(|| self.root.join(key))
     }
 
+    pub fn toggle_dance(&mut self, key: &str) -> io::Result<()> {
+        if self.path(key).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Animation not found",
+            ));
+        }
+        let previous = self.dance_pool.clone();
+        if self.dance_pool.contains(key) {
+            self.dance_pool.remove(key);
+        } else {
+            self.dance_pool.add(key);
+        }
+        if let Err(error) = self.dance_pool.save(&self.dance_file) {
+            self.dance_pool = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn remap_dance(&mut self, old: &str, new: &str) -> io::Result<()> {
+        if self.dance_pool.contains(old) {
+            self.dance_pool.remap(old, new);
+            self.dance_pool.save(&self.dance_file)?;
+        }
+        Ok(())
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -196,6 +228,7 @@ impl AnimationRegistry {
             let _ = fs::rename(&destination, &source);
             return Err(error);
         }
+        self.remap_dance(key, &new_key)?;
         self.refresh();
         Ok(new_key)
     }
@@ -238,6 +271,7 @@ impl AnimationRegistry {
             let _ = fs::rename(&destination, &source);
             return Err(error);
         }
+        self.remap_dance(key, &origin)?;
         self.refresh();
         Ok(origin)
     }
@@ -297,6 +331,7 @@ impl AnimationRegistry {
             }
             self.save_bookmarks()?;
         }
+        self.remap_dance(key, &new_key)?;
         self.refresh();
         Ok(new_key)
     }
@@ -307,6 +342,8 @@ impl AnimationRegistry {
             .path(key)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Animation not found"))?;
         fs::remove_file(path)?;
+        self.dance_pool.remove(key);
+        self.dance_pool.save(&self.dance_file)?;
         self.bookmarks.remove(key);
         self.origins.remove(key);
         self.save_bookmarks()?;
@@ -472,6 +509,37 @@ pub(super) fn validated_vrma_name(proposed: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dance_pool_references_existing_files_and_follows_bookmark_rename_delete() {
+        let root = std::env::temp_dir().join(format!("nera-dance-registry-{}", std::process::id()));
+        fs::create_dir_all(root.join("assets/Imported")).unwrap();
+        fs::write(root.join("assets/Imported/user-choice.vrma"), b"fixture").unwrap();
+        let metadata = root.join("bookmarks.txt");
+        let mut registry = AnimationRegistry::new(root.join("assets"), metadata.clone());
+        assert!(registry.toggle_dance("missing.vrma").is_err());
+        registry.toggle_dance("Imported/user-choice.vrma").unwrap();
+        assert_eq!(registry.entries.len(), 1);
+        let key = registry
+            .toggle_bookmark("Imported/user-choice.vrma")
+            .unwrap();
+        assert_eq!(registry.dance_pool.keys, vec![key.clone()]);
+        let key = registry.rename(&key, "selected-renamed").unwrap();
+        let restored = AnimationRegistry::new(root.join("assets"), metadata);
+        assert_eq!(restored.dance_pool.keys, vec![key.clone()]);
+        assert_eq!(restored.entries.len(), 1);
+        registry.toggle_dance(&key).unwrap();
+        assert!(registry.dance_pool.keys.is_empty());
+        registry.toggle_dance(&key).unwrap();
+        registry.delete(&key).unwrap();
+        assert!(registry.dance_pool.keys.is_empty());
+        fs::remove_file(root.join("dance_pool.json")).unwrap();
+        fs::remove_file(root.join("bookmarks.txt")).unwrap();
+        fs::remove_dir(root.join("assets/Imported")).unwrap();
+        fs::remove_dir(root.join("assets/Bookmarks")).unwrap();
+        fs::remove_dir(root.join("assets")).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn filename_validation_rejects_windows_unsafe_names() {

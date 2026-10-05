@@ -257,6 +257,8 @@ pub(crate) struct NeraSettings {
     /// Allows Nera to walk around the desktop while otherwise idle.
     /// Disabled by default, including profiles created before walking existed.
     pub(crate) walking_enabled: bool,
+    /// Opt-in local Windows music observation; MusicDetectionState owns evidence.
+    pub(crate) audio_reactive_dance: bool,
     pub(crate) gravity_enabled: bool,
     pub(crate) throw_enabled: bool,
     /// Launch strength percentage. 100 preserves the original throw velocity.
@@ -361,6 +363,7 @@ impl Default for NeraSettings {
             body_mode: "normal".to_string(),
             ground_offset: 0,
             walking_enabled: false,
+            audio_reactive_dance: false,
             gravity_enabled: true,
             throw_enabled: true,
             throw_intensity: 50,
@@ -807,6 +810,19 @@ impl NeraSettings {
 #[cfg(test)]
 mod walking_settings_tests {
     use super::*;
+
+    #[test]
+    fn audio_reactive_preference_defaults_off_and_restores_through_existing_schema() {
+        let mut settings = NeraSettings::default();
+        assert!(!settings.audio_reactive_dance);
+        let mut saved = bevy::reflect::structs::DynamicStruct::default();
+        saved.insert("audio_reactive_dance", true);
+        settings.apply(&saved);
+        assert!(settings.audio_reactive_dance);
+        saved.insert("audio_reactive_dance", false);
+        settings.apply(&saved);
+        assert!(!settings.audio_reactive_dance);
+    }
 
     #[test]
     fn older_profiles_keep_walking_off_and_saved_choice_is_reflectable() {

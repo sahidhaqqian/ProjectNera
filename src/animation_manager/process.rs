@@ -21,10 +21,26 @@ enum Event {
     Back,
     Expression(crate::expression::NeraExpressionPreset, f32),
     ClearExpression,
+    DancePool(crate::dance_pool::DancePool),
 }
 
 fn decode_event(line: &str) -> Option<Event> {
     let message = line.strip_prefix(PREFIX)?;
+    if let Some(json) = message.strip_prefix("DANCE_POOL\t") {
+        if json.len() > 256 * 1024 {
+            return None;
+        }
+        let pool: crate::dance_pool::DancePool = serde_json::from_str(json).ok()?;
+        if pool.keys.len() > 256
+            || pool
+                .keys
+                .iter()
+                .any(|k| !crate::dance_pool::DancePool::valid_key(k))
+        {
+            return None;
+        }
+        return Some(Event::DancePool(pool));
+    }
     if message == "SETTINGS" {
         return Some(Event::Settings);
     }
@@ -252,6 +268,7 @@ fn forward_character(
 }
 
 fn poll_manager(
+    mut dance_pool: ResMut<crate::dance_pool::DancePool>,
     mut process: ResMut<ManagerProcess>,
     mut gate: ResMut<AnimationManagerInputGate>,
     mut play: MessageWriter<crate::animation::PlayLibraryAnimation>,
@@ -263,6 +280,11 @@ fn poll_manager(
     if let Some(events) = &process.events {
         for event in events.lock().unwrap().try_iter() {
             match event {
+                Event::DancePool(pool) => {
+                    if *dance_pool != pool {
+                        *dance_pool = pool;
+                    }
+                }
                 Event::Settings => {
                     settings.write_default();
                 }
@@ -774,6 +796,18 @@ fn forward_play(mut play: MessageReader<crate::animation::PlayLibraryAnimation>)
         send_event(&format!("PLAY\t{}", event.path));
     }
 }
+pub(super) fn forward_dance_pool(
+    state: Res<super::ManagerState>,
+    mut previous: Local<Option<crate::dance_pool::DancePool>>,
+) {
+    let pool = &state.registry.dance_pool;
+    if previous.as_ref() != Some(pool) {
+        if let Ok(json) = serde_json::to_string(pool) {
+            send_event(&format!("DANCE_POOL\t{json}"));
+        }
+        *previous = Some(pool.clone());
+    }
+}
 fn forward_roster_requests(mut requests: MessageReader<crate::character::roster::RosterRequest>) {
     for request in requests.read() {
         send_event(&format!(
@@ -938,6 +972,23 @@ fn smoke_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dance_pool_uses_existing_ipc_and_rejects_unsafe_references() {
+        let pool = crate::dance_pool::DancePool {
+            keys: vec!["Bookmarks/user-selected.vrma".into()],
+        };
+        assert_eq!(
+            decode_event(&format!(
+                "NERA_MANAGER\tDANCE_POOL\t{}",
+                serde_json::to_string(&pool).unwrap()
+            )),
+            Some(Event::DancePool(pool))
+        );
+        assert!(
+            decode_event("NERA_MANAGER\tDANCE_POOL\t{\"keys\":[\"../private.vrma\"]}").is_none()
+        );
+    }
 
     #[test]
     fn import_notice_highlights_existing_entry_and_removal_resets_selection() {

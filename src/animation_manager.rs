@@ -88,6 +88,7 @@ enum GalleryTab {
     Base,
     All,
     Bookmarks,
+    Dance,
     Expressions,
     Characters,
 }
@@ -121,6 +122,8 @@ enum ManagerAction {
     Base,
     All,
     Bookmarks,
+    Dance,
+    ToggleDance(String),
     Expressions,
     CharacterSlot(usize),
     AssignCharacter(String),
@@ -247,6 +250,7 @@ impl ManagerState {
                     GalleryTab::Base => base::is_base_animation(&entry.key),
                     GalleryTab::All => !self.registry.bookmarks.contains(&entry.key),
                     GalleryTab::Bookmarks => self.registry.bookmarks.contains(&entry.key),
+                    GalleryTab::Dance => self.registry.dance_pool.contains(&entry.key),
                     GalleryTab::Expressions | GalleryTab::Characters => false,
                 }) && (needle.is_empty()
                     || entry.display_name.to_lowercase().contains(&needle)
@@ -270,6 +274,7 @@ impl Plugin for AnimationManagerPlugin {
             .add_message::<OpenAnimationManager>()
             .add_message::<crate::expression::ExpressionPreviewRequest>()
             .add_message::<crate::character::roster::RosterRequest>()
+            .add_systems(Last, process::forward_dance_pool)
             .add_systems(PreUpdate, sync_manager_pointer_gate)
             .add_systems(
                 PreUpdate,
@@ -793,6 +798,19 @@ fn handle_actions(
                 state.scroll_y = 0.0;
                 state.dirty = true;
             }
+            ManagerAction::Dance => {
+                state.tab = GalleryTab::Dance;
+                state.search.clear();
+                state.scroll_y = 0.0;
+                state.dirty = true;
+            }
+            ManagerAction::ToggleDance(key) => {
+                if let Err(error) = state.registry.toggle_dance(key) {
+                    state.error = Some(error.to_string());
+                }
+                state.menu_key = None;
+                state.dirty = true;
+            }
             ManagerAction::Expressions => {
                 previews.clear(&mut commands, &mut images);
                 state.tab = GalleryTab::Expressions;
@@ -1217,6 +1235,66 @@ fn cleanup_closed_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dance_tab_actions_filter_pool_and_keep_existing_preview_play_requests() {
+        let mut state = ManagerState::for_test();
+        state.registry.entries.push(registry::AnimationEntry {
+            key: "Imported/user-choice.vrma".into(),
+            display_name: "User choice".into(),
+            source: "Imported".into(),
+            emotion: "Neutral",
+        });
+        let mut app = App::new();
+        app.insert_resource(state)
+            .init_resource::<preview::PreviewRuntime>()
+            .init_resource::<Assets<Image>>()
+            .add_message::<crate::animation::PlayLibraryAnimation>()
+            .add_message::<crate::expression::ExpressionPreviewRequest>()
+            .add_message::<crate::character::roster::RosterRequest>()
+            .add_systems(Update, handle_actions);
+        let button = app
+            .world_mut()
+            .spawn((
+                Interaction::Pressed,
+                ManagerAction::ToggleDance("Imported/user-choice.vrma".into()),
+                BackgroundColor::default(),
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<ManagerState>()
+                .registry
+                .entries
+                .len(),
+            1
+        );
+        let click = |app: &mut App, action: ManagerAction| {
+            app.world_mut().entity_mut(button).insert(action);
+            *app.world_mut().get_mut::<Interaction>(button).unwrap() = Interaction::Pressed;
+            app.update();
+        };
+        click(&mut app, ManagerAction::Dance);
+        assert!(app.world().resource::<ManagerState>().tab == GalleryTab::Dance);
+        assert_eq!(app.world().resource::<ManagerState>().filtered().len(), 1);
+        click(
+            &mut app,
+            ManagerAction::Restart("Imported/user-choice.vrma".into()),
+        );
+        let events: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<crate::animation::PlayLibraryAnimation>>()
+            .drain()
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "animations/Imported/user-choice.vrma");
+        click(
+            &mut app,
+            ManagerAction::ToggleDance("Imported/user-choice.vrma".into()),
+        );
+        assert!(app.world().resource::<ManagerState>().filtered().is_empty());
+    }
 
     #[test]
     fn title_drag_accepts_delayed_ui_press_but_does_not_repeat_or_drag_after_release() {

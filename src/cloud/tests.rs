@@ -40,6 +40,33 @@ fn app() -> App {
 }
 
 #[test]
+fn auto_dance_yields_to_both_cloud_modes_and_does_not_detach_the_cloud() {
+    for mode in [CloudMode::Rest, CloudMode::Ride] {
+        let mut app = app();
+        let clip = app.world_mut().spawn_empty().id();
+        assert!(
+            app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .request_auto_dance(clip, Duration::from_secs(5))
+        );
+        app.world_mut().write_message(CloudCommand::Summon(mode));
+        app.update();
+        assert_eq!(app.world().resource::<CloudRuntime>().mode(), Some(mode));
+        assert!(
+            !app.world()
+                .resource::<NeraAnimationState>()
+                .auto_dance_active()
+        );
+        assert!(
+            !app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .request_auto_dance(clip, Duration::from_secs(5))
+        );
+        assert_eq!(app.world().resource::<CloudRuntime>().mode(), Some(mode));
+    }
+}
+
+#[test]
 fn real_command_pipeline_is_idempotent_and_reclaims_visual_hierarchy() {
     let mut app = app();
     for mode in [CloudMode::Rest, CloudMode::Ride] {

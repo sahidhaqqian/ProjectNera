@@ -535,6 +535,7 @@ mod tests {
         // Spell out the resource so this headless regression never calls the
         // default settings' native local-date lookup or any windowing APIs.
         let settings = NeraSettings {
+            audio_reactive_dance: false,
             always_on_top: true,
             start_hidden: false,
             remember_position: true,

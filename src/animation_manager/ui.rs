@@ -139,6 +139,7 @@ pub(super) fn button_color(action: &ManagerAction, state: &ManagerState) -> Colo
         ManagerAction::Base if state.tab == GalleryTab::Base => BLUE,
         ManagerAction::All if state.tab == GalleryTab::All => BLUE,
         ManagerAction::Bookmarks if state.tab == GalleryTab::Bookmarks => BLUE,
+        ManagerAction::Dance if state.tab == GalleryTab::Dance => BLUE,
         ManagerAction::Expressions if state.tab == GalleryTab::Expressions => BLUE,
         ManagerAction::Expression(preset) if state.expression == *preset => BLUE,
         ManagerAction::Intensity(value) if state.intensity == *value => BLUE,
@@ -508,6 +509,7 @@ pub(super) fn rebuild_ui(
                                 &state,
                             );
                             button(bar, "All Animations", ManagerAction::All, px(155), &state);
+                            button(bar, "Dance", ManagerAction::Dance, px(95), &state);
                             button(bar, "Expressions", ManagerAction::Expressions, px(145), &state);
                             bar.spawn(Node {
                                 flex_grow: 1.0,
@@ -518,6 +520,9 @@ pub(super) fn rebuild_ui(
 
                     if state.tab == GalleryTab::Base {
                         label(panel, "Nera's core animations — click a preview to replay. Editing is locked.", 13.0, MUTED);
+                    }
+                    if state.tab == GalleryTab::Dance {
+                        label(panel, "AutoDance pool — add clips from All / Bookmarks. Empty is valid; previews work as usual.", 13.0, MUTED);
                     }
 
                     if state.tab == GalleryTab::Characters {
@@ -593,6 +598,8 @@ pub(super) fn rebuild_ui(
                                                     empty,
                                                     if state.tab == GalleryTab::Bookmarks {
                                                         "No bookmarked animations"
+                                                    } else if state.tab == GalleryTab::Dance {
+                                                        "Dance Pool is empty — add animations from All or Bookmarks"
                                                     } else {
                                                         "No animations found"
                                                     },
@@ -770,6 +777,17 @@ fn spawn_card(
                             MUTED,
                         );
                     });
+                button(
+                    footer,
+                    if state.registry.dance_pool.contains(&key) {
+                        "- Dance"
+                    } else {
+                        "+ Dance"
+                    },
+                    ManagerAction::ToggleDance(key.clone()),
+                    px(85),
+                    state,
+                );
                 if !is_base {
                     button(
                         footer,

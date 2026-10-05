@@ -1,1224 +1,1191 @@
 # Project Nera Architecture
 
-This document describes the repository after Phase 5.9 consolidation and the
-Phase 7 behavior/roaming implementation. The current code is the source of truth. It focuses on ownership,
-state flow, and ordering constraints
-that are easy to break when changing a Bevy desktop pet with native Windows
-integration.
+> Current architecture reference for the Phase 7 codebase.
+>
+> **Source of truth:** the code. This document records stable ownership, process boundaries, state flow, scheduling constraints, and where features belong. Feature-specific tuning/results stay in focused docs such as `CHIBI_MODE_V1.md`, `CHIBI_PROPORTION_TUNING.md`, `TOUCH_REACTION_POLISH.md`, and the memory-audit documents.
 
-## 1. Architecture overview
+---
 
-Project Nera is a Rust and Bevy desktop application whose primary Bevy window is
-a transparent, undecorated avatar window. Most behavior is implemented as Bevy
-resources, messages, components, and systems. Windows APIs provide global cursor
-coordinates, native HWND movement, monitor/window discovery, taskbar data, tray
-UI, and native utility windows.
+## 1. Architecture at a glance
 
-The practical layers are:
+Project Nera is a Windows 3D desktop pet built with Rust 2024, Bevy 0.19, and `bevy_vrm1` 0.9.2. The primary Bevy window is transparent, undecorated, compact, and backed by native Win32 desktop integration.
 
-1. **Bootstrap and orchestration** — `main.rs` creates the app, loads settings
-   before creating the window, installs plugins/resources, and defines the
-   cross-subsystem system chain.
-2. **Desktop and native facts** — `platform` wraps Win32 calls; `environment`
-   maintains the current HWND, monitor, taskbar, external-window, attachment,
-   and projected avatar-anchor snapshot.
-3. **Input and movement** — `interaction` classifies pointer gestures and owns
-   click/drag capture. `desktop_physics` owns free-placement gravity and standing
-   support. `environment::sitting` owns attached placement.
-4. **Behavior and rendering decisions** — `pet_behavior` selects low-priority
-   autonomous activities, and `walking` executes bounded destinations through
-   desktop physics. `animation` resolves the authoritative
-   visual state and applies clips. `expression` derives the face from that visual
-   state. `avatar` owns the VRM scene, gaze, and pose-derived anchors.
-5. **Presentation and utilities** — `presentation` temporarily takes ownership
-   of the main window for attention mode. `alarm`, settings, action-menu, alarm
-   windows, and tray plugins coordinate through typed messages and resources.
+Nera is organized around **explicit state owners** instead of one giant state machine:
 
-This is not a strict one-way stack. Bevy resources provide shared coordination
-points, especially `DesktopEnvironment`, `NeraAnimationState`, and
-`PresentationState`. Those intentional relationships are documented below.
+| Concern | Authoritative owner |
+|---|---|
+| Desktop/native snapshot + attachment facts | `DesktopEnvironment` |
+| Free standing gravity/throw/support | `DesktopPhysicsState` |
+| Pointer capture and click/drag classification | `DesktopPetInteraction` |
+| Body animation state | `NeraAnimationState` |
+| Runtime animation playback/clip registry | `NeraAnimationPlayback` / `NeraAnimationClips` |
+| Normal/Chibi selection | `AvatarBodyMode` |
+| Applied Chibi rig overlay | `BodyProportions` |
+| Rest/Ride placement | `CloudRuntime` while attached |
+| DesktopPet/Attention presentation | `PresentationState` |
+| Automatic face | `NeraExpressionState` |
+| Low-priority autonomous choices | `PetBehavior` |
+| Local Windows music evidence / hysteresis | `MusicDetectionState` (background Media Session + WASAPI observers) |
+| Curated AutoDance clip references | `DancePool` / Animation Manager registry metadata |
+| Active destination walk | `WalkingRuntime` |
+| Alarm deadlines/ringing | `AlarmState` |
+| Persistent app configuration | `NeraSettings` |
+| Live character selection | `ActiveCharacter` |
+| Character catalog/companions | `CharacterCatalog` / `CharacterInstances` |
+| Semantic audio/visual feedback | `PetSfx` / `PetFx` pipelines |
 
-## 2. Module map
+Core rule:
+
+> A feature may request or temporarily suspend another subsystem, but it must not create a second owner for the same state.
+
+Examples:
+
+- Cloud may suspend physics placement, but does not become a second gravity system.
+- Alarm may enter Attention presentation, but does not permanently rewrite normal desktop placement.
+- Chibi may overlay evaluated skeleton proportions, but does not replace the VRM/VRMA pipeline.
+- Touch reactions request animation; they do not directly own a competing `AnimationPlayer`.
+
+---
+
+## 2. Runtime/process topology
+
+```text
+Main Nera process
+├─ primary transparent desktop-pet Bevy window
+├─ Settings Bevy utility window                [when open]
+├─ Alarm Settings Bevy utility window          [when open]
+├─ Alarm dismiss surface                       [while ringing]
+├─ native tray/message-loop thread
+├─ native radial popup
+├─ optional companion Nera processes
+└─ Animation Manager host
+   └─ separate Animation Manager worker process
+      ├─ gallery renderer/UI
+      ├─ animation/expression previews
+      └─ character-card presentation
+
+Preview generation
+└─ disposable Animation Manager worker process
+   └─ renders full idle preview cache and exits
+```
+
+### Animation Manager isolation
+
+The gallery runs in a worker launched with `--animation-manager-worker`. This is intentional: renderer/driver allocations can retain high-water memory even after assets are despawned. Closing the worker lets the OS reclaim that renderer lifetime instead of leaving it attached to the main pet.
+
+### Multi-character isolation
+
+Additional desktop characters are separate instances of the same executable launched with `--character-instance`. Each companion gets its own renderer, window, settings identity, animation state, physics, gaze, and live model. The main instance owns the roster and lifecycle.
+
+---
+
+## 3. Bootstrap and main composition
+
+`src/main.rs` is the composition root. It should contain plugin registration and **cross-subsystem ordering**, not feature implementation.
+
+Startup order:
+
+1. Detect special worker/process modes.
+2. Create the Bevy `App`.
+3. Load `NeraSettings` before primary-window creation.
+4. Apply companion-instance settings identity if relevant.
+5. Resolve Start Hidden before creating the HWND.
+6. Register the private character asset source.
+7. Install Bevy, VRM, VRMA, Nera domain, and Windows-only plugins.
+8. Initialize cross-domain resources.
+9. Register the explicit main Update/PostUpdate/Last schedule.
+10. Optionally install smoke/benchmark instrumentation.
+11. Run the app.
+
+Primary-window defaults currently include transparent/undecorated rendering, `AlwaysOnTop`, taskbar skip, fixed size, and disabled native cursor hit-test until Nera's interaction pipeline enables it.
+
+---
+
+## 4. Module map
 
 ```text
 src/
-  main.rs
-  avatar.rs + avatar/anchors.rs
-  interaction.rs + interaction/{headpat,hit_testing}.rs
-  animation.rs + animation/{state,systems,playback}.rs
-  expression.rs
-  expression/{presets,face,basic}.rs
-  character.rs + character/{library,roster}.rs
-  animation/limbs.rs
-  alarm/sounds.rs
-  environment.rs + environment/{taskbar,sitting}.rs
-  desktop_physics.rs + desktop_physics/geometry.rs
-  pet_behavior.rs + walking.rs
-  presentation.rs
-  alarm.rs
-  {action_menu,alarm_settings,alarm_dismiss}.rs  # Windows only
-  animation_manager.rs + animation_manager/{registry,preview,ui}.rs  # Windows only
-  settings/{mod,model,runtime,ui,shadow,startup}.rs
-  tray.rs + tray/native.rs       # Windows only
-  platform/{mod,windows}.rs
-  rng.rs
+├─ main.rs                              bootstrap + cross-subsystem schedule
+│
+├─ avatar.rs                            avatar/camera/light/gaze
+│  ├─ avatar/anchors.rs                 feet/seat projection + visual grounding
+│  └─ avatar/body_mode.rs               Normal/Chibi owner + reversible overlay
+│     ├─ body_mode/springs.rs           spring runtime adapter
+│     ├─ body_mode/leg_tests.rs         leg-proportion regressions
+│     └─ body_mode/smoke.rs             native Chibi smoke support
+│
+├─ interaction.rs                       pointer capture + semantic messages
+│  ├─ interaction/hit_testing.rs        animated body colliders/raycasting
+│  ├─ interaction/headpat.rs            button-free head-stroke recognizer
+│  └─ interaction/momentum.rs           drag velocity / throw sampling
+│
+├─ animation.rs                         animation plugin boundary
+│  ├─ animation/state.rs                vocabulary, priorities, authoritative state
+│  ├─ animation/systems.rs              events/environment -> requests
+│  ├─ animation/playback.rs             VRMA registry/loading/playback mapping
+│  ├─ animation/library.rs              gallery-selected desktop playback
+│  ├─ animation/walking_loop.rs         steady-stride loop handling
+│  ├─ animation/limbs.rs                procedural Leg/Foot reactions
+│  └─ animation/touch.rs                authored Hand/Arm resolver
+│     ├─ touch/seated.rs                seated lower-body preservation
+│     ├─ touch/tests.rs                 touch regression tests
+│     └─ touch/smoke.rs                 native touch smoke support
+│
+├─ expression.rs                        facial ownership/crossfade
+│  ├─ expression/basic.rs               protected VRMA -> face intent
+│  ├─ expression/presets.rs             semantic face recipes
+│  └─ expression/face.rs                detailed morph-target layer
+│
+├─ environment.rs                       native desktop snapshot
+│  ├─ environment/taskbar.rs            taskbar discovery/geometry
+│  └─ environment/sitting.rs            attached placement/following
+├─ desktop_physics.rs                   gravity/throw/standing support
+│  └─ desktop_physics/geometry.rs       physical-pixel support geometry
+├─ pet_behavior.rs                      autonomous decision owner
+├─ walking.rs                           destination locomotion executor
+├─ startup_entrance.rs                  one entrance per process
+│
+├─ cloud.rs                             Rest/Ride placement owner
+│  ├─ cloud/bounds.rs                   visible bounds
+│  ├─ cloud/pose.rs                     cloud seat/sleep stabilization
+│  ├─ cloud/sleep_arms.rs               lying-sleep arm overlay
+│  ├─ cloud/visual.rs                   GLB/procedural cloud visual
+│  ├─ cloud/tests.rs                    regressions
+│  └─ cloud/smoke.rs                    native smoke support
+│
+├─ pet_feedback.rs                      semantic feedback bridge
+│  ├─ pet_feedback/sfx.rs               bounded semantic audio
+│  └─ pet_feedback/particles.rs         bounded short-lived FX
+│
+├─ presentation.rs                      DesktopPet <-> Attention
+├─ alarm.rs                             scheduler/ringing lifecycle
+│  ├─ alarm/sounds.rs                   sound IDs/playback/preview boundary
+│  └─ alarm/sounds/library.rs           imported alarm-sound catalog
+├─ alarm_settings.rs                    alarm manager/editor UI
+│  └─ alarm_settings/memory_audit.rs    opt-in memory audit
+├─ alarm_dismiss.rs                     ringing dismiss/snooze surface
+│
+├─ character.rs                         validated live model replacement
+│  ├─ character/roster.rs               roster protocol vocabulary
+│  └─ character/library.rs              catalog + companion owner
+│     ├─ library/import.rs               import/fingerprint work
+│     ├─ library/previews.rs             preview-cache preparation
+│     ├─ library/removal.rs              safe model removal
+│     └─ library/release.rs              companion release handshake
+├─ vrm0_migration.rs                    in-memory VRM 0.x -> 1.0 migration
+│
+├─ animation_manager.rs                 worker-side gallery application
+│  ├─ animation_manager/process.rs       host/worker IPC/process lifecycle
+│  ├─ animation_manager/registry.rs      animation catalog/bookmarks
+│  ├─ animation_manager/base.rs          protected runtime animation contract
+│  ├─ animation_manager/preview.rs       bounded independent preview rigs
+│  ├─ animation_manager/thumbnails.rs    thumbnail/idle-preview cache front end
+│  ├─ animation_manager/idle_cache.rs    compressed idle-card sequence cache
+│  ├─ animation_manager/generation.rs    disposable preview renderer
+│  ├─ animation_manager/characters.rs    character gallery/roster UI bridge
+│  ├─ animation_manager/combine.rs       VRMA trim/combine/export
+│  ├─ animation_manager/ui.rs            gallery UI
+│  ├─ animation_manager/memory_audit.rs  worker memory audit
+│  ├─ combine_loader_tests.rs            real exported-VRMA load checks
+│  └─ text_input_tests.rs                editable-text regression tests
+│
+├─ settings/
+│  ├─ mod.rs                             plugin/public boundary
+│  ├─ model.rs                           persistent schema/defaults
+│  ├─ runtime.rs                         runtime sync + persistence
+│  ├─ ui.rs                              Settings window
+│  ├─ shadow.rs                          simple/character shadows
+│  ├─ startup.rs                         Windows startup registry
+│  ├─ memory.rs                          font-cache lifecycle bridge
+│  └─ memory_audit.rs                    opt-in Settings audit
+│
+├─ utility_window.rs                     shared utility-window shell
+│  ├─ utility_window/font_cache.rs       scoped glyph-cache ownership
+│  └─ utility_window/text_input.rs       shared editable-text behavior/style
+│
+├─ action_menu.rs                        Win32 radial wheel
+├─ tray.rs                               Bevy-side tray bridge
+│  └─ tray/native.rs                     native icon/menu/message loop
+├─ platform/mod.rs                       native facade
+│  └─ platform/windows.rs                Win32 implementation
+├─ memory.rs                             VRM CPU/GPU retention tuning
+├─ benchmark.rs                          opt-in full-app memory benchmark
+├─ feature_smoke.rs                      debug integration smoke harness
+├─ rng.rs                                deterministic non-crypto PRNG
+└─ bin/{mem_minimal,mem_bevy,mem_stages}.rs
+
+examples/
+├─ chibi_validation.rs
+├─ chibi_support_fixture.rs
+└─ touch_validation.rs
 ```
 
-### `src/main.rs` — bootstrap and cross-subsystem orchestration
+---
 
-- **Purpose:** Construct and run the Bevy app.
-- **Owns:** Plugin registration, initial resources, primary-window defaults,
-  asset-root selection, and explicit cross-subsystem schedules/run conditions.
-- **Reads/depends on:** Every top-level plugin and the systems whose relative
-  order affects interaction, physics, animation, gaze, and anchors.
-- **Produces/emits:** The configured `App`; it does not define domain state.
-- **Should NOT own:** Pointer rules, animation decisions, physics calculations,
-  settings UI, avatar setup details, or Win32 implementation.
+## 5. Frame scheduling and pose ordering
 
-### `src/avatar.rs` and `src/avatar/anchors.rs` — avatar scene and pose-derived data
+Ordering is part of Nera's architecture because several systems modify native placement or evaluated VRM pose.
 
-- **Purpose:** Create the camera/light/VRM avatar and translate its live pose
-  into gaze and desktop-support information.
-- **Owns:** `NeraAvatar`, `LookAtTarget`, `AvatarVisualGrounding`, avatar spawning,
-  gaze target updates, animation-aware gaze control, and skeleton projection.
-- **Reads/depends on:** Assets and VRM components; `NeraSettings` for scale/gaze;
-  `NeraAnimationState`; `DesktopPetInteraction`; `DesktopPhysicsState`; and
-  `DesktopEnvironment`.
-- **Produces/emits:** Camera/light/avatar entities; updated look-at target;
-  `DesktopEnvironment.feet_anchor_logical` and `seat_anchor_logical`; refreshed
-  physics support anchor after deliberate geometry changes; visual death-root
-  correction.
-- **Should NOT own:** Native attachment selection, pointer gesture state,
-  animation assets/observers, animation priority, or freefall simulation.
+### First / early native facts
 
-`avatar.rs` creates the model, camera, light, and gaze target. It calls
-`animation::spawn_animation_library()` to attach VRMA children to the model;
-`animation/playback.rs` owns the avatar runtime clips' paths, load observers,
-and registry. `alarm.rs` still spawns its alarm-specific VRMA children.
-`avatar/anchors.rs` keeps pose projection and death grounding separate.
+- `environment::sync_desktop_environment` obtains/updates the primary HWND, rect, DPI, and monitor.
+- `utility_window` acquires HWNDs for temporary utility windows.
 
-### `src/interaction.rs` and `src/interaction/` — semantic pointer interaction
+### PreUpdate
 
-- **Purpose:** Convert mouse/native cursor input and avatar hit tests into stable
-  semantic interactions.
-- **Owns:** `InteractionState`, `DesktopPetInteraction`, `HoveredBodyPart`,
-  `HeadPatGesture`, `BodyPart`, colliders, and all `Nera*` interaction messages.
-- **Reads/depends on:** Global cursor/platform data, `DesktopEnvironment`, avatar
-  bones/camera, `NeraSettings`, and utility-window input gates.
-- **Produces/emits:** `NeraClicked`, `NeraRightClicked`, `NeraDragStarted`,
-  `NeraDragged`, `NeraReleased`, and `NeraHeadPatted`; native avatar-window moves;
-  pending sitting requests through `DesktopEnvironment`.
-- **Should NOT own:** Animation selection, freefall support, attention layout,
-  or settings values.
+Before normal behavior/animation requests:
 
-File boundaries:
+- refresh native-window snapshot;
+- track current support window;
+- refresh taskbars;
+- follow sitting attachments;
+- restore temporary previous-frame pose overlays before animation writes a new pose.
 
-- `interaction.rs`: semantic message contracts, click/right-click capture,
-  `Pressed -> Dragging` classification, window dragging, sitting/unsnapping
-  handoff, click-through, and utility input gates.
-- `hit_testing.rs`: avatar body colliders and nearest semantic body-part tests.
-- `headpat.rs`: mouse-button-free head-stroke recognition and cooldown.
+Examples of reversible overlays restored here include Chibi proportions, procedural Leg/Foot offsets, visual grounding, and Cloud sleep pose layers.
 
-### `src/animation.rs` and `src/animation/` — animation state machine
+### Main Update chain
 
-- **Purpose:** Resolve all animation requests into one visual state and apply
-  the corresponding VRMA clip.
-- **Owns:** `NeraAnimationState`, animation vocabulary/priorities, clip handles
-  and durations, playback cache, and alarm-animation runtime.
-- **Reads/depends on:** `DesktopEnvironment`; semantic interaction messages;
-  alarm/action-menu commands; time; and `NeraRng`.
-- **Produces/emits:** `VisualState`, base/support transitions, timed and persistent
-  actions, the selected VRMA playback command, and the active attachment anchor.
-- **Should NOT own:** Raw mouse handling, native window movement, alarm timing,
-  facial override state, or settings persistence.
-
-Submodule boundaries, in request-to-playback order:
-
-- `systems.rs`: translates environment, interaction, alarm, and menu activity
-  into state-machine requests. Autonomous idle choices belong to `pet_behavior`.
-- `state.rs`: vocabulary, priorities, requests, locks/timers, damage combo,
-  sitting transitions, and the authoritative `visual_state()` resolution.
-- `playback.rs`: VRMA asset paths and child spawning, load observers, clip
-  registry and measured durations, then `VisualState -> clip/repeat/blend/anchor`
-  mapping and application. The avatar's runtime clip paths are here; alarm clip
-  paths remain in `alarm.rs`.
-
-Optional `PersonalityAction` vocabulary is capability-gated. LookAround can reuse
-its loaded idle clip; Stretch, Yawn, SitFidget, Turn, StandUp, and SitDown currently
-have no mapped capability and leave the base pose unchanged. This is an extension
-point, not automatic discovery/import of additional VRMA files or new routines.
-
-### `src/pet_behavior.rs` and `src/walking.rs` — autonomous behavior and locomotion
-
-- **Behavior owns:** `PetBehavior`, home/support identity, recent three-choice
-  history, weighted idle/variation/walk selection, decision and activity
-  cooldowns, and interruption gates. It reads DesktopEnvironment immutably and
-  cannot request sitting or detach an existing seat.
-- **Walking owns:** `WalkingRuntime`, a support-relative `WalkIntent.target_x`,
-  LookAround preparation, direction, turn delay, subpixel X, velocity, braking, and arrival/edge/interruption
-  outcomes. It has no independent scheduler.
-- **Reads/depends on:** Settings, interaction, visibility, presentation, startup,
-  utility-window state, clip readiness, desktop support, and sampled foreground
-  fullscreen facts.
-- **Produces:** Low-priority animation requests, walk destinations,
-  and horizontal steps passed to `DesktopPhysicsState::walk_horizontal`.
-- **Should NOT own:** Native HWND translation, animation priority, raw pointer
-  capture, alarm deadlines, or a second copy of attachment/support state.
-
-The home radius is 300–600 logical pixels (default 400), converted to physical
-desktop pixels using monitor DPI. Home is refreshed after drag and invalidated by
-support, monitor, scale, geometry, or externally changed placement. Window homes
-and destinations use support-relative X so a moving support can carry them.
-Autonomy stays on the current monitor. User placement and physical support own
-sitting/standing changes; the old automatic Sit choice and 12–30 second detach
-timer are removed. Walking requires standing support, so seated attachments never slide.
-
-Calm/Normal/Active sample walking cooldowns of 60–180 / 30–90 / 15–45 seconds.
-These count eligible runtime and do not guarantee a walk at a wall-clock deadline.
-Weighted decisions and recent history can select another activity after cooldown.
-Distances and speeds vary; normal arrival chooses an 8–30 second decision pause.
-Each journey first requests the loaded LookAround clip and waits for the animation
-controller to complete it; there is no duplicate clip timer in locomotion. It then
-faces its direction for 200–400 ms before the gait starts, accelerates
-and brakes, then reports its outcome. At a reached boundary the controller waits
-briefly and requests an inward journey. Invalid support, obstruction, monitor
-change, or a stalled frame cancels the journey instead of continuing stale intent.
-
-Dragging, hover/press, reactions, falling, alarm presentation, menu/Settings,
-an open Animation Manager, hidden state, and fullscreen pause stop autonomy.
-Fullscreen is sampled on the pet's monitor; it does not hide Nera or disable alarm
-scheduling. `Allow Roaming` defaults off and gates locomotion;
-existing idle variations remain available. Settings' `Allow Roaming` checkbox
-persists that same switch; Off retains the former Stay Here semantics. The radial
-menu has no separate roaming page or preference owner.
-Standing and seated gestures use separate pose-matched candidate sets, sharing
-the same controller, cooldown, and history. Sitting_2 and Sitting_4 are base
-positions, not periodic gestures: each new attachment chooses one loaded position
-from those two and Sitting_Idle_Loop, avoiding the preceding position when possible.
-`NeraAnimationState::sitting_pose` retains that choice until detach, including
-across menu interaction, dodge, and Attention restoration. Only Sitting_Rubbing_Arm
-is a timed seated gesture. These animations leave placement unchanged, regardless
-of roaming preferences. Seated head/chest hits request
-DodgeWhileSitting and keep the attachment; only standing hits feed the death combo.
-The imported seated clips have different authored pelvis translations. After
-animation evaluation, `avatar::preserve_seated_hips` retains the calibrated seated
-hips translation while allowing gesture rotations. Seat/feet sampling waits
-through the outgoing blend; detach clears the correction immediately. Pending
-seats and SittingEnter finish calibrating before seated hit reactions are admitted.
-Praying is admitted only for a standing menu; pending/active seats reject it and
-entering Sitting cancels an existing Praying action so it cannot resume later.
-
-### `src/expression.rs` — facial expression projection
-
-- **Purpose:** Keep facial emotion consistent with the resolved body animation.
-- **Owns:** `NeraExpressionState`, visual-to-expression mapping, crossfade state,
-  quantization, and the emotion-preset allowlist.
-- **Reads/depends on:** `NeraAnimationState::visual_state()` and VRM expression
-  entities.
-- **Produces/emits:** `SetExpressions` triggers before the VRM expression pass.
-- **Should NOT own:** Independent reaction decisions or raw interaction readers.
-
-Manual expression selection uses `ExpressionPreviewRequest` and
-`ExpressionPreviewOverride`. The gallery worker forwards the selection over its
-validated stdout protocol. Each expression card owns a separate render-layer
-preview rig, framed from that rig's `HeadBoneEntity`; the desktop avatar keeps its
-ordinary body framing. `face.rs` caches named morph-target metadata before GPU
-extraction frees mesh CPU data. Before the VRM expression pass it removes the
-previous detailed pose; after the pass it applies independent brow/eye/mouth
-weights for a selected face. Default, 0% intensity, and explicit Clear release
-manual preview ownership. Clearing the selection restores normal VRM control,
-including unbound custom facial morphs. Models without these named targets use
-available VRM emotion/blink/mouth expressions instead. Anatomical differences
-and missing morphs prevent a promise of identical appearance across models.
-Where a model separates Face/Hair and Body meshes, expression previews hide Body
-without altering the live desktop avatar. `basic.rs` maps all 25 protected clips
-to a facial preset and intensity. Desktop playback resolves the path from the
-actually active library clip entity, never a pending selection. `AutomaticFace`
-crossfades the outgoing and incoming detailed recipes over 180 ms, replacing
-aggregate facial emotions but preserving natural blink. Gallery clips use the
-same table; unknown custom clips keep their own facial animation. Headpat loads
-`animations/animasi_basic/ShakeHeadNo1.vrma` through the existing controller.
-Headpat retains the Timid selection and existing HeadPat SFX. Its automatic
-eyelids ease into a partial smile-eye pose and reopen before ShakeHeadNo1 ends,
-using read-only progress from the animation owner's actual clip/action clock.
-Named eyelid rigs omit the standard blink override for this profile, preventing
-full Close and Joy morphs from stacking. Fallback rigs use the same eased amount
-through their available blink; natural blinks and manual face previews retain
-priority. Outgoing profile values participate in the existing facial crossfade.
-Four short-lived `PetFxKind::Heart` particles appear one at a time, alternating
-left/right across the clip, through the existing semantic feedback bridge.
-Blush remains an embarrassed idle clip.
-A manual preview takes precedence and
-survives gallery animation playback; only a release action or closing its owner
-ends it. Preview rigs cache their last selection and resend it only when that
-selection or the expression-entity map changes, including late initialization.
-Embarrassed/Timid use subtle transparent cheek geometry attached to the head,
-with each preview's render layer preserved.
-
-### Characters and independent desktop instances
-
-`character.rs` validates, migrates, stages, and commits model replacements.
-`character/library.rs` owns `CharacterCatalog`, `CharacterInstances`, and the
-`CharacterLibraryRequest` Select/Spawn/Close vocabulary. Validated models are
-content-addressed in `%APPDATA%/io.github.sahidhaqqi.projectnera/characters`.
-`catalog.json` preserves display names, source/content fingerprints and canonical
-source paths; directory discovery recovers older models. `character/library/import.rs`
-streams BLAKE3 with a 64 KiB buffer before copying. Canonical-path/content matches
-reuse the existing entry; normalized-content matching also covers legacy VRM0 copies.
-Missing hashes are populated safely, not by changing/removing old entries. `character/roster.rs`
-defines validated AddSlot/Assign/Clear/Import/Remove commands and serializable slot/model
-snapshots. The owner starts with two slots and caps the roster at eight, including
-the primary avatar. Settings' fixed bottom navigation opens a temporary, separate
-Multi Character panel;
-it is hidden by default and never appears in the animation navbar or radial menu.
-The utility renderer internally reuses the gallery worker's bounded preview pool
-and virtualized rows, but shows only the character title, slot rail, and model
-picker. Done/X emits SETTINGS rather than BACK, closes the worker window, and
-reopens Settings. Opening animations again restores the ordinary gallery surface.
-Metadata reports facial morph capacity; VRM0 migration repairs supported legacy
-names and missing named bindings without fabricating targets in baked meshes.
-
-Character-card UI is paced at 15 FPS by the worker's existing Framepace plugin,
-not the desktop settings FPS owner. Browsing/selection creates zero VRM rigs/cameras.
-Import registers and highlights; only explicit Use Character emits Assign to runtime.
-`character/library/previews.rs` owns one serial background preparation job in the
-main process. Its native child-process wait runs on one named OS thread, with
-completion polled before joining. Bevy's single-threaded IoTaskPool must not own
-this blocking wait: it eagerly executes the future on the caller and would freeze
-the desktop event loop during cold character thumbnail generation. Imports and
-existing entries acquire full idle caches without loading
-rigs in the browsing worker. `animation_manager/generation.rs` uses the established
-renderer for one model in a hidden disposable worker, recording whole idle cycles
-covering at least 30 seconds. The supplied 9.9167-second idle records four cycles,
-318 frames at 8 FPS. Exact animation seek times prevent slow GPU readback from
-skipping poses or shortening the sequence. Generation alone runs at 30 FPS; it
-does not alter the manager's 15 FPS cap or main Nera's 24/30 FPS setting.
-The camera survives all screenshot readbacks, then the rig retires. The worker
-waits for cache publication and exits, releasing renderer/allocator high-water
-marks. Internal and parent deadlines are respectively twice the recording duration
-plus 30/60 seconds. Successful preparation updates the roster's thumbnail revision.
-
-`animation_manager/idle_cache.rs` stores a version-2 JSON manifest and concatenated
-JPEG frame data (`.idle-v2.json` / `.idle-v2.frames`) next to legacy PNGs in the
-source-stamped cache. The manifest includes clip identity, duration, FPS and frame
-lengths; dimensions, counts, byte totals and truncated data are validated.
-Visible cards retain compressed bytes, one current 256x320 image and at most one
-decoded next frame / pending decode task. Playback uploads into the same Image
-handle; Bevy reuses the same GPU texture when its descriptor is unchanged.
-There is no per-frame filesystem access or full-duration decoded atlas. Offscreen
-cards stop work and release their buffers/tasks. `thumbnails.rs` bounds reads to
-one task and writes to two tasks, with embedded/static/legacy-atlas fallbacks while
-background preparation is pending or unavailable. Stable path keys prevent index
-reuse after deletion. PNG/JPEG use the existing image dependency; no video codec,
-Bevy feature or transitive package was added. BLAKE3 was already transitive.
-Offscreen cards and hidden/minimized windows release owned preview state; closing
-the utility exits its process. Animation/expression preview pooling is unchanged.
-AssetServer paths remain shared; no global asset purge touches desktop/shared data.
-Only derived frame caches/PNGs persist under LocalAppData `thumbnails-v1`; removing a
-registry entry invalidates that model's cache. Source VRMs are never rewritten.
-The roughly 300 MiB native renderer baseline remains; large VRMs only affect applied
-desktop avatars or the temporary import renderer, never gallery selection.
-See `MULTI_CHARACTER_MEMORY_AUDIT.md` for measured limits and opt-in instrumentation.
-
-`character/library/removal.rs` owns one pending removal. It accepts only registered
-owned imports, rejects concurrent imports, asks the existing replacement pipeline
-to restore default if needed, and closes companions using the model. Deletion waits
-for replacement/reveal and companion exit, with a bounded timeout that retains the
-model on failure. The owned copy is staged outside `.vrm` discovery before an atomic
-catalog save; save failure rolls back the registry and copy. Original source paths
-are never deleted, default Nera is protected, and reimport restores the same content
-address. The card's remove button is a sibling of selection, with confirmation.
-Title drag accepts a changed UI Pressed state while the mouse remains held, instead
-of requiring `just_pressed` in the same frame; passive labels do not capture it.
-
-Companion removal uses `character/library/release.rs` and a generation-tagged
-stdin/stdout handshake. Each companion checks its own committed model after pending
-loads settle, because its Settings can change models independently of the parent.
-Copies actually using the removed model clear their saved reference and exit;
-unrelated copies acknowledge their real model and stay alive. Their imports and
-selections are temporarily gated until RELEASE_DONE. The owner waits for these
-acknowledgements or process exit, updates stale slot metadata, and ignores old
-generation replies. A 16-message bounded channel and one blocking pipe reader per
-companion replace filesystem polling; all readers end when their pipe closes.
-
-Spawn launches the current executable with `--character-instance <session-id>`
-and a validated asset path. Each process keeps the existing single-avatar ECS
-contracts and owns a separate native window, renderer, physics state, animation
-graph, pointer capture, gallery worker, and settings namespace. Initial size,
-position, FPS, audio, brightness, shadow, gravity, and walking preferences are copied from
-the owner. Scheduled alarms are initially empty so spawning cannot duplicate the
-main alarm book. Companion changes never write the main settings profile.
-Companion additions are managed by the main process; its stdin ownership pipe
-asks companions to exit on Close or owner shutdown, including unexpected owner
-termination. MODEL commands replace an existing companion's avatar without
-spawning another process. Polling clears exited companion slots; closing slots
-cannot temporarily exceed the eight-slot cap. Clearing slot zero hides only the
-primary HWND, leaving the owner and its gallery operational. Only the
-catalog is restored on the next launch, not active companion processes. Memory
-use grows per renderer rather than sharing one global animation/physics resource.
-
-### Momentum, gravity, and shadow contact
-
-`interaction/momentum.rs` samples recent free-drag cursor travel and emits
-`NeraThrow` only above a DPI-scaled speed threshold. Paused/slow releases emit
-none; fast movement suppresses drag-to-sit acquisition only while throwing is
-enabled with nonzero intensity. Gesture cancellation
-clears the velocity history. `desktop_physics.rs` owns horizontal/vertical launch
-velocity, subpixel movement, screen bounds, drag damping, support collision, and
-the single landing transition. Existing sitting and drag ownership still win.
-Persistent `throw_enabled` and `throw_intensity` settings default to ON and 50%.
-The Settings checkbox and 0-100% slider are independent of gravity. Launch
-velocity is capped and multiplied by intensity once, in the physics consumer;
-100% preserves the original speed. OFF/0% blocks releases and new launches,
-stops in-flight momentum, and lets enabled gravity continue normal falling.
-New companions inherit the owner's throw preferences.
-The persistent `gravity_enabled` setting defaults true. OFF suppresses unsupported
-falling and startup drops; an explicit throw coasts with damping, then freezes.
-
-Shadow placement projects the cached logical desktop contact line through the
-active camera instead of following animated foot height. Death01 gallery clips
-also participate in body-wide visual grounding, and library poses cannot overwrite
-the standing contact cache. The stable line applies to both shadow modes and
-avoids raised feet pulling the ellipse or receiver above a collapsed VRM0 avatar.
-
-### Procedural limb reactions
-
-Arm, hand, leg, and foot clicks request `TemporaryAction::LimbReaction(BodyPart)`
-at the existing Reaction priority. `animation/limbs.rs` layers a 950 ms sided
-skeletal gesture over the selected standing/seated base clip. A smooth envelope
-returns to zero at both ends. PreUpdate removes the previous additive rotation;
-PostUpdate applies the current one after animation sampling and before VRM
-constraints. Only `NeraLiveBone` entities are changed, excluding VRMA source rigs
-and gallery previews. Dragging, falls, critical actions, and alarms outrank the
-gesture. Limb clicks reset the damage combo and never add damage.
-
-### Alarm sound selection
-
-`alarm/sounds.rs` provides stable persisted sound IDs, source paths, and one-shot
-preview messages. `AlarmConfig.sound` is saved as an optional eleventh field in
-the existing `v1` alarm book; old ten-field entries load as Classic. Sound IDs
-are now `u16`: built-ins retain IDs 0–4, imports use monotonically allocated IDs,
-and `u16::MAX` selects Random. `NeraSettings.alarm_sound` selects the quick-alarm default.
-`AlarmDisplayInfo.sound` travels with each queued reminder and snooze, so another
-alarm cannot replace its sound. Ringing uses one marked audio player and restarts
-completed sounds with at least a three-second start interval. Presentation exit
-still owns ringing teardown. Ogg/Vorbis and WAV decoders are enabled alongside
-MP3. The four new assets are CC0; source provenance and the upstream Kenney
-license are retained in `assets/sound/`.
-
-`alarm/sounds/library.rs` owns the content-addressed MP3/OGG/WAV catalog under
-the existing AppData namespace. It validates audio through the same Rodio
-decoder used by Bevy, caps imports at 32 files / 8 MiB / five minutes each,
-and caches at most two imported source handles. Random resolves once at trigger;
-ring repeats retain that exact handle. Missing/corrupt imports fall back quietly.
-Deleting an import clears persisted alarm references and editor drafts; built-ins
-are protected. Preview commands replace the single editor-owned player, and editor
-closure never despawns a ringing player. The radial Alarm entry opens this editor
-directly; the seven existing quick presets now live in its list view.
-
-### `src/environment.rs` and `src/environment/` — desktop snapshot and attached placement
-
-- **Purpose:** Maintain the authoritative current view of Nera's native desktop
-  surroundings and sitting attachment.
-- **Owns:** `DesktopEnvironment`, `PlacementState`, window/taskbar attachments,
-  discovered windows, tracked target state, monitor/taskbar data, anchor mode,
-  and target-suspension visibility.
-- **Reads/depends on:** `platform` Win32 queries, Bevy primary-window identity,
-  timers, and pose-derived anchors written by `avatar`.
-- **Produces/emits:** Refreshed Nera HWND/rect/DPI/monitor snapshot, external
-  window snapshots, tracked target changes, taskbar state, pending/committed
-  sitting placement, and attached-window following.
-- **Should NOT own:** Gesture thresholds, animation priorities, or free-placement
-  gravity.
-
-File boundaries:
-
-- `environment.rs`: `DesktopEnvironment`, periodic external-window discovery,
-  and liveness, rect, minimize/cloak, and monitor tracking for the selected
-  support window.
-- `taskbar.rs`: taskbar geometry derived from monitor work areas.
-- `sitting.rs`: support probing, pending-to-attached transition, follow behavior,
-  suspension, z-order, detach, and attachment geometry.
-
-`PlacementState` is the authoritative sitting/attachment state. Interaction and
-animation observe or request transitions; they must not mirror it in new state.
-
-### `src/desktop_physics.rs` and `src/desktop_physics/geometry.rs`
-
-- **Purpose:** Simulate gravity and standing support while placement is `Free`.
-- **Owns:** `DesktopPhysicsState`, vertical velocity, falling state, stable
-  standing collision anchor, landing latch, subpixel motion, and `PhysicsSupport`.
-- **Reads/depends on:** `DesktopEnvironment`, `DesktopPetInteraction`, animation
-  clips/state, and platform movement/query functions.
-- **Produces/emits:** Native vertical movement, validated bounded horizontal
-  walking steps with window-support offset updates, support acquisition/loss, and
-  falling/landing requests on `NeraAnimationState`.
-- **Should NOT own:** Sitting attachments, pose sampling, pointer capture, or
-  presentation transitions.
-
-`geometry.rs` contains the pure support projection and crossing decisions used
-by the runtime. The runtime deliberately freezes the standing support anchor
-while falling/supported so moving animation bones do not move the collision body.
-`walking_surface` exposes a safe standing interval for the current monitor or
-visible window top. `walk_horizontal` validates both current and future foot
-support before moving the HWND and updates the window-relative support offset.
-It never moves the user's application window. Minimized, cloaked, closed, moved,
-resized, or occluded supports are revalidated through the existing physics path.
-
-### `src/presentation.rs` — main-window presentation ownership
-
-- **Purpose:** Switch the avatar between normal desktop-pet mode and attention
-  presentation, currently used by alarms.
-- **Owns:** `PresentationState`, `PresentationMode`, the desktop snapshot, entry
-  progress, locked framing, and attention canvas/camera maintenance.
-- **Reads/depends on:** `DesktopEnvironment`, animation and interaction state,
-  avatar bones, platform monitor/window data, and the primary window/camera.
-- **Produces/emits:** `PresentationCommand`, `PresentationEntered`, and
-  `PresentationExited`; temporary native window/camera ownership; exact snapshot
-  restoration on exit.
-- **Should NOT own:** Alarm deadlines/audio, pointer gesture classification, or
-  persistent settings.
-
-Entering attention deliberately resets active pointer capture and suspends the
-sitting animation/placement state. The saved placement and anchor are restored
-when attention exits.
-
-Attention measures the neutral rest rig and arm reach once on entry, then uses
-one orthographic portrait projection and fixed camera through JumpHappy -> Wave.
-Authored depth movement cannot change apparent character size. Presentation
-snapshots/restores the exact camera projection and transform; it never changes
-the avatar's canonical scale. An initialized replacement rig is reframed once
-without replacing the original desktop snapshot; pose changes never reframe.
-`--alarm-framing-audit` captures 3/9/29-second native
-portraits and verifies presentation/utility cleanup after dismissal; see
-`ALARM_MEMORY_AUDIT.md` for measurements and remaining renderer retention.
-
-### `src/alarm.rs` and alarm utility modules
-
-- **Purpose:** Schedule alarms, play/stop alarm audio, request attention, and
-  coordinate alarm animation and dismiss UI.
-- **Owns:** `AlarmState` (`Idle`, `Armed`, `Ringing` plus pending deadlines/display
-  snapshots), `AlarmDisplayInfo`, custom
-  schedule de-duplication, alarm assets/audio entities, and alarm VRMA bootstrap.
-- **Reads/depends on:** Persistent alarm configuration, local platform time,
-  action-menu commands, presentation lifecycle, and animation command messages.
-- **Produces/emits:** `PresentationCommand`, `AlarmAnimationCommand`,
-  `AlarmControlCommand` handling, looping audio, and due-alarm persistence updates.
-- **Should NOT own:** Attention window layout, settings form state, or animation
-  priority resolution.
-
-Windows-only companion modules:
-
-- `alarm_settings.rs` owns the multi-alarm editor window and draft UI state. It
-  edits `NeraSettings` alarm records and queues persistence. Its Last cleanup
-  stops only `AlarmSoundPreview` entities when the editor no longer exists,
-  including pending/loading previews. Preview players reuse `AlarmAssets`' five
-  startup sound handles; the shared sound assets remain available for ringing.
-- `alarm_dismiss.rs` owns the dismiss/snooze panel, placement, and failsafe UI.
-  It reacts to presentation lifecycle messages and sends presentation/alarm
-  control commands.
-- Both alarm UI cameras use `Msaa::Off` and join the same font-cache scope as
-  Settings. `alarm_settings/memory_audit.rs` is an opt-in Windows debug native
-  editor/picker/preview and ring/dismiss memory audit, not normal runtime work.
-- `action_menu.rs` owns the native radial menu lifecycle and typed
-  `NeraActionMenuCommand` output. It opens settings/alarm settings and keeps the
-  standing-only praying animation coupled to the real menu lifetime.
-- `animation_manager.rs` owns the gallery window and input gate. Its registry
-  scans physical VRMA files and persists bookmarks under AppData; its preview
-  module creates independent VRM/VRMA instances only for cards near the scroll
-  viewport. Every preview uses a separate render layer and animation target
-  namespace before loading VRMA, avoiding global retarget-table collisions.
-  Card clicks emit `PlayLibraryAnimation`; `animation/library.rs` loads a clip
-  on the desktop rig and requests a timed action through the normal controller.
-  Desktop selections validate the VRMA extension, bone mapping, scene, and usable
-  keyframes before attachment. Asset loading and rig initialization each have a
-  20-second timeout; errors reach the gallery through host/worker IPC and release
-  the latest pending selection. Loaded desktop clip children stay cached so graph
-  node indices remain stable. Admission stops at 32 custom clips or 64 MiB of source
-  files (16 MiB per file); cached clips remain usable and the UI explains that new
-  selections require a restart when full. These limits do not measure resident RAM.
-  Desktop animation state and clip ownership remain in `animation`.
-  Search, rename and combine-name editors use the reusable
-  `utility_window/text_input.rs` styling and Bevy's `EditableText`/`InputFocus`.
-  Bevy owns grapheme editing, caret, selection and mouse placement. `ManagerState`
-  owns committed strings and transfers one transient editor snapshot across UI
-  rebuilds. Navigation/selection alone do not rebuild the gallery. Closing,
-  blurring or locking an editor releases focus; raw desktop shortcuts respect it.
-
-### `src/settings/` — persistent configuration and runtime application
-
-- **Purpose:** Define, persist, edit, and apply user settings.
-- **Owns:** `NeraSettings`, `AlarmConfig`, defaults, compatible alarm-book
-  encoding, position/startup runtime, settings-window UI state, input gate,
-  startup registration, and shadow implementation.
-- **Reads/depends on:** Bevy settings persistence, primary window/audio/Winit,
-  avatar transform, platform monitor information, environment/physics/interaction
-  for shadow placement, and Windows startup APIs.
-- **Produces/emits:** Runtime setting changes, deferred/synchronous saves,
-  `OpenSettingsWindow`, `ReturnToActionMenu`, and settings-window entities.
-- **Should NOT own:** Pointer state, attachment state, animation decisions, or
-  alarm runtime phase.
-
-Submodule boundaries:
-
-- `model.rs`: authoritative schema, defaults, labels/value operations, and
-  versioned alarm-book encoding/migration.
-- `runtime.rs`: position recovery/recording, save helpers, and live application
-  of always-on-top, size, audio, and FPS settings.
-- `ui.rs`: settings window, controls, labels, scrolling, dragging, and input gate.
-- `memory.rs`: joins `utility_window/font_cache.rs` before Settings opens; keeps
-  the Settings integration tests for scoped font ownership and OS-close ordering.
-- `memory_audit.rs`: Windows debug-only, opt-in six-cycle native open/close audit;
-  reports private/working-set memory, UI/camera counts, glyph atlases, images and
-  animation clips. No measurement polling occurs during normal launches.
-- `shadow.rs`: simple/character shadow entities and setting-driven updates;
-  brightness/character-shadow light changes query only `avatar::NeraMainLight`.
-- `startup.rs`: Windows startup registration read/write boundary.
-
-The UI mutates the model; it is not the model. Preserve field meanings and the
-current persistence representation when changing settings.
-
-The Settings-only Camera2d explicitly uses `Msaa::Off`; UI glyph/edge smoothing
-does not require a separate 4x render target. Cleanup does not reset global render
-pipelines, trim the process working set, or unload avatar/shared assets. An OS
-close may remove the window in Last before the UI cleanup in the next Update;
-font reclamation waits for both. See [Settings memory audit](SETTINGS_MEMORY_AUDIT.md)
-for measured retention and validation limits.
-
-`utility_window/font_cache.rs` owns `UtilityFontCache` and `FontCacheOwner` for
-Settings, the alarm editor and alarm dismiss panel. The first open snapshots
-existing font-atlas keys. Each window, camera and UI root has an owner marker;
-rebuilds replace roots without ending the scope while the window still exists.
-Last reclaims newly introduced atlases and their Image assets only after the
-final marked entity disappears. Overlapping opens do not resnapshot Settings
-fonts into a permanent baseline. Existing keys and surviving glyph/image
-references, including hidden text in untracked UI, remain protected. No global
-renderer/AssetServer reset is performed. See [alarm memory audit](ALARM_MEMORY_AUDIT.md).
-
-### `src/tray.rs` and `src/tray/native.rs`
-
-- **Purpose:** Bridge a native Windows tray thread to Bevy-owned application
-  state.
-- **Owns:** Tray command channels, `TrayRuntime`, thread lifecycle, and command
-  processing. `native.rs` owns the hidden HWND, icon/menu, callback procedure,
-  Explorer restart handling, and Win32 message loop.
-- **Reads/depends on:** Primary window, settings, environment, physics,
-  animation, platform helpers, app exit, and action-menu result plumbing.
-- **Produces/emits:** Show/hide/reset/toggle/exit actions and native action-menu
-  callbacks delivered to Bevy through channels.
-- **Should NOT own:** General desktop-window APIs, animation transitions, or
-  settings schema.
-
-Windows handles that cross the tray thread boundary are stored as atomic raw
-values because the windows-rs `HWND` wrapper is not a Send/Sync Bevy resource.
-
-### `src/platform/` — Win32 boundary
-
-- **Purpose:** Provide native types and operations required by higher modules.
-- **Owns:** HWND/monitor/rect/point wrappers; cursor, monitor, window, DPI,
-  visibility, movement, z-order, discovery, and local-time functions.
-- **Reads/depends on:** Windows APIs and the Bevy/winit bridge where necessary.
-- **Produces/emits:** Plain platform facts and operation results.
-- **Should NOT own:** Nera domain state, Bevy behavior decisions, settings, or
-  animation/interaction semantics.
-
-`windows.rs` is large but already bounded. Add a platform helper here when the
-operation is generally native; do not spread direct Win32 calls into domain
-modules without an existing native UI reason.
-Window support discovery and fullscreen detection exclude all HWNDs owned by
-the pet process and the live manager child process; its PID is registered at
-spawn and cleared at reap/drop.
-
-## 3. Dependency relationships
-
-Arrows mean “reads, calls, or consumes state/messages from,” not ownership.
-
-```mermaid
-graph TD
-    Main[main: bootstrap and ordering] --> Avatar & Interaction & Physics & Animation
-    Main --> Environment & Presentation & Settings
-    Main --> Behavior[pet_behavior] & Walking[walking]
-    Behavior --> Walking & Physics & Animation & Environment & Interaction & Settings & Platform
-    Walking --> Physics & Animation & Environment
-    Avatar --> Animation & Environment & Physics & Interaction & Settings
-    Interaction --> Environment & Platform & Settings
-    Physics[desktop_physics] --> Environment & Interaction & Animation & Platform
-    Animation --> Environment & Interaction & ActionMenu[action_menu commands] & RNG[rng]
-    Expression --> Animation
-    Environment --> Platform
-    Presentation --> Environment & Animation & Interaction & Platform
-    Alarm --> Settings & Presentation & Animation & ActionMenu & Platform
-    AlarmWindows[alarm settings/dismiss] --> Alarm
-    AlarmWindows --> Presentation & Settings
-    Settings --> Avatar & Environment & Physics & Interaction & Platform
-    Tray --> Settings & Environment & Physics & Animation & Platform
-```
-
-The apparent `avatar <-> environment/physics` cycle is a data pipeline, not
-duplicate ownership: avatar pose sampling writes derived anchors into
-`DesktopEnvironment`; environment/physics consume those anchors to position the
-native window; avatar death grounding and anchor refresh then read their state.
-
-Presentation also coordinates several modules directly. That coupling is
-intentional because attention mode transfers ownership of the main HWND/camera
-and must atomically suspend and restore placement, interaction, and animation.
-
-## 4. State ownership
-
-| State | Authoritative owner | Main readers/writers | Derived or transient state |
-|---|---|---|---|
-| Pointer capture and drag gesture | `interaction::DesktopPetInteraction` | `interaction.rs` writes; physics, anchors, presentation, shadow read/reset | Drag offsets, press body part, snap lock, unsnap guards |
-| Hovered semantic body part | `interaction::HoveredBodyPart` | `update_click_through` writes; pointer/headpat/presentation read | Derived each hit-test pass from camera, bones, colliders, cursor |
-| `Pressed -> Dragging -> Released` lifecycle | `InteractionState` plus `DesktopPetInteraction` | `drag_nera_window` is the transition owner | `NeraReleased` is a semantic message; state returns to `Hover` |
-| Headpat recognition | `interaction::HeadPatGesture` | `detect_head_pat` writes; utility/presentation resets | Travel, reversals, timing, cooldown |
-| Sitting/attachment | `environment::DesktopEnvironment.placement` | Pointer requests/detaches; sitting systems commit/follow; presentation snapshots/restores; animation observes | `PendingWindow`/`PendingTaskbar` delay native attachment until Seat sampling |
-| Cloud attachment | `cloud::CloudRuntime` | Cloud commands/lifecycle; pointer drag edge; pose-first Last alignment | Hidden / Appearing / Attached / Disappearing; attachment exists only in the two active states |
-| Pet SFX | `pet_feedback/sfx.rs` | Semantic `PetSfx` messages; optional startup catalog; bounded playback | Nine cooldown slots; up to four players; master volume/mute remains Settings-owned |
-| Interaction particles | `pet_feedback/particles.rs` | Semantic `PetFx` messages; real-time expiry | Five shared mesh/material pairs, five debounce slots, at most 32 short-lived entities |
-| Desktop/monitor/window snapshot | `environment::DesktopEnvironment` | Environment systems write; interaction, physics, avatar, presentation, settings shadow read | HWND rect/DPI, discovered/tracked windows, monitor, taskbars |
-| Pose support anchors | `DesktopEnvironment.feet_anchor_logical` / `seat_anchor_logical` | `avatar::anchors` writes; sitting/physics consume | Screen projection of live avatar bones; feet may be deliberately frozen by physics |
-| Freefall and standing support | `desktop_physics::DesktopPhysicsState` | Physics writes; tray resets; avatar refreshes support anchor; shadow reads | Velocity, support enum, subpixel Y, landing latch |
-| Animation resolution | `animation::NeraAnimationState` | Animation systems, physics, presentation, tray write; playback/expression/avatar read | Base pose, active actions, transition timer, combo state, revision |
-| Animation clips | `animation::NeraAnimationClips` | `animation/playback.rs` load observers write; systems/playback/physics read | Handles plus real loaded durations |
-| Playback cache | `animation::NeraAnimationPlayback` | `apply_animation_state` only | Last applied visual/revision; not a behavior authority |
-| Autonomous decisions | `pet_behavior::PetBehavior` | `update_pet_behavior` only | Home/support, eligible cooldowns, three-choice history, interruption/fullscreen state |
-| Walk execution | `walking::WalkingRuntime` | Behavior starts/cancels; `update_walking` executes through physics | Support-relative destination, direction/turn delay, velocity, outcome |
-| Expression | `expression::NeraExpressionState` | Expression system writes from resolved `VisualState` | Previous/current face, crossfade, last pushed weights/entity |
-| Presentation mode | `presentation::PresentationState` | Presentation systems write; alarm failsafe/run conditions read | Desktop snapshot and attention framing locks |
-| Alarm phase | `alarm::AlarmState` | Alarm systems write; dismiss/failsafe query through messages/state | `Idle`, `Armed`, `Ringing`; audio entities carry a marker |
-| Alarm display data | `alarm::AlarmDisplayInfo` | Alarm trigger updates; dismiss panel reads | Label and due time shown by UI |
-| Persistent settings | `settings::NeraSettings` | UI/tray/alarm mutate; runtime/avatar/interaction/shadow/main read | Bevy SettingsPlugin-backed reflected resource |
-| Settings input ownership | `settings::SettingsInputGate` and Windows `AlarmSettingsInputGate` | Utility-window systems write; interaction run conditions read | Prevents global mouse input leaking into the pet |
-| Tray thread bridge | `tray::TrayRuntime` | Tray startup creates; Bevy update/action menu drain | Receivers and atomic hidden HWND; native message-loop state remains on its thread |
-
-Do not add a second “is sitting,” “is dragging,” “current animation,” or “is in
-attention” resource. Read the authoritative state above or introduce a semantic
-message if a transition notification is required.
-
-## 5. Event and message flow
-
-### Pointer interaction
+`main.rs` keeps this cross-domain sequence explicit:
 
 ```text
-platform global cursor + Bevy mouse input + live VRM pose
-  -> interaction/hit_testing.rs computes semantic body part
-  -> HoveredBodyPart and native cursor hit-test state
-  -> interaction.rs captures press and classifies click vs drag
-  -> NeraClicked / NeraRightClicked / NeraDragStarted / NeraDragged / NeraReleased
-  -> animation/systems.rs requests reactions/floating
-  -> action_menu.rs consumes right-click
-  -> animation/state.rs resolves VisualState
-  -> animation/playback.rs applies the clip
-  -> expression.rs derives the face from the same VisualState
+mark live VRM bones
+→ attach hit colliders
+→ update look-at target
+→ suspend pet input if utility UI owns input
+→ update Cloud semantic state
+→ native drag/movement
+→ startup-entrance preparation
+→ desktop physics/support
+→ interaction -> animation requests
+→ autonomous pet behavior
+→ support/environment -> animation state
+→ walking executor
+→ age animation actions
+→ startup-entrance progression
+→ look-at ownership
+→ apply animation state
 ```
 
-Headpat detection runs after hover/hit testing and emits `NeraHeadPatted` only
-for a qualifying button-free head stroke. Animation translates that message into
-a timed head-stroke action.
+Plugin-local systems are ordered around the chain when necessary, e.g. library playback, alarm requests, action-menu requests, and lazy clip admission.
 
-### Dragging and sitting
+### PostUpdate evaluated-pose pipeline
+
+Conceptually:
 
 ```text
-Hover + left press
-  -> DesktopPetInteraction::Pressed (body part and grab offset captured)
-  -> DPI-scaled movement threshold
-  -> Dragging + NeraDragStarted
-  -> free HWND movement, or attached-surface unsnap
-  -> held drag + seat probe + timing/anti-resnap guards
-  -> DesktopEnvironment::PlacementState::Pending*
-  -> animation observes a sitting surface and starts SittingEnter
-  -> Last stage projects the animated Seat anchor
-  -> settle_pending_sit commits Window/Taskbar attachment
-  -> PreUpdate sitting follow keeps Seat aligned with support
+Bevy AnimationSystems
+→ walking loop / authored pose
+→ walking + seated corrections
+→ Cloud sleeping/seat pose corrections
+→ Chibi proportion overlay
+→ VRM constraints / propagation
+→ visual grounding
+→ gaze + expression passes
+→ Chibi spring-state adjustment
+→ SpringBone
+→ click-through
+→ headpat detection
 ```
 
-Release emits `NeraReleased { was_dragging }`; animation removes persistent
-`Floating` only for a true drag. Detachment is immediate during a pull-away so
-cursor and HWND do not diverge while an exit clip plays.
+Read actual `.before(...)` / `.after(...)` constraints before changing any pose layer.
 
-### Free placement physics
+### Last
+
+Late consumers include:
+
+- live feet/seat anchor projection;
+- pending sitting commit after the animated Seat exists;
+- cloud logical-seat alignment and visual bobbing;
+- particle update/expiry;
+- Attention presentation maintenance.
+
+### Overlay invariant
+
+> A pose layer must remove **only its own previous-frame delta**, then reapply after the pose owners it depends on. Never restore an entire stale transform and erase another owner.
+
+---
+
+## 6. Platform, environment, sitting, and physics
+
+### `platform/*`
+
+Raw Win32 work belongs behind the platform facade. It covers native window handles/rects, global cursor coordinates, monitor/DPI/work-area information, external-window enumeration, taskbar/native shell behavior, z-order, local date/time, and related Windows operations.
+
+Domain code should prefer `platform::*` helpers to scattered direct Win32 calls.
+
+### `DesktopEnvironment`
+
+`DesktopEnvironment` contains the current desktop/native snapshot:
+
+- Nera HWND/rect/DPI/scale factor;
+- monitor;
+- discovered external windows;
+- tracked support window;
+- taskbar state;
+- feet/seat projected anchors;
+- `PlacementState` and current attached anchor;
+- temporary hiding when an attached target is unavailable.
+
+Window enumeration is periodic rather than per-frame; support following and other placement-sensitive facts update as needed.
+
+### Sitting
+
+`environment::sitting` owns native attachment/follow behavior for supported windows/taskbar edges. Animation owns the seated visual state. Neither should replace the other.
+
+Walking/autonomy must not implicitly stand Nera up. Sitting/standing changes come from user placement or support validity.
+
+### Desktop physics
+
+`DesktopPhysicsState` owns free standing motion in global physical desktop pixels:
+
+- gravity;
+- vertical velocity;
+- bounded throw impulse;
+- desktop/work-area floors;
+- taskbar/window-top standing support;
+- support loss/recovery;
+- horizontal walking movement through the same native placement path.
+
+Physics yields while another explicit placement owner is active: sitting attachment, Cloud, or Attention.
+
+---
+
+## 7. Interaction pipeline
+
+### Semantic body vocabulary
 
 ```text
-First/PreUpdate desktop snapshot refresh
-  -> avatar feet anchor from the last eligible pose
-  -> desktop_physics geometry finds desktop/taskbar/window support
-  -> DesktopPhysicsState acquires, follows, loses, or crosses support
-  -> native HWND vertical movement
-  -> NeraAnimationState Falling/Landing requests
+Head
+Torso
+LeftArm / RightArm
+LeftHand / RightHand
+LeftLeg / RightLeg
+LeftFoot / RightFoot
 ```
 
-Physics yields entirely while `PlacementState` is not `Free`, while a real drag
-owns movement, and during the special death grounding path.
+Hit testing follows animated live VRM bones. Side-specific semantic values are retained even when higher-level behavior currently treats both sides alike.
 
-### Alarm and attention
+### `DesktopPetInteraction`
+
+This is the single pointer-gesture owner. It tracks hover, press, drag threshold/capture, release, right-click, throw momentum, and sitting unsnap safeguards.
+
+The body part is captured at press time, so animation/cursor motion cannot change the meaning of an in-progress gesture.
+
+Semantic messages include:
+
+- `NeraClicked`
+- `NeraRightClicked`
+- `NeraDragStarted`
+- `NeraDragged`
+- `NeraReleased`
+- `NeraThrow`
+- `NeraHeadPatted`
+
+New feature code should consume these instead of reimplementing raw mouse classification.
+
+### Headpat
+
+`interaction/headpat.rs` recognizes deliberate back-and-forth cursor movement over the head without requiring LMB. It is intentionally separate from click/drag capture.
+
+### Input ownership
+
+Settings, Alarm Settings, Animation Manager/other utility surfaces, and Attention can temporarily block normal pet interaction. Entry/exit must reset in-flight pointer state so a missed release cannot leave the transparent pet window swallowing desktop clicks.
+
+---
+
+## 8. Animation architecture
+
+### Authoritative state
+
+`NeraAnimationState` owns the desktop avatar's body state. It separates:
+
+- base pose (`Idle` / `Sitting`);
+- support transitions;
+- temporary/persistent actions;
+- sitting-position choice;
+- action priority;
+- real one-shot duration;
+- damage combo state;
+- a revision used to intentionally restart repeated requests.
+
+`VisualState` is the resolved answer consumed by playback, expressions, gaze, feedback, and other pose-aware systems.
+
+### Conceptual priority
 
 ```text
-action-menu preset or persistent alarm schedule
-  -> AlarmState::Armed
-  -> deadline reached
-  -> looping audio + AlarmState::Ringing
-  -> PresentationCommand::EnterAttention(Alarm)
-  -> AlarmAnimationCommand::Start
-  -> presentation snapshots desktop window/camera/placement
-  -> interaction reset + support suspension + attention layout
-  -> PresentationEntered
-  -> alarm_dismiss panel appears
-  -> Dismiss: PresentationCommand::ExitAttention
-     or Snooze: stop audio + arm new deadline + exit attention
-  -> presentation restores snapshot and emits PresentationExited
-  -> alarm cleanup stops animation/audio and returns to Idle when applicable
+Walking
+< Idle variation
+< Startup greeting
+< Reactions / library animation
+< Menu pose
+< Floating
+< Physics
+< Critical / death
+< Alarm
+< Alarm intro
 ```
 
-The alarm-owned failsafe stops ringing if attention never becomes active. The
-dismiss panel has a separate reachability failsafe because it is the user's
-control surface.
-The scheduler collects every due entry regardless of the current alarm phase and
-deduplicates when enqueuing. A due reminder can precede a future quick/snooze timer
-without losing its deadline or label. `PostUpdate` consumes presentation exits
-before dispatching the next alarm, and waits for DesktopPet, removal of the
-old dismiss panel, and reset of its runtime ownership. Native close/Alt+F4 and unexpected panel removal request the
-same Attention exit as Turn off, cancelling any uncommitted snooze gesture.
+Do not bypass this by starting a parallel `AnimationPlayer` from feature code.
 
-### Settings
+### Playback ownership
+
+`animation/playback.rs` owns:
+
+- runtime/protected VRMA paths;
+- clip registration/load observers;
+- measured durations;
+- loop/one-shot behavior;
+- visual-state -> clip mapping;
+- playback/blend application;
+- lazy clip admission where applicable.
+
+One-shot lifetime should come from loaded VRMA duration, not duplicated guessed timers.
+
+### Animation library playback
+
+`animation/library.rs` turns gallery selection into a normal desktop animation request. The manager is not a second desktop playback owner.
+
+### Walking animation
+
+`animation/walking_loop.rs` loops the steady gait portion of the walking VRMA instead of repeatedly replaying authored lead-in/slowdown frames.
+
+---
+
+## 9. Touch reaction architecture
+
+Touch is now split by semantic type, while `NeraAnimationState` remains the body-pose owner.
+
+### Hand/Arm: authored VRMA
+
+`animation/touch.rs` owns admission, cooldown/history, and selection for Hand/Arm reactions.
+
+Protected runtime clips:
 
 ```text
-SettingsPlugin loads NeraSettings before primary-window creation
-  -> main reads start_hidden
-  -> NeraSettingsPlugin initializes runtime/UI resources
-  -> settings UI or tray mutates NeraSettings
-  -> deferred save command
-  -> chained runtime systems apply window/scale/audio/FPS changes
-  -> dependent avatar, interaction, and shadow systems read the same resource
+Hand normal
+├─ wave1.vrma
+├─ wave2.vrma
+├─ salute.vrma
+└─ thankful.vrma
+
+Hand escalation
+├─ Dismissive Gesture.vrma
+└─ Shrugging.vrma
+
+Arm
+├─ Arm Stretching.vrma
+└─ Shoulder Rubbing.vrma
 ```
 
-Position changes are recorded from `WindowMoved` and saved after a debounce.
-Exit paths request synchronous save if settings changed. The alarm book remains
-versioned string data inside the reflected settings schema for compatibility.
+The semantic repeat sequence is tracked by `TouchReactionRuntime`. Only an **accepted** reaction advances history/cooldown. Blocked states, drag, missing/zero clip duration, or cooldown rejection do not consume a step.
 
-### Tray and native action menu
+`TouchReactionAccepted` is emitted after successful admission so PetFx/PetSfx can react to actual semantic outcomes rather than raw clicks.
+
+### Seated authored reactions
+
+`animation/touch/seated.rs` protects the calibrated seated lower body when authored Hand/Arm clips contain lower-body motion. Upper-body touch reactions therefore do not detach Nera from a seat/cloud visually.
+
+### Leg/Foot: procedural overlay
+
+`animation/limbs.rs` now owns only Leg/Foot additive motion. Arm/Hand procedural offsets intentionally evaluate to zero and are regression-tested.
+
+The filename is historical; renaming it later is hygiene, not a behavior refactor.
+
+---
+
+## 10. Expressions and gaze
+
+### Automatic expression ownership
+
+`expression.rs` derives facial state from the **resolved visual body state**, not directly from raw clicks. This prevents body/face disagreement when an animation request is interrupted or reprioritized.
+
+`expression/basic.rs` gives protected runtime clips intentional facial presets/intensities. `expression/face.rs` handles detailed Nera-specific named morph targets around the VRM expression pass, while imported avatars fall back to available standard VRM expressions.
+
+### Manual preview
+
+Animation Manager expression preview is an explicit temporary owner. Default/reset/0% releases that ownership; it should not force a permanent neutral override. Body VRMA playback does not implicitly clear the user's selected preview expression.
+
+### Gaze
+
+`avatar.rs` owns look-at target and state-aware gaze enabling. High-priority animation/presentation can suppress gaze. Rest Cloud explicitly disables cursor head-follow while sleeping and restores normal ownership on exit.
+
+---
+
+## 11. Avatar anchors, grounding, and Chibi
+
+### Anchors
+
+`avatar/anchors.rs` projects final live pose into desktop support information:
+
+- feet contact for standing;
+- hips/seat contact for sitting.
+
+Support code should consume evaluated avatar geometry rather than HWND-bottom guesses.
+
+`AvatarVisualGrounding` is a reversible visual alignment layer, not a second physics owner.
+
+### Chibi semantic state
+
+`AvatarBodyMode` is the one user-visible owner:
 
 ```text
-tray/native.rs Win32 callback and message loop
-  -> mpsc TrayCommand
-  -> tray.rs process_tray_commands on Bevy main thread
-  -> Window / NeraSettings / DesktopEnvironment / Physics / Animation updates
-
-NeraRightClicked
-  -> action_menu.rs posts a native message to the tray HWND
-  -> native radial menu runs on the tray thread
-  -> typed NeraActionMenuCommand result channel
-  -> action menu republishes the command as a Bevy message
-  -> animation, alarm, settings, or alarm settings consumes it
+Normal
+Chibi
 ```
 
-## 6. Scheduling and ordering constraints
+`NeraSettings.body_mode` only persists it; radial UI only requests/toggles it.
 
-Only explicit scheduling guarantees are listed. Separate plugin schedules may
-run in Bevy's compatible order unless an explicit relation exists.
+### Chibi rig overlay
 
-### Startup/bootstrap
+`BodyProportions` applies a reversible runtime overlay to the **same VRM and same VRMA pose**:
 
-- Persistent `NeraSettings` is loaded before `DefaultPlugins` creates the native
-  window; `start_hidden` therefore determines creation-time visibility.
-- Startup installs camera, light, and avatar spawning, plus plugin-owned startup
-  systems for audio, tray, settings startup state, and shadows. There is no
-  explicit cross-order among those independent startup systems.
+1. capture/validate the current humanoid rig;
+2. restore only Nera's previous Chibi overlay in PreUpdate;
+3. let animation/walking/sitting/cloud evaluate normally;
+4. apply body/head/upper-leg proportion changes;
+5. derive support correction from real rig geometry rather than hardcoded pixels;
+6. let constraints/gaze/expressions/springs see final proportions;
+7. restore exactly on Normal or character replacement.
 
-### `First`
+Spring handling is isolated in `body_mode/springs.rs` because `bevy_vrm1` keeps solver runtime details private. Dependency-schema compatibility is regression-tested.
 
-- `environment::sync_desktop_environment` refreshes the primary HWND, rect,
-  monitor, DPI, and scale snapshot before normal frame logic.
-- On Windows, the alarm-dismiss plugin also acquires its utility HWND in `First`
-  because winit's HWND lookup must run on the main thread. No relative order is
-  declared between these independent systems.
+Detailed Chibi proportions and native validation belong in `CHIBI_MODE_V1.md` / `CHIBI_PROPORTION_TUNING.md`.
 
-### `PreUpdate`
+---
 
-`DesktopEnvironmentPlugin` chains:
+## 12. Cloud architecture
+
+`CloudRuntime` is a temporary placement owner with:
 
 ```text
-refresh_window_snapshot
-  -> track_target_window
-  -> refresh_taskbars
-  -> follow_sitting_attachment
+CloudMode::Rest
+CloudMode::Ride
+
+Hidden → Appearing → Attached → Disappearing → Hidden
 ```
 
-The follower therefore sees current external-window and taskbar facts before it
-moves or suspends an attached Nera.
+### Logical versus visual placement
 
-### Main `Update` chain
+Cloud stores one logical desktop seat point. Visual bobbing never changes that logical support point.
 
-`main.rs` explicitly chains:
+### Rest
+
+Rest is a temporary bed/sleep state:
+
+- chooses/holds a Rest pose per attachment;
+- applies sleep orientation/arm overlays when needed;
+- suppresses normal touch/headpat and gaze while asleep;
+- dragging detaches the Rest cloud;
+- alarms, character replacement, explicit dismissal, and other defined transitions release ownership through the normal lifecycle.
+
+### Ride
+
+Ride is a floating seat/mount:
+
+- avatar + cloud move together;
+- release remains floating;
+- throw/gravity/native support snap are suspended while Ride owns placement;
+- desktop work-area/taskbar constraints keep the visible avatar/cloud usable.
+
+### Ordering
+
+Cloud pose correction runs after animation and before Chibi proportions/VRM constraints. Chibi therefore scales the final cloud-compatible pose rather than scaling cached cloud geometry twice.
+
+---
+
+## 13. Semantic PetFx and PetSfx
+
+Features emit semantic feedback messages instead of creating private effect engines.
 
 ```text
-mark_nera_live_bones
-  -> attach_bone_colliders
-  -> update_look_at_target
-  -> suspend interaction when a utility window owns input
-  -> update_cloud [menu/lifecycle commands, before drag and physics]
-  -> drag_nera_window [DesktopPet + utility input available]
-  -> prepare_startup_entrance
-  -> update_desktop_physics [DesktopPet]
-  -> sync_interaction_animation_actions
-  -> update_pet_behavior
-  -> sync_environment_animation_state
-  -> update_walking
-  -> tick_animation_actions
-  -> advance_startup_entrance
-  -> sync_look_at_for_animation
-  -> apply_animation_state
+PetSfx(PetSfxKind::...)
+PetFx { kind, anchor }
 ```
 
-Consequences:
+`pet_feedback/sfx.rs` reuses Bevy Audio, master volume/mute, bounded concurrent cues, and safe missing-file behavior.
 
-- Native drag/sitting requests happen before physics and animation resolution.
-- Physics requests falling/landing before the final visual state is selected.
-- Environment and interaction requests are resolved before central behavior
-  selection. Behavior and walking run even during blocked contexts so they can
-  cancel stale activity; they apply their own eligibility checks.
-- Idle is lowest priority and is requested before timers tick and playback runs.
-- Animation-owned gaze is resolved before the clip is applied that frame.
+`pet_feedback/particles.rs` owns shared meshes/materials, bounded particle count, short lifetimes, and anchors such as head/desktop point.
 
-Plugin-local `Update` chains also matter:
+Current semantic uses include headpat hearts, anger marks, landing/cloud puffs, sleep Zs, and reaction cues.
 
-- `alarm.rs`: VRMA bootstrap -> menu/control consumption -> custom schedule ->
-  failed-attention abort. Exit cleanup and deadline dispatch run in `PostUpdate`.
-- `presentation.rs`: debug request -> presentation command handling.
-- `settings/mod.rs`: position restoration/record/save -> UI handling -> labels ->
-  runtime application -> cleanup, all chained.
-- `action_menu.rs`, `alarm_settings.rs`, and `alarm_dismiss.rs` each chain their
-  native/UI lifecycle systems so open, action, close, and cleanup are ordered.
+A new feature should normally add/reuse a semantic kind, not create a second audio/particle stack.
 
-`animation::sync_alarm_animation` and the Windows action-menu animation bridge
-are plugin-owned `Update` systems without an explicit cross-order against the
-main chain. Preserve current message-based coupling unless a demonstrated bug
-requires a new ordering constraint.
+---
 
-### `PostUpdate`
+## 14. Autonomous behavior and walking
 
-- Alarm presentation-exit cleanup -> deadline dispatch runs after every `Update`
-  presentation/panel lifecycle system; an old exit cannot stop the next alarm.
-- `update_click_through` runs after `VrmSystemSets::SpringBone`, so body hit
-  testing uses the evaluated pose. It runs only in desktop-pet mode with utility
-  input available.
-- `detect_head_pat` runs after `update_click_through` under the same conditions,
-  so it consumes the current semantic hover.
-- Expression driving runs before `VrmSystemSets::Expressions`, allowing its
-  override to land in the same frame.
-- Cloud seat-pose preservation runs after animation sampling/seated hips,
-  before procedural limb offsets and VRM constraints. It is inactive without a
-  cloud attachment; reactions cannot interrupt initial seat calibration.
-- `AvatarVisualGrounding` restores its temporary root Y in PreUpdate and applies
-  grounded foot/body contact after VRM constraint propagation, before gaze.
-  The subsequent VRM propagation renders the correction in the same frame.
-  Grounded clips reuse the rigid support anchor; seated, cloud, falling, jumping,
-  Attention, and unclassified imported clips retain their own placement/motion.
-- Interaction logging is a debug consumer in `PostUpdate`; it does not own state.
+`PetBehavior` decides low-priority actions; `WalkingRuntime` executes a chosen destination.
 
-### `Last`
+### `PetBehavior`
 
-`main.rs` chains:
+Owns:
+
+- idle/fidget/walk choice;
+- recent-action history;
+- home/support identity;
+- activity-dependent cooldowns;
+- roaming bounds and eligibility;
+- interruption gates.
+
+It does **not** move HWNDs directly and does not decide sitting/standing.
+
+### `WalkingRuntime`
+
+Owns:
+
+- support-relative destination intent;
+- look-around preparation;
+- direction/turn delay;
+- acceleration, velocity, sub-pixel accumulation, braking;
+- arrival/interruption outcome.
+
+Movement is committed through `DesktopPhysicsState`. Invalid support/monitor/placement cancels the journey rather than continuing stale intent.
+
+Autonomy yields to user interaction, dragging, physics, alarm/Attention, explicit animations, utility windows/manager ownership, hidden state, and fullscreen-pause rules.
+
+---
+
+## 15. Presentation and alarm
+
+### Presentation
+
+`presentation.rs` separates the normal desktop world from temporary prominent presentation.
 
 ```text
-update_avatar_anchors -> settle_pending_sit [DesktopPet]
-  -> align_cloud_seat -> animate_cloud_visual -> update_particles
+PresentationMode::DesktopPet
+PresentationMode::Attention(Alarm)
 ```
 
-This is the pose-first sitting calibration: `SittingEnter` starts earlier,
-anchors sample the evaluated pose, then the pending attachment commits using the
-Seat anchor. Reversing this creates visible floating or snapping.
+Entering Attention snapshots enough window/camera/placement state to restore normal desktop behavior afterward. The same compact transparent Bevy window is repositioned/reframed rather than replaced by a monitor-sized transparent canvas.
 
-`presentation::maintain_attention_presentation` also runs in `Last`. It is the
-final recurring owner of attention window/camera layout and intentionally
-overrides earlier desktop attachment following. There is no explicit relative
-order between it and the anchor/settle pair; run conditions and presentation
-state prevent desktop settling from operating during attention.
+Alarm framing uses a canonical layout for the sequence so switching alarm animation A -> B does not suddenly rescale the avatar from live animated bounds.
 
-## 7. Behavior-sensitive areas
+### Alarm runtime
 
-### Cloud and semantic feedback ownership
+`alarm.rs` owns:
 
-`cloud.rs` owns the complete cloud attachment; native `PlacementState` remains
-Free while it is active. Consumers query `CloudRuntime::owns_placement()` rather
-than duplicating cloud booleans or extending window/taskbar placement variants.
-Cloud summoning clears native attachments and motion caches, sets an existing
-seated base pose (Rest fallback: Sitting4; Ride: Default), and keeps a physical desktop
-seat point independent of visual bobbing. No gravity setting is mutated.
+- timer/scheduled deadlines;
+- pending alarm ordering;
+- ringing state;
+- Attention entry/exit;
+- alarm animation lifecycle;
+- selected sound playback/repeat;
+- snooze runtime state.
 
-Drag still moves the same HWND through `interaction.rs`. At Pressed -> Dragging,
-Rest immediately releases attachment and starts the visual disappearance. Ride
-stays attached: Last reads the dragged seat point and updates the logical mount
-position. Its release cannot launch throw momentum or acquire a native seat.
-Ride clamps its complete projected avatar/cloud bounds to the current native
-monitor work area, including fully appeared cloud size and both bob extremes.
-Dragging refreshes the existing monitor fact after the HWND move so crossing
-monitors does not reuse the prior taskbar geometry. Oversized custom mounts
-are centered to maximize usable visibility when fitting is impossible.
-While either cloud owns placement, physics cancels stale freefall/throws and
-does not search for support; behavior cancels roaming/fidgets. Normal support
-animation sync yields to the cloud-selected base pose. Seat/hips sampling and
-shadow visibility recognize the cloud owner. `CloudRuntime::rest_pose()` owns
-the two Rest variations: Lying and Seated. New Rest attachments alternate without
-repeating; repeated summons and elapsed time never change an active selection.
-Rest also suppresses both LookAt and BodyTracking directly from CloudRuntime's
-active attachment, including loading/fallback poses. The existing gaze owner
-restores current user preferences as soon as that attachment ends; no saved
-second gaze toggle survives dismissal, drag, interruption, or replacement.
+The editor does not own scheduler state.
 
-The selected pose is not another placement owner. Lying Rest lazily retargets the promoted
-`animasi_basic/Sleeping_Idle.vrma`, selects it as the base looping clip without
-adding it to random taskbar/window sitting choices, and falls back to Sitting4
-while loading. It requests Exhausted 100% (60% during the loading fallback) only
-in the automatic expression layer; manual gallery previews remain authoritative.
-Seated Rest loops the existing Sitting4 with Exhausted 100%, without the lying
-roll/arm layer or inner-cushion contact. Ordinary sitting clips instead request
-Default; Timid remains available as an explicit facial preset. While Rest owns
-placement, interaction animation routing consumes all body clicks and headpat
-messages without starting reactions, damage combos or limb animation. Headpat
-feedback is also suppressed. The drag/release paths are not gated and normal
-reactions resume after detachment; Ride keeps its existing reactions.
+### Alarm Settings
 
-Dismiss releases ownership *before* its 250 ms visual shrink. Cached physics is
-reset and the ordinary free-placement solver resumes at the current HWND
-position, honoring Gravity OFF as well as ON. A missing visual/rig, character
-commit, hide, Attention, actual manual VRMA/menu-animation playback, or tray
-position recovery intentionally exits cloud placement. Character commit also
-destroys old feedback entities. Fullscreen retains the cloud and existing
-behavior-pause semantics; opening/closing utility windows alone does not exit it.
+`alarm_settings.rs` owns only the alarm-manager window, draft/edit state, quick-preset UI, and persistent `AlarmConfig` edits.
 
-`cloud/visual.rs` lazily reuses the supplied GLB through Bevy's existing
-`WorldAssetRoot`, with procedural lobes only when the file is absent. Its own
-small hierarchy is refreshed after native Last alignment, avoiding a full-world
-transform pass. Existing memory policy releases immutable cloud mesh/texture CPU
-copies after render extraction. One cloud model is cached after first use.
-The measured model-local front-rim seat is `(0, 0.94, 1.4)`, rather than the
-outer lobes' maximum height. Projection uses the live hips contact's depth; the
-root subtracts the scaled local seat, so appearance scaling stays centered on
-that contact. Lying Rest instead uses the inner cushion `(0, 1.12, 0.95)` and
-a world-down, scale-aware pelvis contact; a sideways hips rotation must not turn
-the contact offset sideways. Cloud hit testing follows the actual visual root, not the seat's
-old screen-space ellipse. Bobbing affects only the visual contact by a tiny amount.
+The radial Alarm action opens Alarm Settings directly. 5m/10m/15m/30m/45m/1h/2h presets now live in that utility window.
 
-`cloud/pose.rs` holds a derived nine-bone lower-body cache, not another attachment
-owner. After 220 ms of seated evaluation it preserves pelvis/legs when headpat,
-dodge, or limb reactions use standing-authored clips, and during their return
-blend. Head/torso/arms remain animated and procedural limb offsets apply afterward.
-Detachment/replacement clears the cache; ordinary desktop sitting is unchanged.
-When the cold sleep clip becomes available, base-pose calibration restarts before
-the lower-body cache is admitted for reactions. Pointer reactions are disabled
-on Rest, and explicit VRMA playback/dismissal still releases cloud ownership.
-Lying Rest applies a reversible screen-plane roll to the sampled hips so the
-head lies to the right without turning the face away from the viewer. PreUpdate
-restores its raw rotation before the next animation sample. The original VRMA
-bytes are unchanged.
-`cloud/sleep_arms.rs` layers relaxed shoulders, down-torso elbows and neutral
-wrists onto the actual Sleeping Idle base only. Normalized arm rotations use
-each rig's `RestTransform`/`RestGlobalTransform`, following the VRMA retargeter's
-coordinate conversion. A 300 ms smooth blend eases into the layer; its at-most
-eight raw rotations are restored in PreUpdate before animation evaluation.
-Headpat/reactions, Ride, detachment and character replacement release the layer.
-Spine/breathing and fingers remain authored by the clip. There is no IK, mesh
-deformation, additional entity or idle skeleton scan.
-Closed sleeping eyes require real eyelid morphs: the bundled `nera0.0.vrm`
-contains no mesh morph targets or expression binds, so it remains open-eyed.
-That is an asset limitation, not a general VRM 0.x restriction.
-The debug Cloud smoke accepts `--cloud-smoke-blink-model=<local-vrm0-path>` to
-replace its test character with a Blink-capable legacy reference. It asserts
-the migrated Blink override and actual rendered morph weights, then captures
-the resting face. Alicia Solid passed this check with both eyelids visibly
-closed. This uses existing migration/expression code, adds no runtime fallback
-meshes, and does not transfer incompatible vertex deltas onto Charlotte.
+### Alarm sounds
 
-`pet_feedback.rs` bridges headpat messages, real physics falling->support
-touchdown, and resolved animation face intent into semantic events. Paths live
-only in the SFX catalog, not gameplay. Optional `.ogg` files are checked/loaded
-once at startup; missing files are never submitted to AssetServer. Events while
-a cue is missing/not ready are dropped without queuing/retrying or logging.
-Cooldowns are fixed-size arrays; DESPAWN playback and a five-second safety expiry
-bound voice entities. Audio features/dependencies are unchanged.
+`alarm/sounds/library.rs` owns imported alarm-sound storage/catalog, validation, stable IDs, duplicate identity, deletion cleanup, safe missing-file fallback, and Random/default/custom selection compatibility.
 
-Particles are unlit, shadow-free shared meshes with desktop-space motion, not
-emitters or a general simulation. FxCooldown holds a single bounded headpat
-sequence and reads the existing animation progress, without a separate reaction
-timer. It schedules four alternating heart pulses, drops missed pulses after a
-long frame instead of producing a catch-up burst, and cancels on interruption.
-Hearts follow a frame-rate-independent outward/upward arc with a slight tilt
-and smooth appearance/disappearance over 850 ms. Other effects retain their
-existing drift and lifetimes. Four landing/cloud puffs, one anger mark, or one Z
-are debounced at 250 ms and all effects share a hard 32-entity budget. They despawn on expiry,
-hide, Attention, or character replacement. No filesystem polling or per-frame
-asset loading is added. Future mood callers can emit `CloudCommand`, `PetSfx`,
-and `PetFx` without implementing mood logic here. See
-[Phase 7 polish validation](PHASE_7_POLISH_VALIDATION.md) for asset expectations
-and native/manual coverage.
+Editor preview audio is editor-owned. Closing Alarm Settings stops preview only; it must not stop a real ringing alarm.
 
-| Area | Preserve | What can break |
+---
+
+## 16. Settings and shared utility UI
+
+### Persistent schema
+
+`settings/model.rs` is the persistent settings schema. Runtime resources remain authoritative for live transient state; settings encode durable preference.
+
+Do not duplicate OS-owned facts. Windows startup registration is a good example: `settings/startup.rs` treats the registry as source of truth rather than maintaining an unrelated boolean owner.
+
+### Runtime sync
+
+`settings/runtime.rs` applies settings, handles deferred/synchronous save, and persists user placement without recording temporary Alarm/Attention/startup movements as the preferred desktop position.
+
+### Utility windows
+
+`utility_window.rs` provides common native behavior for custom Bevy utility shells: HWND acquisition, minimize/maximize, and native resize-edge handling.
+
+`utility_window/font_cache.rs` provides scoped utility glyph-cache ownership shared by Settings and Alarm Settings.
+
+`utility_window/text_input.rs` centralizes Bevy editable-text ownership/style so caret navigation, selection, Home/End, Backspace/Delete, and keyboard-shortcut blocking do not get reimplemented per search box/editor.
+
+---
+
+## 17. Character import/replacement
+
+`character.rs` owns safe live replacement.
+
+```text
+Import/restore request
+→ async copy / optional VRM0 migration
+→ AssetServer load
+→ validate/stage VRM
+→ clear old rig-specific caches
+→ commit ActiveCharacter + settings
+→ reveal when initialized/animation-ready
+```
+
+A failed import leaves the previous character intact.
+
+Imported user models are copied into Nera-owned application data. Original source files are not modified/deleted by normal library operations.
+
+`vrm0_migration.rs` performs in-memory VRM 0.x -> 1.0 migration and routes the result through the ordinary compatible import path.
+
+### Character-swap invariant
+
+Any state storing old entity/bone/clip references must be reset or rebound: animation registry/playback, touch rig state, expression bindings, feedback anchors, Chibi rig cache, etc. Semantic preferences may persist; stale entity references may not.
+
+---
+
+## 18. Multi-character architecture
+
+`character/library.rs` owns both the persistent catalog and companion process roster.
+
+### Catalog
+
+Entries store model identity/name plus metadata/fingerprints. Streamed content fingerprints prevent renamed identical VRMs from becoming duplicate imports.
+
+Removal rules:
+
+- built-in Nera is not removable;
+- only Nera-owned private copies are deleted;
+- original user source files remain untouched;
+- live uses are released/switched before deletion;
+- companion processes participate in a release handshake.
+
+### Companion roster
+
+The main instance allocates slots and launches independent companions. Companion instances cannot recursively create their own companion groups.
+
+Each companion uses an instance-specific settings ID. The model catalog is a shared persistent library; active companion lineup is session/runtime ownership.
+
+---
+
+## 19. Animation Manager
+
+The Animation Manager is a content/preview application isolated from the production desktop rig.
+
+### Host/worker
+
+`animation_manager/process.rs` main-side host starts/stops the worker, forwards roster/character state, receives validated events, and owns the worker lifecycle. The worker owns gallery renderer/UI assets.
+
+### Registry
+
+`registry.rs` owns the filesystem-backed catalog below `assets/animations` and bookmark/origin metadata. Manager operations use registry rules for import/bookmark/move/rename/delete.
+
+### Protected runtime set
+
+`base.rs` defines the production contract for `assets/animations/animasi_basic/`.
+
+Protected runtime clips may be previewed but must not be renamed, deleted, or moved by ordinary manager actions. Any new production behavior depending on a VRMA should promote it into this stable set rather than depend on a mutable bookmark path.
+
+### Preview isolation
+
+Preview rigs never carry `NeraAvatar` and do not enter production physics/animation/gaze/body-mode systems. Independent render layers and animation-target namespaces prevent cross-rig retarget collisions.
+
+### Character cards/cache
+
+Browsing does not retain one full live VRM per card. Embedded/static previews and compressed idle caches are preferred; expensive full-idle generation is done serially in a disposable worker process and exits when finished.
+
+### Combine/export
+
+`combine.rs` trims/combines compatible VRMA sources without changing source files. Loader tests validate exported results using Nera's real VRMA asset path rather than only checking JSON structure.
+
+---
+
+## 20. Radial menu and tray
+
+`action_menu.rs` implements a native transparent Win32 radial popup serviced through the tray/native message-loop infrastructure.
+
+Current root surface:
+
+```text
+Cloud
+Settings
+Animation
+Alarm
+Games      [disabled placeholder]
+Chibi
+```
+
+Cloud has Rest/Ride/Dismiss/Back. Alarm opens Alarm Settings directly. Chibi toggles `AvatarBodyMode`; the native menu stores only presentation text, not its own mode state.
+
+The menu emits typed `NeraActionMenuCommand` messages. Domain behavior belongs to the receiving subsystem.
+
+`tray/native.rs` owns Win32 tray icon/menu/callback processing; `tray.rs` bridges those commands into Bevy. Domain behavior should not migrate onto the tray thread.
+
+---
+
+## 21. Memory boundaries
+
+Nera explicitly separates memory lifetimes where renderer/asset high-water behavior matters.
+
+- `memory.rs`: release avoidable CPU-side VRM geometry copies after GPU upload where compatible.
+- Settings/Alarm Settings: remain in-process; scoped utility font-cache cleanup releases utility-owned glyph state on close.
+- Animation Manager: process-isolated so closing the worker releases its renderer/driver allocations.
+- Character gallery: cached previews instead of many full live VRMs.
+- Full source VRMs are loaded for actual applied desktop characters, not merely because a gallery card is visible/selected.
+
+Measured results and exact audit procedures belong in the dedicated memory documents.
+
+---
+
+## 22. Persistence/storage ownership
+
+- `NeraSettings`: Bevy SettingsPlugin, instance-aware settings ID.
+- Character imports/catalog: Nera-owned application-data character directory.
+- Alarm sound imports/catalog: Nera-owned application-data `alarm-sounds` directory.
+- Runtime protected animations: `assets/animations/animasi_basic/`.
+- General animation library/bookmarks: Animation Manager registry/bookmark ownership.
+- Character thumbnail/idle caches: local cache data; safe to regenerate and never equivalent to the user's source VRM.
+
+Persistent configuration must not become a second live state owner. For example, `body_mode = "chibi"` encodes preference, while `AvatarBodyMode` owns runtime selection.
+
+---
+
+## 23. Important end-to-end flows
+
+### Body click -> reaction
+
+```text
+cursor/input
+→ animated body hit test
+→ NeraClicked(BodyPart)
+→ animation admission
+→ Head/Torso authored reaction OR
+   Hand/Arm TouchReactionRuntime OR
+   Leg/Foot procedural reaction
+→ NeraAnimationState resolves priority
+→ VRMA/playback or procedural overlay
+→ expression derives from resolved state/clip
+→ accepted semantic feedback emits PetFx/PetSfx
+→ seated/cloud/grounding layers preserve placement
+```
+
+### Drag -> support/throw
+
+```text
+press + captured body part
+→ movement threshold
+→ NeraDragStarted
+→ native window follows cursor
+→ Rest may detach / Ride may retain cloud ownership
+→ momentum sampling
+→ release
+→ optional NeraThrow
+→ DesktopPhysicsState gravity/support
+→ Landing/Idle/Sitting animation follows placement result
+```
+
+### Sitting
+
+```text
+deliberate drag near support
+→ sitting candidate
+→ SittingEnter
+→ evaluated Seat anchor becomes available
+→ Last-stage commit
+→ environment::sitting follows support
+→ seated loop/reaction pose
+```
+
+### Chibi toggle
+
+```text
+radial command
+→ ToggleBodyMode
+→ AvatarBodyMode changes/persists
+→ previous overlay removed next frame
+→ normal animation/cloud/sitting pose evaluates
+→ BodyProportions applies Chibi geometry
+→ constraints/gaze/expressions/springs consume final rig
+→ anchors derive final support contact
+```
+
+### Cloud
+
+```text
+radial Cloud command
+→ CloudRuntime owns placement
+→ visual lazily spawns
+→ selected seated/sleep animation
+→ pose/contact calibration
+→ logical seat stable; visual may bob
+→ Rest/Ride-specific interaction rules
+→ dismiss/interruption releases placement ownership
+```
+
+### Alarm
+
+```text
+deadline due
+→ AlarmState::Ringing
+→ enter Attention
+→ snapshot desktop presentation
+→ canonical portrait framing
+→ selected sound + alarm animation sequence
+→ dismiss/snooze
+→ stop runtime alarm assets
+→ restore desktop presentation/support/input
+```
+
+### Character replacement
+
+```text
+import/select
+→ private copy / optional VRM0 migration
+→ load + validate
+→ clear old rig-specific references
+→ commit new ActiveCharacter
+→ systems bind to new rig
+→ reveal when ready
+```
+
+### Animation Manager
+
+```text
+open request
+→ main host launches worker
+→ worker scans registry/caches + renders gallery
+→ user action sent over IPC
+→ main production owner executes requested action
+→ worker closes
+→ OS reclaims gallery renderer lifetime
+```
+
+---
+
+## 24. State interruption rules
+
+### Audio Reactive Dance
+
+The opt-in `NeraSettings.audio_reactive_dance` preference enables local observation.
+`music` runs Media Session and output-loopback/DSP observers off the Bevy thread,
+publishing bounded latest evidence; `MusicDetectionState` owns fused hysteresis.
+No audio is stored or transmitted. The detector never requests an animation.
+
+`PetBehavior` selects explicitly curated `DancePool` registry references and asks
+`LibraryPlayback` to load them. `NeraAnimationState::AutoDance` is a low-priority
+one-shot intent mapped to existing library playback and its real clip duration.
+The same controller, pose layers, grounding and Chibi overlay remain authoritative.
+Empty/invalid pools reserve no animation state. Manual actions, loading, Cloud,
+dragging and Attention release only autonomous requests/actions. V1 waits while
+seated; it never detaches support to dance. The Animation Manager Dance tab edits
+reference metadata through its existing worker/host IPC; no VRMA copies are made.
+
+Exact animation priority lives in code, but new features should preserve these conceptual ownership rules:
+
+1. Character loading/replacement may block interactions requiring a stable rig.
+2. Attention/Alarm owns presentation while active.
+3. Dragging owns pointer/native movement.
+4. Cloud owns placement while attached; Rest additionally owns sleep input/gaze suppression.
+5. Sitting attachment owns native support following.
+6. Desktop physics owns unsupported free placement.
+7. User reactions/library animations outrank autonomy.
+8. Pet behavior/walking/idle fidgets are low priority and must yield.
+
+Before adding a feature, answer:
+
+- What state does it own?
+- Which existing owner must it request/suspend?
+- Which state may interrupt it?
+- How does it release ownership on **every** exit path?
+
+---
+
+## 25. Validation architecture
+
+### Automated
+
+Use ordinary tests for state machines, geometry, persistence transformations, touch streaks, import logic, and any behavior that does not require a real compositor.
+
+### Real asset/loader
+
+Where file format correctness matters, validate through the same VRM/VRMA loader used by Nera when practical.
+
+### Smoke/native harnesses
+
+Debug smoke modules and `examples/*_validation.rs` run real app/Windows placement/rendering with isolated settings/output. Current dedicated examples include Chibi and touch validation plus a bounded external support-window fixture.
+
+### Memory audits
+
+Settings, Alarm Settings, Animation Manager, and multi-character memory audits are opt-in validation paths, not production behavior.
+
+### Still manual unless specifically automated
+
+- physical pointer targeting/feel;
+- Windows focus/z-order quirks;
+- auto-hide taskbar / Explorer restart;
+- mixed-DPI multi-monitor edge cases;
+- unusual third-party HWND/DWM behavior;
+- long soak/resource stability;
+- arbitrary custom-VRM visual quality.
+
+Never claim these passed solely because `cargo test` passed.
+
+---
+
+## 26. Where to change things
+
+| Goal | Start here | Also inspect |
 |---|---|---|
-| Pointer lifecycle | `Hover -> Pressed -> Dragging`, then release message and return to hover | Treating press as drag turns clicks into window movement and corrupts captured body parts |
-| Drag threshold | DPI-scaled threshold in `interaction.rs` | Jitter becomes dragging, or deliberate drags become unresponsive |
-| Pointer capture | Keep native hit-test enabled while a button owns the pet | Release goes to the window underneath, leaving state stuck |
-| Utility input gate | Reset pet gesture state while settings/alarm settings owns input | Utility-window clicks leak into body hits or leave frozen capture |
-| Sitting handoff | Pending placement -> SittingEnter -> Last-stage Seat sample -> commit | The avatar snaps using a standing/stale anchor or floats above support |
-| Unsnap guards | Movement lock, cooldown, spatial guard, vertical band | Immediate re-snap loops or inability to pull Nera off a surface |
-| Attachment ownership | Sitting owns placement when not `Free`; physics yields | Physics and attachment followers fight over the HWND |
-| Taskbar/window support | Preserve physical desktop coordinates, target liveness, minimize/cloak, and z-order handling | Teleports, stale HWND reuse, invisible pet, wrong-monitor support |
-| Standing anchor | Freeze collision anchor during falling/supported animation | Animated feet move collision geometry and cause jitter/repeated landings |
-| Autonomous behavior | One decision owner; preserve context gates, home identity, and eligible cooldowns | Walking and fidgets compete, or stale journeys resume after interaction |
-| Walking placement | Physics moves the HWND; support-relative targets/offsets remain synchronized | A moving window pulls Nera back or a walk escapes valid support |
-| Animation priority | Keep the ordering and one-shot/persistent semantics in `state.rs` | Idle/reactions can override death, physics, menu, or alarm |
-| Animation completion | Use loaded clip duration, revision, repeat mode, and transition locks | One-shots restart, never finish, or resume stale tails |
-| Sitting animation suppression | Suppress standing floating/fidgets while seated | Clips visually pull the avatar off its calibrated Seat anchor |
-| Alarm interruption | Attention suspends placement/interaction/floating and restores snapshot | Alarm appears in the wrong pose or returns to stale dragging/sitting state |
-| Presentation ownership | Snapshot and restore HWND, camera, placement, anchor, visibility, hit-test | Attention permanently changes desktop behavior or fights native followers |
-| Expression integration | Derive from resolved `VisualState`; Neutral clears overrides | Face disagrees with body or blocks VRMA blink/look-at data |
-| Settings persistence | Preserve reflected fields, defaults, alarm-book encoding, and load-before-window order | Existing profiles reset/migrate incorrectly or startup visibility flickers |
-| HWND/native code | Keep raw handles validated and native calls on their required thread | Handle reuse, thread-safety violations, incorrect coordinates, native crashes |
-| Tray loop | Keep Win32 callback work bridged through channels to Bevy | Blocking/deadlock, lost Explorer restart recovery, or domain mutation off-thread |
+| Add/change body animation | `animation/state.rs`, `playback.rs` | `expression/basic.rs`, `base.rs` |
+| Hand/Arm touch behavior | `animation/touch.rs` | `touch/seated.rs`, feedback |
+| Leg/Foot touch behavior | `animation/limbs.rs` | animation state/feedback |
+| Hit regions | `interaction/hit_testing.rs` | body-mode effective scale |
+| Headpat | `interaction/headpat.rs` | animation/expression/feedback |
+| Drag/throw | `interaction.rs`, `momentum.rs` | desktop physics |
+| Gravity/support | `desktop_physics.rs` | environment geometry/settings |
+| Sitting/window follow | `environment/sitting.rs` | anchors/animation |
+| Roaming | `pet_behavior.rs` | `walking.rs`, settings |
+| Gaze | `avatar.rs` | animation suppression/Cloud Rest |
+| Chibi | `avatar/body_mode.rs` | springs/anchors/cloud + Chibi docs |
+| Cloud | `cloud.rs` | pose/bounds/animation/physics |
+| SFX/particles | `pet_feedback/*` | semantic caller only |
+| Alarm scheduler | `alarm.rs` | presentation/dismiss |
+| Alarm editor | `alarm_settings.rs` | sounds/utility window |
+| Alarm sound import | `alarm/sounds/*` | settings fallback cleanup |
+| Attention framing | `presentation.rs` | alarm/body-mode geometry |
+| Settings | `settings/model.rs` + relevant UI/runtime | utility window |
+| Live character import | `character.rs` | migration/library/reset boundaries |
+| Multi-character | `character/library.rs`, `roster.rs` | manager process bridge |
+| Gallery content | `animation_manager/registry.rs`, `ui.rs` | `base.rs` |
+| Gallery renderer/memory | `process.rs`, `preview.rs`, caches | memory audit |
+| Radial menu/tray | `action_menu.rs`, `tray/*` | typed domain commands |
+| Native Windows capability | `platform/windows.rs` | facade in `platform/mod.rs` |
 
-## 8. Where do I change X?
+---
 
-| Change needed | Start here | Also inspect |
-|---|---|---|
-| App/plugin registration or cross-system order | `src/main.rs` | Owning plugin schedule |
-| Avatar model, camera, or lighting setup | `src/avatar.rs` | `animation/playback.rs` attaches animation children |
-| Cursor-follow gaze | `src/avatar.rs` | `settings/model.rs`, animation visual states |
-| Feet/Seat projection or death visual grounding | `src/avatar/anchors.rs` | `environment/sitting.rs`, `desktop_physics.rs` |
-| Pointer press/click/drag/right-click behavior | `src/interaction.rs` | Message contracts in the same file; `hit_testing.rs` for body regions |
-| Body-part hit detection/colliders | `src/interaction/hit_testing.rs` | `avatar.rs` and VRM bone names |
-| Headpat recognition | `src/interaction/headpat.rs` | `animation/systems.rs` reaction mapping |
-| Interaction message shape | `src/interaction.rs` | All `MessageReader` consumers |
-| Animation state, action, priority, or transition | `src/animation/state.rs` | Tests in `animation.rs` |
-| Map domain events to animation requests | `src/animation/systems.rs` | Event producer and `state.rs` |
-| Animation asset paths, child spawning, registration, and duration | `src/animation/playback.rs` | `avatar.rs` calls `spawn_animation_library()` |
-| Visual state to VRMA/repeat/blend/anchor mapping | `src/animation/playback.rs` | `state.rs`; do not add priority logic here |
-| Idle/walk/sit eligibility, cooldowns, anti-repetition, home | `src/pet_behavior.rs` | `settings/model.rs`, clip readiness, desktop support |
-| Walk target, turn delay, speed, acceleration, braking | `src/walking.rs` | `desktop_physics.rs`, behavior outcomes |
-| Safe roaming interval/window-top offset | `src/desktop_physics.rs` | `desktop_physics/geometry.rs`, `walking.rs` |
-| Fullscreen pause detection | `src/platform/windows.rs` | `pet_behavior.rs`, `pause_roaming_fullscreen` setting |
-| Facial emotion/crossfade | `src/expression.rs` | Exhaustive `VisualState` mapping |
-| External window discovery | `src/environment.rs` | `platform/windows.rs` |
-| Tracked support-window lifecycle | `src/environment.rs` | `environment/sitting.rs` |
-| Taskbar geometry/refresh | `src/environment/taskbar.rs` | platform monitor work areas |
-| Sitting probe, attach, follow, detach, z-order | `src/environment/sitting.rs` | pointer handoff and main Last-stage order |
-| Gravity, falling, landing, support runtime | `src/desktop_physics.rs` | `desktop_physics/geometry.rs`, animation state |
-| Pure support/crossing calculation | `src/desktop_physics/geometry.rs` | Geometry regression tests |
-| Attention mode/window framing | `src/presentation.rs` | alarm lifecycle and interaction reset |
-| Alarm deadline/audio/runtime phase | `src/alarm.rs` | presentation and dismiss messages |
-| Alarm editor UI | `src/alarm_settings.rs` | `settings/model.rs` alarm encoding |
-| Alarm dismiss/snooze panel | `src/alarm_dismiss.rs` | `alarm.rs`, `presentation.rs` |
-| Native radial action menu | `src/action_menu.rs` | tray result channel and command consumers |
-| Settings field/default/encoding | `src/settings/model.rs` | Backward compatibility tests |
-| Position persistence or live setting application | `src/settings/runtime.rs` | `main.rs` startup window defaults |
-| Settings window controls/layout/scrolling | `src/settings/ui.rs` | `model.rs`; UI is not authoritative |
-| Shadow behavior | `src/settings/shadow.rs` | environment, physics, interaction state |
-| Start-with-Windows integration | `src/settings/startup.rs` | Settings UI action |
-| Tray command behavior | `src/tray.rs` | settings/environment/physics resets |
-| Win32 tray menu/icon/message loop | `src/tray/native.rs` | `tray.rs` channel contract |
-| General cursor/window/monitor/DPI Win32 helper | `src/platform/windows.rs` | Existing platform exports in `platform/mod.rs` |
+## 27. Architectural invariants
 
-## 9. Architecture guardrails
+### Native geometry
 
-1. Keep `main.rs` focused on bootstrap, resources, plugins, and explicit
-   cross-subsystem ordering. Put domain behavior in its owner module.
-2. Keep `DesktopEnvironment.placement` authoritative for sitting. Do not add a
-   parallel sitting flag to interaction, physics, or animation.
-3. Keep `DesktopPetInteraction` authoritative for gesture capture. Consumers
-   should react to semantic messages instead of reading raw mouse edges.
-4. Preserve message semantics. In particular, a body part is captured at press,
-   right-click is emitted on release, and `NeraReleased.was_dragging` controls
-   the floating-action lifetime.
-5. Preserve physical-versus-logical coordinate boundaries. Native desktop
-   placement uses physical pixels; avatar projection/settings offsets use
-   logical window coordinates where documented.
-6. Keep animation transition and priority decisions in `animation/state.rs`.
-   Playback and expression consume `VisualState`.
-7. Treat loaded VRMA duration, one-shot versus looping mode, and revision-based
-   replay as behavior, not implementation detail.
-8. Let presentation coordinate the explicit attention ownership transfer. Do
-   not let alarm or dismiss UI independently resize/restore the main pet window.
-9. Keep `NeraSettings` authoritative. Settings UI and tray may mutate it, while
-   runtime systems apply it and persistence commands save it.
-10. Keep native Win32 details behind `platform`, `tray/native.rs`, or an existing
-    native UI module. Domain systems should consume narrow facts/commands.
-11. Preserve explicit `.chain()`, `.before()`, `.after()`, and run conditions
-    unless a behavioral test demonstrates that ordering can change.
-12. Prefer the existing typed messages for cross-subsystem transitions. Direct
-    resource mutation remains appropriate where the current owner intentionally
-    coordinates an atomic handoff, such as presentation or pointer/sitting.
-13. Do not split `environment/sitting.rs` or `platform/windows.rs` solely because
-    they are large. Split only when a tested ownership boundary becomes clear.
-14. Do not introduce a dependency or abstraction framework merely to remove a
-    small amount of native or state-machine duplication.
-15. When adding state, identify its authoritative owner and whether it is
-    persistent, transient, or derived before creating a new resource.
-16. Keep autonomous scheduling in `pet_behavior`; locomotion executes intents and
-    animation resolves requests. New optional clips must pass loaded-capability
-    checks, with an immediate safe base-pose fallback when unavailable.
+- Native support/placement uses physical desktop coordinates where required.
+- Multi-monitor coordinates may be negative/non-zero-origin.
+- Do not solve taskbar/support issues with arbitrary pixel offsets when geometry already exists.
 
-Dependency directions to avoid:
+### Animation
 
-- `platform` depending on interaction, animation, presentation, or settings.
-- `desktop_physics/geometry` depending on UI, alarms, or presentation.
-- `animation/playback` emitting semantic interaction or deciding priorities.
-- `expression` consuming raw clicks/headpats instead of resolved visual state.
-- settings UI becoming the only place defaults or persistence encoding exist.
-- native tray callbacks mutating Bevy resources from the tray thread.
-- avatar pose sampling selecting native support or sitting candidates.
+- `NeraAnimationState` owns body state.
+- Features request animation; they do not directly establish a second playback owner.
+- One-shot duration comes from real loaded clip duration where available.
+- Fixed runtime reactions use protected base clips. User-curated AutoDance references
+  follow registry rename/bookmark moves and safely skip missing/deleted files.
 
-## 10. Known intentional coupling and debt
+### Pose overlays
 
-- **Drag/click/sitting coupling:** `interaction.rs` intentionally performs
-  the drag-to-sit and unsnap handoff because press capture, cursor ownership,
-  drag thresholds, attachment locks, and release semantics form one state machine.
-- **Environment/avatar/physics data loop:** Pose-derived anchors flow from avatar
-  into the environment, then native placement flows back into later projection.
-  Ownership remains distinct even though data moves both directions each frame.
-- **Presentation coordination:** Attention directly resets interaction and
-  animation support while snapshotting environment placement. This is required
-  to transfer native window ownership as one lifecycle operation.
-- **Large `environment/sitting.rs`:** HWND tracking consequences, occlusion,
-  suspension, z-order, pending placement, and attachment following are tightly
-  coupled. A size-only split would hide invariants or introduce cyclic state.
-- **Large `platform/windows.rs`:** It is a bounded Win32 implementation behind
-  `platform/mod.rs`. More abstraction is not currently justified by ownership.
-- **Large `settings/ui.rs`:** It remains a substantial but cohesive settings
-  window implementation. The persistent model and runtime application are
-  already separated, so file size alone is not a reason to fragment the UI.
-- **Windows-only utility surfaces:** Action menu, alarm editor, dismiss panel,
-  and tray combine Bevy and Win32 lifecycle constraints. Automated unit tests
-  cover pure decisions, but do not fully exercise real HWND focus, z-order,
-  click-through, multi-monitor, Explorer restart, or tray behavior.
-- **Compiler warnings:** The current tree retains unused legacy helpers and an
-  unconstructed `SittingExit` transition variant, plus test-oriented or future-
-  facing helpers in alarm, expression, presentation, RNG, and settings. They are
-  known debt; do not delete them as an architectural cleanup without checking
-  behavior and intended compatibility.
-- **Cross-plugin ordering:** Some message producers/consumers are in independent
-  `Update` schedules with no explicit relation. The document states only actual
-  guarantees. Add ordering only to fix a characterized issue, with regression
-  coverage, rather than assuming every message must be consumed in-frame.
+- Restore only your own previous-frame delta.
+- Apply after the pose owners you depend on.
+- Never accumulate transforms frame-over-frame.
+- Never restore transforms captured from a replaced character.
 
-When native behavior is changed, automated tests are necessary but insufficient.
-Manually exercise clicking, dragging, sitting/unsnapping, taskbar and external
-window support, attention entry/exit, settings input gating, tray recovery, and
-multi-monitor/DPI behavior on Windows.
+### Placement
 
-Current validation: `cargo check --all-targets --offline`, the debug build, and
-`cargo test --offline` pass (**320 passed, 0 failed, 6 ignored**).
-`cargo fmt --all -- --check` passes. Nineteen Cloud/SFX/FX regression tests cover
-command/lifecycle ownership, missing audio and cooldowns, particle bounds/expiry,
-seated lower-body preservation, and model-local seat scaling.
-Eleven additional sleep tests cover promotion/protection, lazy/fallback playback,
-reaction/base selection, world-down contact, right-facing reversible rotation,
-arm-layer ownership, retargeted arm geometry and restoration without drift,
-open-eyed ordinary sitting, two stable nonrepeating Rest variations, and every
-body-part/headpat reaction suppressed during sleep with drag/awake/Ride preserved.
-Debug-only bounded smoke runs use separate settings profiles and capture actual
-native screenshots for facial/model previews, companions, limb/alarm controls,
-and throw Settings ON/OFF and intensity controls at normal/minimum sizes,
-throw/landing, gravity-OFF motion, and a migrated VRM0 Death01 shadow. The Cloud
-smoke passes native Rest/Ride drag/release, no-support floating, dismissal/freefall,
-sleeping touch suppression, right-facing sleep, hand clearance on live VRM1/VRM0
-rigs, VRM0 replacement, Attention, and feedback cleanup. Geometry
-and smoke tests do not establish real mixed-DPI or multi-monitor behavior, native
-focus/tray resilience, gait quality, or long-running resource stability.
+- Sitting, Cloud, physics, and Attention have explicit ownership boundaries.
+- Lower-priority placement must yield instead of continuously fighting the current owner.
+
+### Interaction
+
+- `DesktopPetInteraction` classifies pointer gestures once.
+- Feature logic consumes semantic messages.
+- Click, drag, headpat, and menu must not each invent separate capture rules.
+
+### Facial state
+
+- Automatic face derives from resolved body animation/clip intent.
+- Manual preview is an explicit temporary owner.
+- Clearing preview releases ownership instead of pinning neutral morphs.
+
+### Utility UI
+
+- Utility surfaces may temporarily own application input.
+- Closing an editor releases editor-only resources/previews, not unrelated runtime behavior.
+- Editable text uses the shared Bevy text-input path.
+
+### Persistence
+
+- Persistent settings encode durable preference; runtime resources own transient state.
+- User source files are never deleted as if they were Nera-owned imports.
+- Missing/corrupt optional content falls back safely instead of panicking.
+
+---
+
+## 28. Structural hygiene notes
+
+These are observations, not an instruction to refactor immediately.
+
+1. `animation/limbs.rs` is historically named; it now owns only procedural Leg/Foot reactions. A rename/move may improve clarity later, but behavior should not change just for naming.
+2. Large cohesive modules such as `settings/ui.rs`, `alarm_settings.rs`, and `animation_manager/preview.rs` should not be split solely because of LOC.
+3. Small focused files such as `interaction/momentum.rs`, `utility_window/text_input.rs`, and `font_cache.rs` should not be merged solely to reduce file count.
+4. Debug/smoke/audit files are intentionally separated from runtime behavior. They may eventually be grouped under a clearer validation/dev namespace, but should not be folded into production systems.
+5. Cross-plugin ordering should remain explicit only where a real producer/consumer dependency exists. Do not globally serialize unrelated Bevy systems.
+6. Native Windows QA remains necessary for compositor/focus/taskbar/mixed-DPI cases not covered by a dedicated harness.
+
+---
+
+## 29. Documentation boundaries
+
+Keep stable architecture here:
+
+- ownership;
+- module responsibilities;
+- process boundaries;
+- state/data flow;
+- scheduling constraints;
+- invariants;
+- where-to-change guidance.
+
+Keep volatile detail elsewhere:
+
+- Chibi proportions/screenshots -> Chibi docs;
+- touch sequence validation -> `TOUCH_REACTION_POLISH.md`;
+- memory measurements -> memory audit docs;
+- milestone QA/history -> phase/audit docs.
+
+Keep coding-agent workflow rules in `AGENTS.md` rather than duplicating them here. `AGENTS.md` should point to this document for architecture.
+
+---
+
+## 30. Recommended change workflow
+
+```text
+1. Identify the authoritative state owner.
+2. Inspect that subsystem and its immediate dependencies.
+3. Define acquisition/interruption/release behavior.
+4. Reuse existing messages/resources.
+5. Make the smallest coherent patch.
+6. Add targeted regression tests.
+7. Run targeted tests while iterating.
+8. Run cargo fmt / cargo check / cargo test near completion.
+9. Perform native/manual validation only where required.
+10. Stop when acceptance criteria pass.
+```
+
+Do not introduce architecture merely because a feature feels large. First explain why the existing owner cannot represent the new behavior.
+
+---
+
+## 31. Architectural north star
+
+```text
+Windows / desktop facts
+        ↓
+semantic environment + interaction
+        ↓
+explicit state owners
+        ↓
+behavior requests
+        ↓
+authoritative animation / placement / presentation
+        ↓
+reversible pose + face + feedback layers
+        ↓
+VRM constraints / gaze / expressions / springs
+        ↓
+transparent desktop presentation
+```
+
+The goal is not the smallest possible number of files. The goal is that every feature has a clear answer to:
+
+> **Who owns this state, who may request it, what can interrupt it, and how is ownership released without stale state?**
+
+If those answers stay clear, Nera can keep adding features without turning Windows placement, VRM animation, interaction, and utility UI into competing patches.

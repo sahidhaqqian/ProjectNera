@@ -4,7 +4,9 @@ mod avatar;
 mod benchmark;
 mod character;
 mod cloud;
+mod dance_pool;
 mod memory;
+mod music;
 
 mod desktop_physics;
 
@@ -214,6 +216,7 @@ fn main() {
         DesktopEnvironmentPlugin,
         InteractionPlugin,
         NeraAnimationPlugin,
+        music::MusicPlugin,
         NeraExpressionPlugin,
         PresentationPlugin,
         alarm::AlarmPlugin,
@@ -241,6 +244,7 @@ fn main() {
         .init_resource::<desktop_physics::DesktopPhysicsState>()
         .init_resource::<walking::WalkingRuntime>()
         .init_resource::<pet_behavior::PetBehavior>()
+        .insert_resource(dance_pool::DancePool::load(&dance_pool::DancePool::file()))
         .init_resource::<startup_entrance::StartupEntrance>()
         .init_resource::<AvatarVisualGrounding>()
         .add_systems(PreUpdate, avatar::restore_visual_grounding)

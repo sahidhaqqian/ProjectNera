@@ -19,6 +19,16 @@ use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use std::collections::VecDeque;
 
 const RESUME_DELAY: f32 = 6.0;
+mod dance;
+
+#[derive(SystemParam)]
+pub(crate) struct DanceContext<'w, 's> {
+    pool: Option<Res<'w, crate::dance_pool::DancePool>>,
+    music: Option<Res<'w, crate::music::MusicDetectionState>>,
+    loading: Option<Res<'w, crate::character::CharacterImportStatus>>,
+    library: ResMut<'w, crate::animation::LibraryPlayback>,
+    errors: MessageReader<'w, 's, crate::animation::LibraryAnimationError>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Behavior {
@@ -39,6 +49,7 @@ struct HomeAnchor {
 
 #[derive(Resource)]
 pub(crate) struct PetBehavior {
+    dance: dance::AutoDance,
     home: Option<HomeAnchor>,
     history: VecDeque<Behavior>,
     decision_in: f32,
@@ -55,6 +66,7 @@ pub(crate) struct PetBehavior {
 impl Default for PetBehavior {
     fn default() -> Self {
         Self {
+            dance: Default::default(),
             home: None,
             history: VecDeque::with_capacity(3),
             decision_in: RESUME_DELAY,
@@ -71,6 +83,9 @@ impl Default for PetBehavior {
 }
 
 impl PetBehavior {
+    pub(crate) fn reset_auto_dance(&mut self) {
+        self.dance.reset();
+    }
     fn observe_surface(
         &mut self,
         surface: WalkingSurface,
@@ -282,6 +297,7 @@ pub(crate) fn update_pet_behavior(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     lazy_loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
+    mut dance_context: DanceContext,
 ) {
     let dt = time.delta_secs().min(0.05);
     let settings = &context.settings;
@@ -320,6 +336,39 @@ pub(crate) fn update_pet_behavior(
             && !platform::is_window_minimized(h)
             && !platform::is_window_cloaked(h)
     });
+    let dance_allowed = context.available()
+        && native_visible
+        && !environment.hidden_for_target_suspend
+        && !physics.falling
+        && environment.placement == PlacementState::Free
+        && real_time.delta_secs() < 0.5
+        && !dance_context
+            .loading
+            .as_ref()
+            .is_some_and(|status| status.loading)
+        && settings.audio_reactive_dance
+        && dance_context
+            .music
+            .as_ref()
+            .is_some_and(|music| music.active);
+    for error in dance_context.errors.read() {
+        brain.dance.reject(&error.path);
+    }
+    let empty_pool = crate::dance_pool::DancePool::default();
+    let pool = dance_context.pool.as_deref().unwrap_or(&empty_pool);
+    // Selection lives in this brain; loaded clips are admitted by the existing
+    // animation state. A pending/empty pool never reserves animation ownership.
+    let brain_ref = &mut *brain;
+    if brain_ref.dance.tick(
+        dance_allowed,
+        pool,
+        &mut animation,
+        &mut dance_context.library,
+        &mut brain_ref.rng,
+    ) {
+        walking.cancel(&mut animation);
+        return;
+    }
     if !context.available()
         || !native_visible
         || environment.hidden_for_target_suspend
@@ -527,6 +576,8 @@ mod tests {
             .init_resource::<NeraAnimationState>()
             .init_resource::<WalkingRuntime>()
             .init_resource::<PetBehavior>()
+            .init_resource::<crate::animation::LibraryPlayback>()
+            .add_message::<crate::animation::LibraryAnimationError>()
             .add_message::<NeraReleased>()
             .add_systems(
                 Update,

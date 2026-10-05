@@ -49,9 +49,14 @@ pub(crate) fn reset_for_character_change(world: &mut World) {
         .retain(|active| {
             !matches!(
                 active.action,
-                TemporaryAction::LibraryAnimation(_) | TemporaryAction::TouchReaction(_)
+                TemporaryAction::LibraryAnimation(_)
+                    | TemporaryAction::TouchReaction(_)
+                    | TemporaryAction::AutoDance(_)
             )
         });
+    if let Some(mut brain) = world.get_resource_mut::<crate::pet_behavior::PetBehavior>() {
+        brain.reset_auto_dance();
+    }
 }
 
 pub(crate) fn character_animation_ready(world: &World) -> bool {
@@ -161,8 +166,8 @@ impl Plugin for NeraAnimationPlugin {
             .add_systems(
                 Update,
                 library::sync_library_animation
-                    .before(crate::startup_entrance::prepare_startup_entrance)
-                    .before(crate::pet_behavior::update_pet_behavior)
+                    .after(crate::pet_behavior::update_pet_behavior)
+                    .before(crate::walking::update_walking)
                     .before(tick_animation_actions),
             )
             .add_message::<AlarmAnimationCommand>()
