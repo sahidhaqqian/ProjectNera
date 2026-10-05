@@ -38,6 +38,8 @@ pub(super) struct MusicWorker {
     latest: Arc<Mutex<Latest>>,
     started: bool,
     poll_in: f32,
+    diagnostic_at: f64,
+    diagnostic_key: Option<(String, bool, super::ConfidenceTier)>,
 }
 impl Default for MusicWorker {
     fn default() -> Self {
@@ -49,6 +51,8 @@ impl Default for MusicWorker {
             latest: Arc::new(Mutex::new(Latest::default())),
             started: false,
             poll_in: 0.0,
+            diagnostic_at: 0.0,
+            diagnostic_key: None,
         }
     }
 }
@@ -77,6 +81,7 @@ pub(super) fn poll(
             *latest = Latest::default();
         }
         worker.poll_in = 0.0;
+        worker.diagnostic_key = None;
         return;
     }
     if !worker.started {
@@ -102,7 +107,8 @@ pub(super) fn poll(
         return;
     }
     worker.poll_in = 0.25;
-    if let Ok(latest) = worker.latest.try_lock() {
+    let mailbox = worker.latest.clone();
+    if let Ok(latest) = mailbox.try_lock() {
         let media = if latest
             .media_at
             .is_some_and(|t| t.elapsed() < Duration::from_secs(3))
@@ -124,9 +130,43 @@ pub(super) fn poll(
         state.observe(&media, audio, 0.25);
         if previous != state.active {
             info!(
-                "Windows music active={} confidence={:.2}",
-                state.active, state.confidence
+                "{} confidence={:.2} tier={:?}",
+                if state.active {
+                    "MusicDetected"
+                } else {
+                    "MusicStopped"
+                },
+                state.confidence,
+                state.tier
             );
+        }
+        let key = (media.source.clone(), media.playback_type_music, state.tier);
+        let now = time.elapsed_secs_f64();
+        // Log evidence changes at most once per two seconds; optional native
+        // diagnostics also emit a five-second heartbeat for stable evidence.
+        let changed = worker.diagnostic_key.as_ref() != Some(&key);
+        let heartbeat = std::env::var_os("NERA_MUSIC_DIAGNOSTICS").is_some();
+        if (changed && now >= worker.diagnostic_at + 2.0)
+            || (heartbeat && now >= worker.diagnostic_at + 5.0)
+        {
+            info!(
+                "Music evidence source={} playing={} PlaybackType::Music={} metadata(title/artist/album)={}/{}/{} media_score={:.2} audio_active={} audio_probability={:.2} confidence={:.2} tier={:?}",
+                media.source,
+                media.playing,
+                media.playback_type_music,
+                !media.title.is_empty(),
+                !media.artist.is_empty(),
+                !media.album.is_empty(),
+                media.confidence,
+                audio.active,
+                audio.probability,
+                state.confidence,
+                state.tier
+            );
+            // Release the mailbox read lock before updating the worker resource.
+            drop(latest);
+            worker.diagnostic_at = now;
+            worker.diagnostic_key = Some(key);
         }
     }
 }
@@ -168,13 +208,18 @@ fn media_worker(control: Arc<Control>, latest: Arc<Mutex<Latest>>) {
             };
             for index in 0..sessions.Size()?.min(8) {
                 let session = sessions.GetAt(index)?;
-                let playing =
-                    session.GetPlaybackInfo()?.PlaybackStatus()? == PlaybackStatus::Playing;
+                let playback = session.GetPlaybackInfo()?;
+                let playing = playback.PlaybackStatus()? == PlaybackStatus::Playing;
                 if !playing {
                     continue;
                 }
                 let source = session.SourceAppUserModelId()?.to_string();
-                let mut evidence = MediaEvidence::classify(&source, true, "", "", "", false);
+                let playback_music = playback
+                    .PlaybackType()
+                    .and_then(|t| t.Value())
+                    .is_ok_and(|t| t == windows::Media::MediaPlaybackType::Music);
+                let mut evidence =
+                    MediaEvidence::classify(&source, true, "", "", "", playback_music);
                 // Missing/timed-out metadata must not discard a useful playing
                 // session, especially a dedicated player with partial metadata.
                 if let Ok(op) = session.TryGetMediaPropertiesAsync()
@@ -193,10 +238,11 @@ fn media_worker(control: Arc<Control>, latest: Arc<Mutex<Latest>>) {
                         .AlbumTitle()
                         .map(|s| s.to_string())
                         .unwrap_or_default();
-                    let audio_type = properties
-                        .PlaybackType()
-                        .and_then(|t| t.Value())
-                        .is_ok_and(|t| t == windows::Media::MediaPlaybackType::Music);
+                    let audio_type = playback_music
+                        || properties
+                            .PlaybackType()
+                            .and_then(|t| t.Value())
+                            .is_ok_and(|t| t == windows::Media::MediaPlaybackType::Music);
                     evidence = MediaEvidence::classify(
                         &source, playing, &title, &artist, &album, audio_type,
                     );
@@ -530,6 +576,12 @@ mod native_tests {
     #[test]
     #[ignore = "Reads live Windows output and Media Sessions for eight seconds; opt in locally"]
     fn native_music_probe() {
+        let pool = crate::dance_pool::DancePool::load(&crate::dance_pool::DancePool::file());
+        eprintln!(
+            "MUSIC_PROBE detection_enabled=true persisted_DancePool_count={} keys={:?}",
+            pool.keys.len(),
+            pool.keys
+        );
         let control = Arc::new(Control {
             alive: AtomicBool::new(true),
             enabled: AtomicBool::new(true),
@@ -549,8 +601,8 @@ mod native_tests {
             let value = latest.lock().unwrap();
             state.observe(&value.media, value.audio, 0.25);
             eprintln!(
-                "MUSIC_PROBE media={:?} audio={:?} music={} confidence={:.3}",
-                value.media, value.audio, state.active, state.confidence
+                "MUSIC_PROBE media={:?} audio={:?} music={} confidence={:.3} tier={:?}",
+                value.media, value.audio, state.active, state.confidence, state.tier
             );
         }
         control.alive.store(false, Ordering::Relaxed);

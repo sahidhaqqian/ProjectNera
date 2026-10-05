@@ -338,7 +338,12 @@ pub(super) fn sync_library_animation(
             duration: loaded.duration,
         });
         if runtime.requested_auto {
-            state.request_auto_dance(entity, loaded.duration);
+            if state.request_auto_dance(entity, loaded.duration) {
+                info!(
+                    "AutoDance playing {path} duration={:.2}s",
+                    loaded.duration.as_secs_f32()
+                );
+            }
         } else {
             state.request_one_shot(TemporaryAction::LibraryAnimation(entity), loaded.duration);
         }

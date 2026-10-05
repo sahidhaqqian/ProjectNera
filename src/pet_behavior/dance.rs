@@ -6,6 +6,19 @@ use crate::{
 };
 use std::collections::HashSet;
 
+/// Hover enables native hit testing, but does not own an animation. Only a
+/// captured gesture should yield AutoDance before its semantic reaction arrives.
+pub(super) fn pointer_available(interaction: &crate::interaction::DesktopPetInteraction) -> bool {
+    use crate::interaction::InteractionState;
+    matches!(
+        interaction.state,
+        InteractionState::None | InteractionState::Hover
+    ) && interaction.pressed_body_part.is_none()
+        && interaction.drag_offset.is_none()
+        && interaction.right_pressed_body_part.is_none()
+        && interaction.right_press_origin.is_none()
+}
+
 #[derive(Default)]
 pub(super) struct AutoDance {
     pool: DancePool,
@@ -61,6 +74,11 @@ impl AutoDance {
             animation.cancel_auto_dance();
         }
         if !allowed || !animation.can_auto_dance() || library.manual_pending() {
+            if animation.auto_dance_active() {
+                bevy::log::info!(
+                    "AutoDance released: normal behavior resumes under the current state owner."
+                );
+            }
             self.pending = None;
             library.cancel_auto_dance();
             animation.cancel_auto_dance();
@@ -80,6 +98,7 @@ impl AutoDance {
         self.pending = None;
         if let Some(key) = self.choose(pool, rng) {
             let path = format!("animations/{key}");
+            bevy::log::info!("AutoDance selected {path}");
             library.request_auto_dance(path.clone());
             self.last = Some(key);
             self.pending = Some(path);
@@ -100,6 +119,119 @@ mod tests {
         DancePool {
             keys: vec!["Bookmarks/a.vrma".into(), "Bookmarks/b.vrma".into()],
         }
+    }
+    #[test]
+    fn cursor_entering_and_leaving_body_does_not_cancel_or_restart_dance() {
+        use crate::interaction::{DesktopPetInteraction, InteractionState};
+        let mut runtime = AutoDance::default();
+        let mut state = NeraAnimationState::default();
+        let mut library = LibraryPlayback::default();
+        let mut rng = NeraRng::seeded(12);
+        let pool = pool();
+        runtime.tick(true, &pool, &mut state, &mut library, &mut rng);
+        let entity = bevy::prelude::Entity::from_raw_u32(19).unwrap();
+        assert!(state.request_auto_dance(entity, Duration::from_secs(5)));
+        for pointer in [
+            InteractionState::None,
+            InteractionState::Hover,
+            InteractionState::Hover,
+            InteractionState::None,
+        ] {
+            let interaction = DesktopPetInteraction {
+                state: pointer,
+                ..Default::default()
+            };
+            for _ in 0..5 {
+                assert!(runtime.tick(
+                    pointer_available(&interaction),
+                    &pool,
+                    &mut state,
+                    &mut library,
+                    &mut rng
+                ));
+                state.advance(Duration::from_millis(100));
+                assert_eq!(state.visual_state(), VisualState::LibraryAnimation(entity));
+            }
+        }
+        // Two seconds already elapsed. Hover must not reset the five-second
+        // lifetime, so the original clip finishes after the remaining three.
+        state.advance(Duration::from_secs(3));
+        assert_eq!(state.visual_state(), VisualState::Idle);
+    }
+    #[test]
+    fn pressed_dragging_and_right_capture_still_release_dance() {
+        use crate::interaction::{BodyPart, DesktopPetInteraction, InteractionState};
+        use bevy::prelude::IVec2;
+        for interaction in [
+            DesktopPetInteraction {
+                state: InteractionState::Pressed,
+                ..Default::default()
+            },
+            DesktopPetInteraction {
+                state: InteractionState::Dragging,
+                ..Default::default()
+            },
+            DesktopPetInteraction {
+                state: InteractionState::Hover,
+                right_pressed_body_part: Some(BodyPart::Torso),
+                ..Default::default()
+            },
+            DesktopPetInteraction {
+                state: InteractionState::Hover,
+                right_press_origin: Some(IVec2::ZERO),
+                ..Default::default()
+            },
+            DesktopPetInteraction {
+                state: InteractionState::Hover,
+                drag_offset: Some(IVec2::ZERO),
+                ..Default::default()
+            },
+        ] {
+            let mut runtime = AutoDance::default();
+            let mut state = NeraAnimationState::default();
+            let mut library = LibraryPlayback::default();
+            let mut rng = NeraRng::seeded(12);
+            let pool = pool();
+            runtime.tick(true, &pool, &mut state, &mut library, &mut rng);
+            let entity = bevy::prelude::Entity::from_raw_u32(19).unwrap();
+            assert!(state.request_auto_dance(entity, Duration::from_secs(5)));
+            assert!(!runtime.tick(
+                pointer_available(&interaction),
+                &pool,
+                &mut state,
+                &mut library,
+                &mut rng
+            ));
+            assert!(!state.auto_dance_active());
+            assert_eq!(state.visual_state(), VisualState::Idle);
+        }
+    }
+    #[test]
+    fn hover_does_not_block_a_recognized_headpat_from_taking_ownership() {
+        use crate::interaction::{DesktopPetInteraction, InteractionState};
+        let mut runtime = AutoDance::default();
+        let mut state = NeraAnimationState::default();
+        let mut library = LibraryPlayback::default();
+        let mut rng = NeraRng::seeded(12);
+        let pool = pool();
+        runtime.tick(true, &pool, &mut state, &mut library, &mut rng);
+        let entity = bevy::prelude::Entity::from_raw_u32(19).unwrap();
+        assert!(state.request_auto_dance(entity, Duration::from_secs(5)));
+        state.request_action_for_test(TemporaryAction::HeadStroke, Duration::from_secs(2));
+        let hover = DesktopPetInteraction {
+            state: InteractionState::Hover,
+            ..Default::default()
+        };
+        assert!(pointer_available(&hover));
+        assert!(!runtime.tick(
+            pointer_available(&hover),
+            &pool,
+            &mut state,
+            &mut library,
+            &mut rng
+        ));
+        assert_eq!(state.visual_state(), VisualState::HeadStroke);
+        assert!(!state.auto_dance_active());
     }
     #[test]
     fn empty_pool_never_interrupts_or_requests_playback() {
@@ -131,6 +263,18 @@ mod tests {
         assert!(runtime.choose(&pool, &mut rng).is_none());
         runtime.reset();
         assert!(runtime.choose(&pool, &mut rng).is_some());
+    }
+    #[test]
+    fn two_entry_pool_alternates_without_immediate_repeat() {
+        let mut runtime = AutoDance::default();
+        let pool = pool();
+        let mut rng = NeraRng::seeded(11);
+        for _ in 0..20 {
+            let next = runtime.choose(&pool, &mut rng).unwrap();
+            assert!(pool.keys.contains(&next));
+            assert_ne!(runtime.last.as_ref(), Some(&next));
+            runtime.last = Some(next);
+        }
     }
     #[test]
     fn stop_block_and_character_replacement_release_only_autonomous_owner() {

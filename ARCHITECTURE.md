@@ -963,6 +963,13 @@ The opt-in `NeraSettings.audio_reactive_dance` preference enables local observat
 publishing bounded latest evidence; `MusicDetectionState` owns fused hysteresis.
 No audio is stored or transmitted. The detector never requests an animation.
 
+Browser Media Session Music type and title/channel metadata are evidence rather
+than proof: ordinary videos can expose the same fields. The detector confirms
+music from independent metadata/audio evidence and keeps the lower hold policy
+with the confirmed media identity. A different item must qualify again; scrolling
+videos cannot inherit music ownership indefinitely. Detection tiers, timings and
+validation details are documented in `AUDIO_REACTIVE_DANCE.md`.
+
 `PetBehavior` selects explicitly curated `DancePool` registry references and asks
 `LibraryPlayback` to load them. `NeraAnimationState::AutoDance` is a low-priority
 one-shot intent mapped to existing library playback and its real clip duration.

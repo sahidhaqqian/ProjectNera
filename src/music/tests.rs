@@ -73,7 +73,7 @@ fn fusion_requires_context_or_musiclike_audio_and_degrades_independently() {
 #[test]
 fn hysteresis_sustained_start_brief_silence_sustained_stop_and_noisy_flapping() {
     let mut state = MusicDetectionState::default();
-    observe_for(&mut state, &dedicated(), audio(0.9), 2.75);
+    observe_for(&mut state, &dedicated(), audio(0.9), 0.25);
     assert!(!state.active);
     observe_for(&mut state, &dedicated(), audio(0.9), 0.25);
     assert!(state.active);
@@ -99,11 +99,194 @@ fn hysteresis_sustained_start_brief_silence_sustained_stop_and_noisy_flapping() 
         0.25,
     );
     assert!(!state.active);
+    let ambiguous = MediaEvidence::classify("chrome.exe", true, "Track", "", "", false);
     for _ in 0..20 {
-        observe_for(&mut state, &dedicated(), audio(0.9), 1.0);
+        observe_for(&mut state, &ambiguous, audio(0.9), 1.0);
         observe_for(&mut state, &MediaEvidence::default(), audio(0.1), 0.25);
     }
     assert!(!state.active);
+}
+#[test]
+fn browser_music_type_preserved_and_fast_even_with_weak_dsp() {
+    let media = MediaEvidence::classify("chrome.exe", true, "Song", "Artist", "Album", true);
+    assert_eq!(
+        (&media.title[..], &media.artist[..], &media.album[..]),
+        ("Song", "Artist", "Album")
+    );
+    assert!(media.playback_type_music);
+    assert_eq!(fuse(&media, audio(0.1)).1, ConfidenceTier::High);
+    let mut state = MusicDetectionState::default();
+    observe_for(&mut state, &media, audio(0.1), 0.25);
+    assert!(!state.active);
+    observe_for(&mut state, &media, audio(0.1), 0.25);
+    assert!(state.active);
+    let silent = AudioEvidence {
+        available: true,
+        ..Default::default()
+    };
+    assert_eq!(fused_confidence(&media, silent), 0.0);
+    assert_eq!(fused_confidence(&media, AudioEvidence::default()), 0.0);
+    let paused = MediaEvidence::classify("chrome.exe", false, "Song", "Artist", "Album", true);
+    assert_ne!(fuse(&paused, audio(0.5)).1, ConfidenceTier::High);
+}
+#[test]
+fn browser_structured_metadata_and_moderate_dsp_use_high_or_medium() {
+    let album = MediaEvidence::classify("msedge.exe", true, "Song", "Artist", "Album", false);
+    assert_eq!(fuse(&album, audio(0.45)).1, ConfidenceTier::High);
+    let media = MediaEvidence::classify(
+        "msedge.exe",
+        true,
+        "Song (Official Audio)",
+        "Artist",
+        "",
+        false,
+    );
+    assert_eq!(fuse(&media, audio(0.45)).1, ConfidenceTier::Medium);
+    assert!(fused_confidence(&media, audio(0.45)) >= 0.70);
+    let mut state = MusicDetectionState::default();
+    observe_for(&mut state, &media, audio(0.45), 0.75);
+    assert!(!state.active);
+    observe_for(&mut state, &media, audio(0.45), 0.25);
+    assert!(state.active);
+    assert!(fused_confidence(&media, audio(0.2)) < 0.45);
+}
+#[test]
+fn browser_tutorial_podcast_and_weak_audio_do_not_start() {
+    for title in [
+        "How to make music tutorial",
+        "Podcast interview",
+        "A conversation",
+    ] {
+        let media = MediaEvidence::classify("chrome.exe", true, title, "Channel", "", false);
+        let mut state = MusicDetectionState::default();
+        observe_for(&mut state, &media, audio(0.25), 10.0);
+        assert!(!state.active, "{title}");
+    }
+    let tutorial = MediaEvidence::classify(
+        "chrome.exe",
+        true,
+        "Music tutorial",
+        "Channel",
+        "Series",
+        false,
+    );
+    assert_eq!(fuse(&tutorial, audio(0.5)).1, ConfidenceTier::Ambiguous);
+    assert!(fused_confidence(&tutorial, audio(0.5)) < 0.70);
+}
+#[test]
+fn generic_browser_music_flag_and_channel_are_not_song_metadata() {
+    // Real Chromium sessions mark ordinary YouTube videos as Music, too.
+    for source in ["Chrome", "msedge.exe", "EmbeddedWebPlayer"] {
+        for title in [
+            "Everyone Thinks I Had a BBL 😭",
+            "A conversation #shorts",
+            "Music tutorial",
+        ] {
+            let media = MediaEvidence::classify(source, true, title, "Creator", "", true);
+            assert!(media.playback_type_music);
+            for probability in [0.25, 0.40, 0.45, 0.60] {
+                let mut state = MusicDetectionState::default();
+                observe_for(&mut state, &media, audio(probability), 10.0);
+                assert!(!state.active, "{source}: {title}, DSP={probability}");
+                assert_eq!(state.tier, ConfidenceTier::Ambiguous);
+            }
+        }
+    }
+}
+#[test]
+fn official_music_video_keeps_fast_start_without_album() {
+    for source in ["Chrome", "EmbeddedWebPlayer"] {
+        let media = MediaEvidence::classify(
+            source,
+            true,
+            "Coldplay - Adventure Of A Lifetime (Official Video)",
+            "Coldplay",
+            "",
+            true,
+        );
+        let mut state = MusicDetectionState::default();
+        observe_for(&mut state, &media, audio(0.1), 0.25);
+        assert!(!state.active);
+        observe_for(&mut state, &media, audio(0.1), 0.25);
+        assert!(state.active);
+        assert_eq!(state.tier, ConfidenceTier::High);
+    }
+}
+#[test]
+fn song_to_scrolling_shorts_cannot_inherit_music_hold_threshold() {
+    let song = MediaEvidence::classify("Chrome", true, "Song (Official Audio)", "Artist", "", true);
+    let short = MediaEvidence::classify("Chrome", true, "A conversation", "Creator", "", true);
+    let next = MediaEvidence::classify("Chrome", true, "Another video", "Creator", "", true);
+    let mut state = MusicDetectionState::default();
+    observe_for(&mut state, &song, audio(0.6), 0.5);
+    assert!(state.active);
+    // DSP is above the old hold threshold, but insufficient to establish music.
+    observe_for(&mut state, &short, audio(0.6), 2.0);
+    assert!(state.active);
+    observe_for(&mut state, &next, audio(0.6), 1.75);
+    assert!(state.active);
+    observe_for(&mut state, &next, audio(0.6), 0.25);
+    assert!(!state.active);
+    observe_for(&mut state, &next, audio(0.6), 8.0);
+    assert!(!state.active);
+    observe_for(&mut state, &song, audio(0.6), 0.5);
+    assert!(state.active);
+}
+#[test]
+fn confirmed_music_can_hold_but_new_ambiguous_items_must_qualify() {
+    let song = MediaEvidence::classify("Chrome", true, "Song", "Artist", "", true);
+    let next = MediaEvidence::classify("Chrome", true, "Next song", "Artist", "", true);
+    let mut state = MusicDetectionState::default();
+    observe_for(&mut state, &song, audio(0.9), 2.5);
+    assert!(state.active);
+    observe_for(&mut state, &song, audio(0.6), 6.0);
+    assert!(state.active);
+    observe_for(&mut state, &next, audio(0.9), 2.5);
+    assert!(state.active);
+    observe_for(&mut state, &next, audio(0.6), 6.0);
+    assert!(state.active);
+    // Separate short items cannot pool their start duration either.
+    state = MusicDetectionState::default();
+    for _ in 0..4 {
+        observe_for(&mut state, &song, audio(0.9), 1.5);
+        observe_for(&mut state, &next, audio(0.9), 1.5);
+        assert!(!state.active);
+    }
+}
+#[test]
+fn ambiguous_browser_uses_slow_path_and_tier_changes_restart_accumulation() {
+    let weak = MediaEvidence::classify("chrome.exe", true, "Video", "", "", false);
+    let mut state = MusicDetectionState::default();
+    observe_for(&mut state, &weak, audio(0.9), 2.25);
+    assert_eq!(state.tier, ConfidenceTier::Ambiguous);
+    assert!(!state.active);
+    observe_for(&mut state, &weak, audio(0.9), 0.25);
+    assert!(state.active);
+    state = MusicDetectionState::default();
+    observe_for(&mut state, &dedicated(), audio(0.9), 0.25);
+    observe_for(&mut state, &weak, audio(0.9), 2.25);
+    assert!(!state.active);
+    observe_for(&mut state, &weak, audio(0.9), 0.25);
+    assert!(state.active);
+}
+#[test]
+fn all_tiers_hold_brief_silence_and_stop_after_four_seconds() {
+    for media in [
+        dedicated(),
+        MediaEvidence::classify("chrome.exe", true, "Song", "Artist", "", false),
+        MediaEvidence::classify("chrome.exe", true, "Video", "", "", false),
+    ] {
+        let mut state = MusicDetectionState::default();
+        observe_for(&mut state, &media, audio(0.9), 3.0);
+        assert!(state.active);
+        observe_for(&mut state, &MediaEvidence::default(), audio(0.1), 3.75);
+        assert!(state.active);
+        observe_for(&mut state, &media, audio(0.9), 0.25);
+        observe_for(&mut state, &MediaEvidence::default(), audio(0.1), 3.75);
+        assert!(state.active);
+        observe_for(&mut state, &MediaEvidence::default(), audio(0.1), 0.25);
+        assert!(!state.active);
+    }
 }
 fn analyze(mut signal: impl FnMut(f32) -> f32) -> AudioEvidence {
     let mut analyzer = dsp::Analyzer::default();

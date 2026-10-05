@@ -218,6 +218,17 @@ pub(crate) struct BehaviorContext<'w, 's> {
 
 impl BehaviorContext<'_, '_> {
     fn available(&self) -> bool {
+        self.available_with_pointer(
+            self.interaction.state == InteractionState::None
+                && self.interaction.right_pressed_body_part.is_none(),
+        )
+    }
+
+    fn available_for_dance(&self) -> bool {
+        self.available_with_pointer(dance::pointer_available(&self.interaction))
+    }
+
+    fn available_with_pointer(&self, pointer_available: bool) -> bool {
         if self
             .cloud
             .as_ref()
@@ -236,8 +247,7 @@ impl BehaviorContext<'_, '_> {
             && !self.entrance.blocks_position_save()
             && crate::settings::nera_input_available(Res::clone(&self.settings_gate))
             && self.primary.iter().any(|w| w.visible)
-            && self.interaction.state == InteractionState::None
-            && self.interaction.right_pressed_body_part.is_none()
+            && pointer_available
     }
 }
 
@@ -336,7 +346,7 @@ pub(crate) fn update_pet_behavior(
             && !platform::is_window_minimized(h)
             && !platform::is_window_cloaked(h)
     });
-    let dance_allowed = context.available()
+    let dance_allowed = context.available_for_dance()
         && native_visible
         && !environment.hidden_for_target_suspend
         && !physics.falling
