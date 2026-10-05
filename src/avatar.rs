@@ -116,6 +116,7 @@ pub(crate) fn update_look_at_target(
     settings: Res<NeraSettings>,
     character: Res<ActiveCharacter>,
     cloud: Res<crate::cloud::CloudRuntime>,
+    presentation: Res<crate::presentation::PresentationState>,
     environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
@@ -132,7 +133,10 @@ pub(crate) fn update_look_at_target(
     // eases the target back here instead of snapping the gaze in one frame.
     let neutral = Vec3::new(0.0, 0.5, 2.0);
 
-    let desired = if settings.follow_mouse && cloud.mode() != Some(crate::cloud::CloudMode::Rest) {
+    let desired = if settings.follow_mouse
+        && !presentation.is_screensaver()
+        && cloud.mode() != Some(crate::cloud::CloudMode::Rest)
+    {
         cursor_position_in_nera_window(&environment)
             .map(|cursor_pos| {
                 let intensity = f32::from(settings.follow_intensity.clamp(25, 100)) / 100.0;
@@ -172,6 +176,7 @@ pub(crate) fn sync_look_at_for_animation(
     animation: Res<NeraAnimationState>,
     settings: Res<NeraSettings>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    presentation: Option<Res<crate::presentation::PresentationState>>,
     target_query: Query<Entity, With<LookAtTarget>>,
     avatar_query: Query<(Entity, Option<&LookAt>, Option<&BodyTracking>), With<NeraAvatar>>,
     mut commands: Commands,
@@ -190,7 +195,11 @@ pub(crate) fn sync_look_at_for_animation(
     // Rest owns the entire head pose, including its loading/fallback seated loop.
     // Derive suppression from the attachment owner; user preferences remain intact.
     let resting = cloud.is_some_and(|cloud| cloud.mode() == Some(crate::cloud::CloudMode::Rest));
-    let allow_look_at = settings.follow_eyes && !animation.suppresses_look_at() && !resting;
+    // Screensaver shows the authored animation facing forward; cursor motion
+    // must not add eye/head/spine tracking or change saved follow preferences.
+    let screensaver = presentation.is_some_and(|state| state.is_screensaver());
+    let allow_look_at =
+        settings.follow_eyes && !animation.suppresses_look_at() && !resting && !screensaver;
     let allow_body_tracking = allow_look_at && settings.follow_head;
 
     if allow_look_at {

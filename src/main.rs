@@ -136,9 +136,13 @@ fn main() {
     #[cfg(debug_assertions)]
     let feature_smoke = std::env::args().any(|arg| arg == "--feature-smoke");
     #[cfg(debug_assertions)]
-    let touch_smoke = feature_smoke && std::env::args().any(|arg| arg == "--touch-smoke");
+    // Scripted harnesses inject semantic/window events; never capture the
+    // user's physical pointer while they work in another application.
+    let scripted_pointer = feature_smoke
+        && std::env::args()
+            .any(|arg| matches!(arg.as_str(), "--touch-smoke" | "--presentation-smoke"));
     #[cfg(not(debug_assertions))]
-    let touch_smoke = false;
+    let scripted_pointer = false;
 
     // Load persistent Nera settings before the native window is created.
     //
@@ -264,7 +268,7 @@ fn main() {
                 // base pose, consumes temporary interaction actions, resolves
                 // priority, and finally applies the correct VRMA/anchor.
                 drag_nera_window
-                    .run_if(move || !touch_smoke)
+                    .run_if(move || !scripted_pointer)
                     .run_if(presentation::desktop_pet_active)
                     .run_if(startup_entrance::pet_is_revealed)
                     .run_if(nera_utility_input_available),
@@ -304,16 +308,16 @@ fn main() {
         .add_systems(
             PostUpdate,
             update_click_through
-                .run_if(move || !touch_smoke)
+                .run_if(move || !scripted_pointer)
                 .after(VrmSystemSets::SpringBone)
                 .run_if(startup_entrance::pet_is_revealed)
-                .run_if(presentation::desktop_pet_active)
+                .run_if(presentation::avatar_hit_testing_active)
                 .run_if(nera_utility_input_available),
         )
         .add_systems(
             PostUpdate,
             detect_head_pat
-                .run_if(move || !touch_smoke)
+                .run_if(move || !scripted_pointer)
                 .after(update_click_through)
                 .run_if(startup_entrance::pet_is_revealed)
                 .run_if(presentation::desktop_pet_active)
@@ -325,7 +329,9 @@ fn main() {
         .add_systems(
             Last,
             (
-                update_avatar_anchors,
+                // Attention camera pixels are presentation geometry, not
+                // desktop collision/seat calibration.
+                update_avatar_anchors.run_if(presentation::desktop_pet_active),
                 settle_pending_sit.run_if(presentation::desktop_pet_active),
                 cloud::align_cloud_seat,
                 cloud::animate_cloud_visual,

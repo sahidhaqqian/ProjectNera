@@ -19,6 +19,16 @@
 //! Phase 5.6 Alarm will drive this through `PresentationCommand`.
 //! Ctrl+Alt+P is only a Phase-5.55 debug toggle and can be removed later.
 
+mod activity;
+mod full_body;
+#[cfg(test)]
+mod screensaver_tests;
+pub(crate) mod screenshot;
+#[cfg(all(debug_assertions, target_os = "windows"))]
+mod smoke;
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) use smoke::install as install_smoke;
+
 use bevy::{
     camera::ScalingMode,
     prelude::*,
@@ -40,6 +50,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum AttentionKind {
     Alarm,
+    Screensaver,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -53,6 +64,8 @@ pub(crate) enum PresentationMode {
 pub(crate) enum PresentationCommand {
     EnterAttention(AttentionKind),
     ExitAttention,
+    /// Input queued before Alarm preemption must never dismiss Alarm.
+    ExitScreensaver,
 }
 
 /// Emitted after the window/camera has actually entered attention mode.
@@ -103,6 +116,10 @@ pub(crate) struct PresentationState {
     /// Replacing an initialized rig may reframe once, without replacing the
     /// normal-presentation snapshot or following its subsequent animated poses.
     attention_avatar: Option<Entity>,
+    screensaver_input: Option<activity::ClickGuard>,
+    /// Bevy updates the camera/window after Update; native facts catch up on
+    /// the next frame. Desktop physics must not consume the attention canvas.
+    desktop_restore_pending: bool,
 }
 
 impl PresentationState {
@@ -112,6 +129,10 @@ impl PresentationState {
 
     pub(crate) fn is_desktop_pet(&self) -> bool {
         self.mode == PresentationMode::DesktopPet
+    }
+
+    pub(crate) fn is_screensaver(&self) -> bool {
+        self.mode == PresentationMode::Attention(AttentionKind::Screensaver)
     }
 }
 
@@ -156,6 +177,11 @@ const MIN_UPPER_BODY_WORLD_HEIGHT: f32 = 0.45;
 /// monitor and eases upward into its final bottom-anchored attention position.
 const ATTENTION_ENTER_SECONDS: f32 = 0.38;
 
+const SCREENSAVER_VISIBLE_MONITOR_HEIGHT: f32 = 0.85;
+const SCREENSAVER_WINDOW_MONITOR_HEIGHT: f32 = 0.94;
+const SCREENSAVER_MAX_WINDOW_WIDTH: f32 = 0.88;
+const SCREENSAVER_HORIZONTAL_FILL: f32 = 0.90;
+
 // -----------------------------------------------------------------------------
 // Plugin
 // -----------------------------------------------------------------------------
@@ -164,6 +190,12 @@ pub(crate) struct PresentationPlugin;
 
 impl Plugin for PresentationPlugin {
     fn build(&self, app: &mut App) {
+        screenshot::install(app);
+        // The isolated visual harness must not dismiss itself while the user
+        // works in other apps. The input harness invokes the same click observer
+        // with scripted window events instead of controlling the user's input.
+        let observe_input =
+            !cfg!(debug_assertions) || !std::env::args().any(|arg| arg == "--presentation-smoke");
         app.init_resource::<PresentationState>()
             .add_message::<PresentationCommand>()
             .add_message::<PresentationEntered>()
@@ -178,6 +210,12 @@ impl Plugin for PresentationPlugin {
                     .chain()
                     .before(crate::cloud::update_cloud)
                     .before(crate::startup_entrance::prepare_startup_entrance),
+            )
+            .add_systems(
+                PostUpdate,
+                activity::exit_on_avatar_click
+                    .after(crate::interaction::update_click_through)
+                    .run_if(move || observe_input),
             )
             // Last intentionally wins over Phase 4 window-follow systems.
             // This avoids changing working sitting/tracking code in Phase 5.55.
@@ -263,17 +301,28 @@ fn handle_presentation_commands(
     bone_query: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
     avatar_query: PortraitAvatars,
     body_proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
+    full_body: full_body::FullBodyGeometry,
+    cloud: Option<Res<crate::cloud::CloudRuntime>>,
 ) {
     for request in requests.read() {
         match *request {
             PresentationCommand::EnterAttention(kind) => {
-                if state.is_attention() {
+                let preempting = kind == AttentionKind::Alarm && state.is_screensaver();
+                if state.is_attention() && !preempting {
                     // Phase 5.6 may re-trigger the same attention mode; avoid
                     // overwriting the original DesktopPet snapshot.
                     continue;
                 }
 
-                let Ok((mut window, cursor)) = window_query.single_mut() else {
+                if kind == AttentionKind::Screensaver
+                    && cloud.as_ref().is_some_and(|cloud| cloud.owns_placement())
+                {
+                    warn!(
+                        "Screensaver entry skipped while Cloud owns placement; dismiss Cloud first"
+                    );
+                    continue;
+                }
+                let Ok((mut window, mut cursor)) = window_query.single_mut() else {
                     warn!("Presentation: primary Nera window unavailable");
                     continue;
                 };
@@ -293,19 +342,52 @@ fn handle_presentation_commands(
                     continue;
                 };
 
-                state.snapshot = Some(PresentationSnapshot {
-                    window_left: rect.left,
-                    window_top: rect.top,
-                    window_width: rect.width().max(1) as u32,
-                    window_height: rect.height().max(1) as u32,
-                    window_level: window.window_level,
-                    cursor_hit_test: cursor.hit_test,
-                    camera_transform: camera_transform.clone(),
-                    camera_projection: projection.clone(),
-                    placement: environment.placement,
-                    attached_anchor: environment.attached_anchor,
-                    hidden_for_target_suspend: environment.hidden_for_target_suspend,
-                });
+                if monitor.bounds.width() <= 0 || monitor.bounds.height() <= 0 {
+                    warn!("Attention entry skipped: invalid monitor geometry");
+                    continue;
+                }
+                let screensaver_layout = if kind == AttentionKind::Screensaver {
+                    let Some(bounds) = full_body.bounds(
+                        &avatar_query,
+                        body_proportions
+                            .as_ref()
+                            .map_or(1.0, |body| body.body_scale()),
+                        body_proportions
+                            .as_ref()
+                            .map_or(1.0, |body| body.head_scale()),
+                        body_proportions
+                            .as_ref()
+                            .map_or(0.0, |body| body.standing_root_offset_y()),
+                        true,
+                    ) else {
+                        warn!(
+                            "Screensaver entry skipped: initialized humanoid/skin geometry unavailable"
+                        );
+                        continue;
+                    };
+                    Some(compute_screensaver_layout(monitor.bounds, bounds))
+                } else {
+                    None
+                };
+                if !preempting {
+                    state.snapshot = Some(PresentationSnapshot {
+                        window_left: rect.left,
+                        window_top: rect.top,
+                        window_width: rect.width().max(1) as u32,
+                        window_height: rect.height().max(1) as u32,
+                        window_level: window.window_level,
+                        cursor_hit_test: cursor.hit_test,
+                        camera_transform: camera_transform.clone(),
+                        camera_projection: projection.clone(),
+                        placement: environment.placement,
+                        attached_anchor: environment.attached_anchor,
+                        hidden_for_target_suspend: environment.hidden_for_target_suspend,
+                    });
+                } else {
+                    exited.write(PresentationExited {
+                        kind: AttentionKind::Screensaver,
+                    });
+                }
 
                 // Attention owns Nera completely. Do not keep the desktop
                 // sitting attachment logically active: otherwise Phase 4,
@@ -324,7 +406,13 @@ fn handle_presentation_commands(
                 reset_pointer_state(&mut interaction, &mut hovered, &mut head_pat);
 
                 state.mode = PresentationMode::Attention(kind);
+                state.desktop_restore_pending = false;
                 state.attention_enter_progress = 0.0;
+                state.screensaver_input =
+                    (kind == AttentionKind::Screensaver).then(activity::ClickGuard::default);
+                if kind == AttentionKind::Screensaver {
+                    cursor.hit_test = false;
+                }
 
                 let bounds = canonical_upper_body_bounds(
                     &bone_query,
@@ -355,6 +443,7 @@ fn handle_presentation_commands(
                     window_width: stable_width.max(layout.window_width),
                     ..layout
                 };
+                let layout = screensaver_layout.unwrap_or(layout);
                 // Parallel projection removes the scale change caused by
                 // different authored hips depths, without touching avatar scale.
                 *projection = Projection::Orthographic(OrthographicProjection {
@@ -370,13 +459,21 @@ fn handle_presentation_commands(
                     },
                 );
 
-                apply_attention_window(
+                apply_presentation_window(
+                    kind,
                     &mut window,
                     monitor.bounds,
                     layout.window_width,
                     layout.window_height,
-                    0.0,
+                    if kind == AttentionKind::Screensaver {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 );
+                if kind == AttentionKind::Screensaver {
+                    state.attention_enter_progress = 1.0;
+                }
                 apply_attention_camera(
                     &mut camera_transform,
                     layout.camera_x,
@@ -397,7 +494,12 @@ fn handle_presentation_commands(
                 entered.write(PresentationEntered { kind });
             }
 
-            PresentationCommand::ExitAttention => {
+            PresentationCommand::ExitAttention | PresentationCommand::ExitScreensaver => {
+                if matches!(request, PresentationCommand::ExitScreensaver)
+                    && !state.is_screensaver()
+                {
+                    continue;
+                }
                 let PresentationMode::Attention(kind) = state.mode else {
                     continue;
                 };
@@ -406,6 +508,8 @@ fn handle_presentation_commands(
                 // exit that cannot restore the window must still hand input
                 // ownership back cleanly.
                 reset_pointer_state(&mut interaction, &mut hovered, &mut head_pat);
+
+                state.screensaver_input = None;
 
                 let Some(snapshot) = state.snapshot.take() else {
                     warn!("Presentation: attention mode had no restore snapshot");
@@ -446,6 +550,7 @@ fn handle_presentation_commands(
                 animation.restore_support_after_attention(restored_sitting);
 
                 state.mode = PresentationMode::DesktopPet;
+                state.desktop_restore_pending = true;
                 state.attention_enter_progress = 0.0;
                 state.attention_layout = None;
                 state.attention_avatar = None;
@@ -878,6 +983,55 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - clamped).powi(3)
 }
 
+fn compute_screensaver_layout(
+    monitor: crate::platform::PhysicalRect,
+    bounds: UpperBodyBounds,
+) -> AttentionLayout {
+    let height = (monitor.height().max(1) as f32 * SCREENSAVER_WINDOW_MONITOR_HEIGHT)
+        .round()
+        .max(1.0);
+    // Visible mesh height, rather than HWND height, is 85% of the monitor.
+    let vertical = (bounds.top_y - bounds.bottom_y).max(0.01) * height
+        / (monitor.height().max(1) as f32 * SCREENSAVER_VISIBLE_MONITOR_HEIGHT);
+    let width = (height * (bounds.max_x - bounds.min_x).max(0.01)
+        / (vertical * SCREENSAVER_HORIZONTAL_FILL))
+        .ceil()
+        .clamp(
+            1.0,
+            (monitor.width().max(1) as f32 * SCREENSAVER_MAX_WINDOW_WIDTH).max(1.0),
+        );
+    let viewport = vertical.max(
+        (bounds.max_x - bounds.min_x).max(0.01) * height / (width * SCREENSAVER_HORIZONTAL_FILL),
+    );
+    AttentionLayout {
+        window_width: width as u32,
+        window_height: height as u32,
+        camera_z: bounds.front_z + viewport.max(1.0),
+        viewport_height: viewport,
+        camera_x: bounds.center_x(),
+        camera_y: bounds.center_y(),
+        look_at_x: bounds.center_x(),
+        look_at_y: bounds.center_y(),
+    }
+}
+
+fn apply_presentation_window(
+    kind: AttentionKind,
+    window: &mut Window,
+    monitor: crate::platform::PhysicalRect,
+    width: u32,
+    height: u32,
+    progress: f32,
+) {
+    apply_attention_window(window, monitor, width, height, progress);
+    if kind == AttentionKind::Screensaver {
+        window.position = WindowPosition::At(IVec2::new(
+            monitor.left + (monitor.width() - width as i32) / 2,
+            monitor.top + (monitor.height() - height as i32) / 2,
+        ));
+    }
+}
+
 fn apply_attention_window(
     window: &mut Window,
     monitor_bounds: crate::platform::PhysicalRect,
@@ -952,8 +1106,22 @@ fn maintain_attention_presentation(
     bone_query: Query<(&VrmBone, &RestGlobalTransform), With<NeraLiveBone>>,
     avatar_query: PortraitAvatars,
     body_proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
+    full_body: full_body::FullBodyGeometry,
 ) {
     if !state.is_attention() {
+        if state.desktop_restore_pending {
+            state.desktop_restore_pending = window_query.single().ok().is_some_and(|window| {
+                let WindowPosition::At(position) = window.position else {
+                    return false;
+                };
+                !environment.nera_rect.is_some_and(|rect| {
+                    rect.left == position.x
+                        && rect.top == position.y
+                        && rect.width() == window.resolution.physical_width() as i32
+                        && rect.height() == window.resolution.physical_height() as i32
+                })
+            });
+        }
         return;
     }
 
@@ -993,6 +1161,26 @@ fn maintain_attention_presentation(
             ),
             ..layout
         };
+        let layout = if state.is_screensaver() {
+            let Some(bounds) = full_body.bounds(
+                &avatar_query,
+                body_proportions
+                    .as_ref()
+                    .map_or(1.0, |body| body.body_scale()),
+                body_proportions
+                    .as_ref()
+                    .map_or(1.0, |body| body.head_scale()),
+                body_proportions
+                    .as_ref()
+                    .map_or(0.0, |body| body.standing_root_offset_y()),
+                false,
+            ) else {
+                return;
+            };
+            compute_screensaver_layout(monitor.bounds, bounds)
+        } else {
+            layout
+        };
         if let Ok((mut projection, mut camera)) = camera_query.single_mut() {
             *projection = Projection::Orthographic(OrthographicProjection {
                 scaling_mode: ScalingMode::FixedVertical {
@@ -1024,7 +1212,11 @@ fn maintain_attention_presentation(
     let enter_progress = state.attention_enter_progress;
 
     if let Ok(mut window) = window_query.single_mut() {
-        apply_attention_window(
+        let PresentationMode::Attention(kind) = state.mode else {
+            return;
+        };
+        apply_presentation_window(
+            kind,
             &mut window,
             monitor.bounds,
             layout.window_width,
@@ -1045,7 +1237,13 @@ fn maintain_attention_presentation(
 /// Phase 5.55 does not force this across old systems yet; the Last-stage
 /// attention authority is enough for the foundation test.
 pub(crate) fn desktop_pet_active(state: Res<PresentationState>) -> bool {
-    state.is_desktop_pet()
+    state.is_desktop_pet() && !state.desktop_restore_pending
+}
+
+/// Screensaver retains body hit testing for dismissal, without enabling
+/// desktop click reactions, headpat or dragging during presentation.
+pub(crate) fn avatar_hit_testing_active(state: Res<PresentationState>) -> bool {
+    (state.is_desktop_pet() && !state.desktop_restore_pending) || state.is_screensaver()
 }
 
 // -----------------------------------------------------------------------------
@@ -1057,7 +1255,7 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
 
-    fn presentation_app() -> (
+    pub(super) fn presentation_app() -> (
         App,
         Entity,
         Entity,

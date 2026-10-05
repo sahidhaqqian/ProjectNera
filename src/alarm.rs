@@ -565,7 +565,7 @@ fn tick_alarm_deadline(
     >,
     existing_audio: Query<(Entity, Option<&AudioSink>), With<AlarmAudioPlayback>>,
 ) {
-    if !presentation_state.is_desktop_pet() {
+    if !presentation_state.is_desktop_pet() && !presentation_state.is_screensaver() {
         return;
     }
     #[cfg(target_os = "windows")]

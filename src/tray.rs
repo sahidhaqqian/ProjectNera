@@ -53,11 +53,12 @@ impl Plugin for TrayPlugin {
 // =============================================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TrayCommand {
+pub(crate) enum TrayCommand {
     Show,
     Hide,
     ResetPosition,
     ToggleAlwaysOnTop,
+    Screenshot,
     Exit,
 }
 
@@ -76,6 +77,39 @@ const MENU_HIDE: usize = 1002;
 const MENU_ALWAYS_ON_TOP: usize = 1003;
 const MENU_EXIT: usize = 1004;
 const MENU_RESET_POSITION: usize = 1005;
+const MENU_SCREENSHOT: usize = 1006;
+
+fn command_for_menu_id(id: usize) -> Option<TrayCommand> {
+    match id {
+        MENU_SHOW => Some(TrayCommand::Show),
+        MENU_HIDE => Some(TrayCommand::Hide),
+        MENU_ALWAYS_ON_TOP => Some(TrayCommand::ToggleAlwaysOnTop),
+        MENU_EXIT => Some(TrayCommand::Exit),
+        MENU_RESET_POSITION => Some(TrayCommand::ResetPosition),
+        MENU_SCREENSHOT => Some(TrayCommand::Screenshot),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn screenshot_menu_id_preserves_all_existing_commands() {
+        for (id, command) in [
+            (1001, TrayCommand::Show),
+            (1002, TrayCommand::Hide),
+            (1003, TrayCommand::ToggleAlwaysOnTop),
+            (1004, TrayCommand::Exit),
+            (1005, TrayCommand::ResetPosition),
+            (1006, TrayCommand::Screenshot),
+        ] {
+            assert_eq!(command_for_menu_id(id), Some(command));
+        }
+        assert_eq!(command_for_menu_id(0), None);
+        assert_eq!(command_for_menu_id(999), None);
+    }
+}
 
 // Registered Windows message yang dikirim ketika Explorer/taskbar dibuat ulang.
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
@@ -86,7 +120,7 @@ static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 
 static TRAY_SENDER: OnceLock<Mutex<Option<Sender<TrayCommand>>>> = OnceLock::new();
 
-fn send_tray_command(command: TrayCommand) {
+pub(crate) fn send_tray_command(command: TrayCommand) {
     let Some(sender_slot) = TRAY_SENDER.get() else {
         return;
     };
@@ -225,7 +259,7 @@ fn start_system_tray(mut commands: Commands) {
 // Bevy command handling
 // =============================================================================
 
-fn process_tray_commands(
+pub(crate) fn process_tray_commands(
     runtime: Option<Res<TrayRuntime>>,
 
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
@@ -246,6 +280,7 @@ fn process_tray_commands(
     mut cloud: ResMut<crate::cloud::CloudRuntime>,
     mut sfx: MessageWriter<crate::pet_feedback::PetSfx>,
     mut fx: MessageWriter<crate::pet_feedback::PetFx>,
+    mut screenshots: MessageWriter<crate::presentation::screenshot::ScreenshotRequest>,
 ) {
     let Some(runtime) = runtime else {
         return;
@@ -261,6 +296,9 @@ fn process_tray_commands(
 
     for command in pending_commands {
         match command {
+            TrayCommand::Screenshot => {
+                screenshots.write(crate::presentation::screenshot::ScreenshotRequest);
+            }
             // =============================================================
             // SHOW
             // =============================================================

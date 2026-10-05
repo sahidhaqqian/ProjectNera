@@ -654,11 +654,59 @@ Autonomy yields to user interaction, dragging, physics, alarm/Attention, explici
 ```text
 PresentationMode::DesktopPet
 PresentationMode::Attention(Alarm)
+PresentationMode::Attention(Screensaver)
 ```
 
 Entering Attention snapshots enough window/camera/placement state to restore normal desktop behavior afterward. The same compact transparent Bevy window is repositioned/reframed rather than replaced by a monitor-sized transparent canvas.
 
 Alarm framing uses a canonical layout for the sequence so switching alarm animation A -> B does not suddenly rescale the avatar from live animated bounds.
+
+Presentation priority is `Alarm > Screensaver > DesktopPet`. A due Alarm may
+preempt Screensaver directly, retaining the original desktop snapshot; Alarm
+dismissal restores DesktopPet instead of resuming Screensaver. Alarm keeps its
+existing 0.78 monitor-height canvas, 0.80 upper-body viewport fill, 0.84
+horizontal fill, 0.88 width limit and 0.38-second bottom-anchored entrance.
+
+Screensaver is the seventh radial root action (Games remains disabled). It
+reuses the primary transparent window, camera, loaded VRM and animation owner.
+Its orthographic full-body profile targets visible character height of 0.85 of
+the physical monitor height inside a centered 0.94-height canvas. Width follows
+compact rest skin bounds retained after GPU upload, with 0.90 horizontal fill,
+capped at 0.88 monitor width; unusually
+wide rigs prioritize fitting over the height target. Read-only humanoid/rest
+skin measurements include hair/clothing and the current body/head proportions.
+Only live humanoid bones supply landmarks; child VRMA source rigs are excluded.
+The existing Chibi standing correction supplies the thigh adjustment; framing
+does not change avatar scale or the Chibi overlay. Missing/unready geometry
+rejects entry with a log. Cloud-owned placement also rejects Screensaver entry
+until Cloud is dismissed.
+
+Screensaver uses the existing presentation snapshot/restore and pointer reset.
+Only a left/right press received by Nera's primary window on an existing body
+collider exits, after a 0.35-second entry grace. Existing click-through hit
+testing stays active; desktop drag/headpat/touch reactions stay suspended.
+Cursor movement, scrolling, keyboard activity and clicks in other windows do
+not dismiss Screensaver. Cursor eye/head/spine tracking is suppressed so the
+authored animation owns the pose; saved follow preferences remain intact.
+Its conditional exit command cannot dismiss an Alarm that preempted it.
+Presentation positions remain temporary and are not saved as normal placement.
+Desktop feet/seat calibration is suspended during Attention. After restoration,
+physics and pointer gestures resume only once native window facts match the
+restored canvas; temporary presentation pixels never replace support anchors.
+
+The opt-in native smoke harness disables physical pointer capture and injects
+Bevy window events through the same click handler, so validation can run while
+the user works. It checks Normal/Chibi click exit, ignored scroll/cursor/keyboard,
+continued VRMA playback and gaze suppression without controlling desktop input.
+
+Screenshot is a tray-only command, between separators before Exit. The existing
+tray channel requests Bevy `Screenshot::window` on the main thread without
+resizing or changing presentation. `presentation/screenshot.rs` retains RGBA
+(Bevy's stock `save_to_disk` discards alpha) and atomically reserves timestamped
+PNG filenames with numeric collision suffixes. It captures only Nera's render
+target, including current pose, Chibi, Cloud and feedback. Files go to the
+Windows Known Folder Pictures / `NeraScreenshots`, with USERPROFILE/Pictures
+fallback. Directory, decoding and write failures are logged without panics.
 
 ### Alarm runtime
 

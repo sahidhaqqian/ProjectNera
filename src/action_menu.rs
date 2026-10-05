@@ -90,6 +90,7 @@ pub(crate) enum NeraActionMenuCommand {
     Animation(AnimationMenuChoice),
     AnimationManager,
     Chibi,
+    Screensaver,
     Alarm(AlarmMenuChoice),
     AlarmSettings,
     Settings,
@@ -158,7 +159,7 @@ impl RadialItem {
     }
 }
 
-const ROOT_ITEMS: [RadialItem; 6] = [
+const ROOT_ITEMS: [RadialItem; 7] = [
     RadialItem {
         glyph: "☁",
         label: "Cloud",
@@ -188,6 +189,11 @@ const ROOT_ITEMS: [RadialItem; 6] = [
         glyph: "✦",
         label: "Chibi",
         action: RadialItemAction::Command(NeraActionMenuCommand::Chibi),
+    },
+    RadialItem {
+        glyph: "◉",
+        label: "Screensaver",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Screensaver),
     },
 ];
 
@@ -486,6 +492,7 @@ pub(crate) fn poll_action_menu_result(
     mut open_settings: MessageWriter<OpenSettingsWindow>,
     mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
     mut open_animation_manager: MessageWriter<crate::animation_manager::OpenAnimationManager>,
+    mut presentation: MessageWriter<crate::presentation::PresentationCommand>,
 ) {
     let Some(tray) = tray else {
         return;
@@ -507,6 +514,11 @@ pub(crate) fn poll_action_menu_result(
             NeraActionMenuCommand::Chibi => {
                 info!("Nera radial menu -> Chibi toggle");
                 toggle_body_mode.write(ToggleBodyMode);
+            }
+            NeraActionMenuCommand::Screensaver => {
+                presentation.write(crate::presentation::PresentationCommand::EnterAttention(
+                    crate::presentation::AttentionKind::Screensaver,
+                ));
             }
             NeraActionMenuCommand::AnimationManager => {
                 info!("Nera radial menu -> Animation Manager");
@@ -1094,8 +1106,8 @@ mod tests {
     }
 
     #[test]
-    fn root_has_six_wheel_segments() {
-        assert_eq!(items_for(RadialPage::Root).len(), 6);
+    fn root_has_seven_wheel_segments() {
+        assert_eq!(items_for(RadialPage::Root).len(), 7);
     }
 
     #[test]
@@ -1131,6 +1143,26 @@ mod tests {
         let y = (WHEEL_CENTER - ITEM_RADIUS).round() as i32;
 
         assert_eq!(sector_at(RadialPage::Root, x, y), Some(0));
+    }
+
+    #[test]
+    fn seven_root_sectors_preserve_old_actions_and_add_screensaver() {
+        assert_eq!(ROOT_ITEMS.len(), 7);
+        assert!(matches!(ROOT_ITEMS[4].action, RadialItemAction::Disabled));
+        assert!(matches!(
+            ROOT_ITEMS[5].action,
+            RadialItemAction::Command(NeraActionMenuCommand::Chibi)
+        ));
+        assert!(matches!(
+            ROOT_ITEMS[6].action,
+            RadialItemAction::Command(NeraActionMenuCommand::Screensaver)
+        ));
+        for index in 0..ROOT_ITEMS.len() {
+            let angle = index as f32 * TAU / ROOT_ITEMS.len() as f32 - PI * 0.5;
+            let x = (WHEEL_CENTER + ITEM_RADIUS * angle.cos()).round() as i32;
+            let y = (WHEEL_CENTER + ITEM_RADIUS * angle.sin()).round() as i32;
+            assert_eq!(sector_at(RadialPage::Root, x, y), Some(index));
+        }
     }
 
     #[test]

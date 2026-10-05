@@ -32,8 +32,9 @@ use windows::{
 };
 
 use super::{
-    MENU_ALWAYS_ON_TOP, MENU_EXIT, MENU_HIDE, MENU_RESET_POSITION, MENU_SHOW, TASKBAR_CREATED_MSG,
-    TRAY_ICON_ID, TrayCommand, WM_NERA_TRAY, send_action_menu_result, send_tray_command,
+    MENU_ALWAYS_ON_TOP, MENU_EXIT, MENU_HIDE, MENU_RESET_POSITION, MENU_SCREENSHOT, MENU_SHOW,
+    TASKBAR_CREATED_MSG, TRAY_ICON_ID, TrayCommand, WM_NERA_TRAY, command_for_menu_id,
+    send_action_menu_result, send_tray_command,
 };
 use crate::action_menu::{WM_SHOW_NERA_ACTION_MENU, show_nera_action_menu};
 
@@ -154,6 +155,8 @@ unsafe fn show_safety_menu(hwnd: HWND) {
     // -------------------------------------------------------------------------
 
     let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) };
+    let _ = unsafe { AppendMenuW(menu, MF_STRING, MENU_SCREENSHOT, w!("Screenshot")) };
+    let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) };
 
     // -------------------------------------------------------------------------
     // Exit
@@ -198,34 +201,11 @@ unsafe fn show_safety_menu(hwnd: HWND) {
     // Handle menu command
     // -------------------------------------------------------------------------
 
-    match command {
-        MENU_SHOW => {
-            send_tray_command(TrayCommand::Show);
-        }
-
-        MENU_HIDE => {
-            send_tray_command(TrayCommand::Hide);
-        }
-
-        MENU_RESET_POSITION => {
-            send_tray_command(TrayCommand::ResetPosition);
-        }
-
-        MENU_ALWAYS_ON_TOP => {
-            send_tray_command(TrayCommand::ToggleAlwaysOnTop);
-        }
-
-        MENU_EXIT => {
-            send_tray_command(TrayCommand::Exit);
-
-            // Tutup hidden tray window.
-            //
-            // Bevy sendiri akan keluar lewat AppExit.
+    if let Some(command) = command_for_menu_id(command) {
+        send_tray_command(command);
+        if command == TrayCommand::Exit {
             let _ = unsafe { DestroyWindow(hwnd) };
         }
-
-        // 0 berarti menu dibatalkan / click outside.
-        _ => {}
     }
 }
 

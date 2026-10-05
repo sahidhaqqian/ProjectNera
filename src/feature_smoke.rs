@@ -16,7 +16,9 @@ struct Smoke {
 }
 
 pub(crate) fn install(app: &mut App) {
-    if std::env::args().any(|arg| arg == "--touch-smoke") {
+    if std::env::args().any(|arg| arg == "--presentation-smoke") {
+        crate::presentation::install_smoke(app);
+    } else if std::env::args().any(|arg| arg == "--touch-smoke") {
         crate::animation::touch::smoke::install(app);
     } else if std::env::args().any(|arg| arg == "--chibi-smoke") {
         crate::avatar::body_mode::install_smoke(app);
