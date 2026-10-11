@@ -138,6 +138,16 @@ pub(crate) struct TouchReactionContext<'w> {
 }
 
 impl TouchReactionContext<'_> {
+    pub(super) fn headpat_blocked(&self) -> bool {
+        self.interaction
+            .as_ref()
+            .is_some_and(|input| input.state == crate::interaction::InteractionState::Dragging)
+            || self
+                .presentation
+                .as_ref()
+                .is_some_and(|state| !(state.is_desktop_pet() || state.is_screensaver()))
+            || self.character.as_ref().is_some_and(|status| status.loading)
+    }
     pub(super) fn blocked(&self) -> bool {
         self.interaction
             .as_ref()

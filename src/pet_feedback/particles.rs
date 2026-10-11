@@ -25,6 +25,7 @@ pub(crate) enum PetFxKind {
     AngryMark,
     SleepZ,
     CloudPuff,
+    Firefly,
 }
 impl PetFxKind {
     fn count(self) -> usize {
@@ -39,6 +40,7 @@ impl PetFxKind {
             Self::Heart => 0.85,
             Self::SleepZ => 1.8,
             Self::AngryMark => 0.9,
+            Self::Firefly => 3.2,
             _ => 0.75,
         }
     }
@@ -64,11 +66,23 @@ pub(crate) struct PetParticle {
     size: f32,
     /// Hearts follow an age-based arc; other effects retain their linear drift.
     heart_origin: Option<Vec2>,
+    firefly_origin: Option<Vec2>,
 }
 impl PetParticle {
+    #[cfg(debug_assertions)]
+    pub(crate) fn is_firefly(&self) -> bool {
+        self.firefly_origin.is_some()
+    }
     fn advance(&mut self, dt: f32) -> bool {
         self.remaining -= dt;
-        if let Some(origin) = self.heart_origin {
+        if let Some(origin) = self.firefly_origin {
+            let age = (self.lifetime - self.remaining).clamp(0.0, self.lifetime);
+            self.position = origin
+                + Vec2::new(12.0 * (age * 8.0).cos(), 7.0 * (age * 11.0).sin())
+                // Dwarf Idle 2 starts at age 2s. Its left hand crosses
+                // the face at clip 0.5-0.75s; flee along that sweep.
+                + Vec2::new(-350.0, -120.0) * (age - 2.5).max(0.0);
+        } else if let Some(origin) = self.heart_origin {
             let age = (self.lifetime - self.remaining).clamp(0.0, self.lifetime);
             let t = age / self.lifetime;
             self.position = origin
@@ -81,19 +95,36 @@ impl PetParticle {
     }
 
     fn visual_scale(&self) -> f32 {
-        if self.heart_origin.is_none() {
+        if self.heart_origin.is_none() && self.firefly_origin.is_none() {
             return (self.remaining / self.lifetime).max(0.0).sqrt();
         }
         let age = self.lifetime - self.remaining;
         let appear = smoothstep(age / 0.13);
         let disappear = smoothstep(self.remaining / 0.32);
-        appear * disappear
+        let flicker = if self.firefly_origin.is_some() {
+            0.88 + 0.12 * (age * 16.0).sin()
+        } else {
+            1.0
+        };
+        appear * disappear * flicker
     }
 }
 
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Keep the insect tiny in physical pixels, including portrait zoom and DPI.
+fn firefly_world_diameter(
+    position: Vec2,
+    environment: &DesktopEnvironment,
+    camera: &Camera,
+    view: &GlobalTransform,
+) -> Option<f32> {
+    let center = desktop_point_to_world(position, environment, camera, view, 0.6)?;
+    let edge = desktop_point_to_world(position + Vec2::X * 5.0, environment, camera, view, 0.6)?;
+    Some(edge.distance(center))
 }
 
 #[derive(Clone, Copy)]
@@ -122,7 +153,7 @@ pub(crate) struct FxAssets {
 }
 #[derive(Resource, Default)]
 pub(crate) struct FxCooldown {
-    emitted_at: [Option<Duration>; 5],
+    emitted_at: [Option<Duration>; 6],
     heart_sequence: Option<HeartSequence>,
 }
 impl FxCooldown {
@@ -193,6 +224,48 @@ fn heart_mesh() -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
+/// Bright five-pixel core with a soft, transparent halo. The outer glow is
+/// three times the core diameter; no camera bloom or extra particle is needed.
+fn firefly_mesh() -> Mesh {
+    const SEGMENTS: usize = 32;
+    let mut positions = vec![[0.0, 0.0, 0.0]];
+    let mut colors = vec![[1.0, 1.0, 0.65, 1.0]];
+    let mut indices = Vec::new();
+    for (ring, (radius, color)) in [
+        (0.5, [1.0, 0.90, 0.24, 1.0]),
+        (0.85, [1.0, 0.70, 0.04, 0.30]),
+        (1.5, [1.0, 0.60, 0.02, 0.0]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let start = positions.len() as u32;
+        for segment in 0..SEGMENTS {
+            let angle = segment as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            positions.push([radius * angle.cos(), radius * angle.sin(), 0.0]);
+            colors.push(color);
+            let current = start + segment as u32;
+            let next = start + ((segment + 1) % SEGMENTS) as u32;
+            if ring == 0 {
+                indices.extend([0, current, next]);
+            } else {
+                let previous = current - SEGMENTS as u32;
+                let previous_next = next - SEGMENTS as u32;
+                indices.extend([previous, current, next, previous, next, previous_next]);
+            }
+        }
+    }
+    let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
 fn create_fx_assets(
     mut assets: ResMut<FxAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -222,6 +295,7 @@ fn create_fx_assets(
             Mesh::from(Circle::new(0.5)),
             Color::srgba(0.88, 0.95, 1.0, 0.65),
         ),
+        (firefly_mesh(), Color::WHITE),
     ] {
         assets.entries.push((
             meshes.add(mesh),
@@ -263,6 +337,30 @@ fn anchor_point(
     }
 }
 
+fn firefly_face_point(
+    environment: &DesktopEnvironment,
+    camera: &Camera,
+    view: &GlobalTransform,
+    bones: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+) -> Option<Vec2> {
+    let eye = |name: &str| {
+        bones
+            .iter()
+            .find(|(bone, _)| bone.as_str() == name)
+            .and_then(|(_, transform)| camera.world_to_viewport(view, transform.translation()).ok())
+    };
+    let left = eye("leftEye")?;
+    let right = eye("rightEye")?;
+    let rect = environment.nera_rect?;
+    let dpi = environment.nera_scale_factor.max(0.25) as f32;
+    let span = (right.x - left.x).abs().max(8.0);
+    // Insect waits beside the face, in the authored left-hand sweep.
+    Some(
+        Vec2::new(rect.left as f32, rect.top as f32)
+            + ((left + right) * 0.5 - Vec2::X * span * 2.0) * dpi,
+    )
+}
+
 /// Last follows native Cloud/seat alignment, so particles stay in desktop space during drag.
 pub(crate) fn update_particles(
     time: Res<Time<Real>>,
@@ -288,7 +386,8 @@ pub(crate) fn update_particles(
     >,
     mut commands: Commands,
 ) {
-    let visible = presentation.is_desktop_pet() && windows.iter().any(|w| w.visible);
+    let visible = (presentation.is_desktop_pet() || presentation.is_screensaver())
+        && windows.iter().any(|w| w.visible);
     let headpat_phase = visible
         .then(|| clips.head_stroke_progress(&animation))
         .flatten();
@@ -298,7 +397,12 @@ pub(crate) fn update_particles(
     let view = camera.single().ok();
     let mut count = 0;
     for (entity, mut particle, mut transform, mut global) in &mut particles {
-        if !particle.advance(time.delta_secs()) || !visible {
+        if !particle.advance(time.delta_secs())
+            || !visible
+            || (particle.firefly_origin.is_some()
+                && (!presentation.is_screensaver()
+                    || animation.visual_state() == crate::animation::VisualState::HeadStroke))
+        {
             commands.entity(entity).despawn();
             continue;
         }
@@ -358,7 +462,15 @@ pub(crate) fn update_particles(
     }
     for (request, admitted, heart_index) in bursts {
         let Some((camera, view)) = view else { continue };
-        let Some(origin) = anchor_point(request.anchor, &environment, camera, view, &bones) else {
+        let origin = if request.kind == PetFxKind::Firefly {
+            firefly_face_point(&environment, camera, view, &bones).or_else(|| {
+                anchor_point(request.anchor, &environment, camera, view, &bones)
+                    .map(|point| point + Vec2::new(-90.0, 70.0))
+            })
+        } else {
+            anchor_point(request.anchor, &environment, camera, view, &bones)
+        };
+        let Some(origin) = origin else {
             continue;
         };
         let Some((mesh, material)) = assets.entries.get(request.kind as usize) else {
@@ -372,6 +484,7 @@ pub(crate) fn update_particles(
                 PetFxKind::Heart => {
                     Vec2::new(if heart_index % 2 == 0 { -34.0 } else { 34.0 }, -8.0)
                 }
+                PetFxKind::Firefly => Vec2::ZERO,
                 _ => Vec2::new(spread, 0.0),
             };
             let position = origin + offset * scale;
@@ -379,11 +492,19 @@ pub(crate) fn update_particles(
             else {
                 continue;
             };
-            let size = match request.kind {
-                PetFxKind::LandingPuff | PetFxKind::CloudPuff => 0.10,
-                PetFxKind::Heart => 0.065,
-                _ => 0.08,
-            } * settings.character_scale();
+            let size = if request.kind == PetFxKind::Firefly {
+                let Some(diameter) = firefly_world_diameter(position, &environment, camera, view)
+                else {
+                    continue;
+                };
+                diameter
+            } else {
+                (match request.kind {
+                    PetFxKind::LandingPuff | PetFxKind::CloudPuff => 0.10,
+                    PetFxKind::Heart => 0.065,
+                    _ => 0.08,
+                }) * settings.character_scale()
+            };
             let heart = request.kind == PetFxKind::Heart;
             let side = if heart_index % 2 == 0 { -1.0 } else { 1.0 };
             let transform = Transform::from_translation(world).with_scale(Vec3::splat(if heart {
@@ -404,6 +525,7 @@ pub(crate) fn update_particles(
                     lifetime: request.kind.lifetime(),
                     size,
                     heart_origin: heart.then_some(position),
+                    firefly_origin: (request.kind == PetFxKind::Firefly).then_some(position),
                 },
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(material.clone()),
@@ -432,6 +554,91 @@ pub(super) fn clear(world: &mut World) {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn firefly_glow_keeps_a_tiny_bright_core_and_transparent_outer_edge() {
+        use bevy::mesh::VertexAttributeValues;
+        let mesh = firefly_mesh();
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("firefly positions")
+        };
+        let Some(VertexAttributeValues::Float32x4(colors)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("firefly glow colors")
+        };
+        assert_eq!(positions.len(), colors.len());
+        assert!(colors[0][0] >= 0.95 && colors[0][1] >= 0.95 && colors[0][2] >= 0.5);
+        for (position, color) in positions.iter().zip(colors) {
+            let radius = Vec2::new(position[0], position[1]).length();
+            assert!(radius <= 1.50001);
+            if radius > 1.0 {
+                assert_eq!(color[3], 0.0);
+            } else if radius > 0.6 {
+                assert!(
+                    color[3] > 0.0 && color[3] < 0.5,
+                    "halo must stay translucent"
+                );
+            } else {
+                assert_eq!(color[3], 1.0);
+            }
+        }
+    }
+    #[test]
+    fn firefly_stays_five_physical_pixels_across_portrait_zoom_and_dpi() {
+        use super::*;
+        use crate::platform::PhysicalRect;
+        use bevy::camera::{CameraProjection, RenderTargetInfo};
+        for dpi in [1.0_f32, 1.5, 2.0] {
+            for camera_z in [1.4, 2.5, 4.5] {
+                let mut camera = Camera::default();
+                let projection = PerspectiveProjection::default();
+                camera.computed.clip_from_view = projection.get_clip_from_view();
+                camera.computed.target_info = Some(RenderTargetInfo {
+                    physical_size: UVec2::new(1000, 1000),
+                    scale_factor: dpi,
+                });
+                let view = GlobalTransform::from_translation(Vec3::new(0.0, 0.0, camera_z));
+                let environment = DesktopEnvironment {
+                    nera_rect: Some(PhysicalRect {
+                        left: 50,
+                        top: 100,
+                        right: 1050,
+                        bottom: 1100,
+                    }),
+                    nera_scale_factor: dpi as f64,
+                    ..default()
+                };
+                let position = Vec2::new(550.0, 600.0);
+                let center =
+                    desktop_point_to_world(position, &environment, &camera, &view, 0.6).unwrap();
+                let size = firefly_world_diameter(position, &environment, &camera, &view).unwrap();
+                let left = camera.world_to_viewport(&view, center).unwrap();
+                let right = camera
+                    .world_to_viewport(&view, center + Vec3::X * size)
+                    .unwrap();
+                assert!(((right.x - left.x) * dpi - 5.0).abs() < 0.001);
+            }
+        }
+    }
+    #[test]
+    fn firefly_hovers_then_flees_and_expires_before_the_swat_finishes() {
+        use super::*;
+        let mut particle = PetParticle {
+            position: Vec2::ZERO,
+            velocity: Vec2::ZERO,
+            remaining: 3.2,
+            lifetime: 3.2,
+            size: 0.045,
+            heart_origin: None,
+            firefly_origin: Some(Vec2::ZERO),
+        };
+        particle.advance(2.0);
+        assert!(particle.position.length() < 15.0);
+        particle.advance(1.1);
+        assert!(particle.position.x < -180.0 && particle.position.y < -50.0);
+        assert!(!particle.advance(0.2));
+    }
     use super::*;
     #[test]
     fn hearts_alternate_one_at_a_time_across_the_whole_clip_without_catchup_bursts() {
@@ -465,6 +672,7 @@ mod tests {
             lifetime: 0.85,
             size: 0.065,
             heart_origin: Some(Vec2::ZERO),
+            firefly_origin: None,
         };
         let mut one_frame = heart();
         let mut many_frames = heart();
@@ -523,6 +731,7 @@ mod tests {
                     lifetime: 1.8,
                     size: 1.0,
                     heart_origin: None,
+                    firefly_origin: None,
                 },
                 Transform::default(),
                 GlobalTransform::default(),
@@ -568,6 +777,7 @@ mod tests {
             PetFxKind::AngryMark,
             PetFxKind::SleepZ,
             PetFxKind::CloudPuff,
+            PetFxKind::Firefly,
         ] {
             let mut particle = PetParticle {
                 position: Vec2::ZERO,
@@ -576,6 +786,7 @@ mod tests {
                 lifetime: kind.lifetime(),
                 size: 1.0,
                 heart_origin: (kind == PetFxKind::Heart).then_some(Vec2::ZERO),
+                firefly_origin: (kind == PetFxKind::Firefly).then_some(Vec2::ZERO),
             };
             assert!(particle.advance(0.1));
             assert!(!particle.advance(10.0));

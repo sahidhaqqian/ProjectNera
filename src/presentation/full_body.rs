@@ -27,6 +27,38 @@ pub(super) struct FullBodyGeometry<'w, 's> {
 }
 
 impl FullBodyGeometry<'_, '_> {
+    /// Screensaver's close-up keeps the measured crown/hair and crops at the
+    /// humanoid hips. Legs remain below the viewport instead of determining zoom.
+    pub(super) fn portrait_bounds(
+        &self,
+        avatars: &PortraitAvatars,
+        body: f32,
+        head: f32,
+        root_offset: f32,
+        predict_root: bool,
+    ) -> Option<UpperBodyBounds> {
+        let mut bounds = self.bounds(avatars, body, head, root_offset, predict_root)?;
+        let (avatar, root, rest_root, _, _) = avatars.single().ok()?;
+        let inverse_root = rest_root.map_or(Mat4::IDENTITY, |rest| rest.0.to_matrix().inverse());
+        let hips = self.rest.iter().find_map(|(entity, rest, bone, live)| {
+            (live
+                && bone.is_some_and(|bone| bone.as_str() == "hips")
+                && self.descendant(entity, avatar))
+            .then(|| inverse_root.transform_point3(rest.0.translation()))
+        })?;
+        let root = root.to_matrix()
+            * Mat4::from_translation(Vec3::Y * if predict_root { root_offset } else { 0.0 });
+        let hips = root.transform_point3(hips);
+        if !hips.is_finite() || bounds.top_y - hips.y < 0.01 {
+            return None;
+        }
+        let half_width = bounds.width() * 0.5;
+        bounds.min_x = hips.x - half_width;
+        bounds.max_x = hips.x + half_width;
+        bounds.bottom_y = hips.y;
+        Some(bounds)
+    }
+
     fn descendant(&self, mut entity: Entity, ancestor: Entity) -> bool {
         for _ in 0..128 {
             if entity == ancestor {

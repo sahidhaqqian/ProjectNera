@@ -123,6 +123,10 @@ pub(crate) struct PresentationState {
 }
 
 impl PresentationState {
+    #[cfg(test)]
+    pub(crate) fn for_test(mode: PresentationMode) -> Self {
+        Self { mode, ..default() }
+    }
     pub(crate) fn is_attention(&self) -> bool {
         matches!(self.mode, PresentationMode::Attention(_))
     }
@@ -177,10 +181,9 @@ const MIN_UPPER_BODY_WORLD_HEIGHT: f32 = 0.45;
 /// monitor and eases upward into its final bottom-anchored attention position.
 const ATTENTION_ENTER_SECONDS: f32 = 0.38;
 
-const SCREENSAVER_VISIBLE_MONITOR_HEIGHT: f32 = 0.85;
+const SCREENSAVER_PORTRAIT_FILL: f32 = 0.96;
 const SCREENSAVER_WINDOW_MONITOR_HEIGHT: f32 = 0.94;
 const SCREENSAVER_MAX_WINDOW_WIDTH: f32 = 0.88;
-const SCREENSAVER_HORIZONTAL_FILL: f32 = 0.90;
 
 // -----------------------------------------------------------------------------
 // Plugin
@@ -347,7 +350,7 @@ fn handle_presentation_commands(
                     continue;
                 }
                 let screensaver_layout = if kind == AttentionKind::Screensaver {
-                    let Some(bounds) = full_body.bounds(
+                    let Some(bounds) = full_body.portrait_bounds(
                         &avatar_query,
                         body_proportions
                             .as_ref()
@@ -990,19 +993,13 @@ fn compute_screensaver_layout(
     let height = (monitor.height().max(1) as f32 * SCREENSAVER_WINDOW_MONITOR_HEIGHT)
         .round()
         .max(1.0);
-    // Visible mesh height, rather than HWND height, is 85% of the monitor.
-    let vertical = (bounds.top_y - bounds.bottom_y).max(0.01) * height
-        / (monitor.height().max(1) as f32 * SCREENSAVER_VISIBLE_MONITOR_HEIGHT);
-    let width = (height * (bounds.max_x - bounds.min_x).max(0.01)
-        / (vertical * SCREENSAVER_HORIZONTAL_FILL))
-        .ceil()
-        .clamp(
-            1.0,
-            (monitor.width().max(1) as f32 * SCREENSAVER_MAX_WINDOW_WIDTH).max(1.0),
-        );
-    let viewport = vertical.max(
-        (bounds.max_x - bounds.min_x).max(0.01) * height / (width * SCREENSAVER_HORIZONTAL_FILL),
-    );
+    // A prominent crown-to-waist portrait, like the user's close-up reference.
+    // A wide canvas accommodates the upper body; outstretched arms/accessories
+    // may crop at the sides instead of forcing the whole avatar to shrink.
+    let viewport = (bounds.top_y - bounds.bottom_y).max(0.01) / SCREENSAVER_PORTRAIT_FILL;
+    let width = (monitor.width().max(1) as f32 * SCREENSAVER_MAX_WINDOW_WIDTH)
+        .round()
+        .max(1.0);
     AttentionLayout {
         window_width: width as u32,
         window_height: height as u32,
@@ -1162,7 +1159,7 @@ fn maintain_attention_presentation(
             ..layout
         };
         let layout = if state.is_screensaver() {
-            let Some(bounds) = full_body.bounds(
+            let Some(bounds) = full_body.portrait_bounds(
                 &avatar_query,
                 body_proportions
                     .as_ref()
@@ -1241,7 +1238,8 @@ pub(crate) fn desktop_pet_active(state: Res<PresentationState>) -> bool {
 }
 
 /// Screensaver retains body hit testing for dismissal, without enabling
-/// desktop click reactions, headpat or dragging during presentation.
+/// desktop click reactions or dragging during presentation. Button-free
+/// headpat also uses this gate, including Screensaver but excluding Alarm.
 pub(crate) fn avatar_hit_testing_active(state: Res<PresentationState>) -> bool {
     (state.is_desktop_pet() && !state.desktop_restore_pending) || state.is_screensaver()
 }

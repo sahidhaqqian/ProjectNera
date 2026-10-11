@@ -23,7 +23,7 @@ pub(crate) struct OpenSettingsWindow;
 #[derive(Message, Default)]
 pub(crate) struct ReturnToActionMenu;
 
-/// Owns input routing while the secondary Settings window exists.
+/// Owns utility lifecycle and pointer routing; autonomy still yields while open.
 ///
 /// Bevy's mouse ButtonInput is application-global: clicks on the Settings
 /// window are visible to systems that also drive Nera's PrimaryWindow.  This
@@ -35,6 +35,7 @@ pub(crate) struct ReturnToActionMenu;
 pub(crate) struct SettingsInputGate {
     window_open: bool,
     minimized: bool,
+    pointer_over_window: bool,
     close_requested: bool,
     return_to_menu_requested: bool,
 }
@@ -45,6 +46,54 @@ pub(crate) fn nera_input_available(gate: Res<SettingsInputGate>) -> bool {
 
 pub(crate) fn nera_input_blocked(gate: Res<SettingsInputGate>) -> bool {
     gate.window_open && !gate.minimized
+}
+
+pub(crate) fn nera_pointer_input_blocked(gate: &SettingsInputGate) -> bool {
+    gate.window_open && !gate.minimized && (gate.pointer_over_window || gate.close_requested)
+}
+
+/// Native harness probes Bevy cursor facts without moving the OS pointer.
+#[cfg(debug_assertions)]
+pub(crate) fn smoke_pointer_routing(world: &mut World) -> bool {
+    use bevy::ecs::system::RunSystemOnce;
+    let Some(window) = world
+        .query_filtered::<(Entity, &UtilityWindow), With<SettingsWindow>>()
+        .iter(world)
+        .find(|(_, shell)| shell.native_handle().is_some())
+        .map(|(entity, _)| entity)
+    else {
+        return false;
+    };
+    assert!(world.resource::<SettingsInputGate>().window_open);
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(None);
+    world.run_system_once(sync_settings_minimized).unwrap();
+    assert!(!nera_pointer_input_blocked(
+        world.resource::<SettingsInputGate>()
+    ));
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(Some(Vec2::splat(20.0)));
+    world.run_system_once(sync_settings_minimized).unwrap();
+    assert!(nera_pointer_input_blocked(
+        world.resource::<SettingsInputGate>()
+    ));
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(None);
+    world.run_system_once(sync_settings_minimized).unwrap();
+    assert!(!nera_pointer_input_blocked(
+        world.resource::<SettingsInputGate>()
+    ));
+    world.resource_mut::<SettingsInputGate>().close_requested = true;
+    info!(
+        "PRESENTATION_NATIVE Settings HWND: pet pointer allowed outside panel; panel hover blocked; normal close requested"
+    );
+    true
 }
 // =============================================================================
 // Settings window
@@ -223,7 +272,7 @@ pub(super) fn open_settings_window(
         return;
     }
 
-    // While Settings exists, it exclusively owns application mouse input.
+    // Settings owns gestures received by its window, not all pet input.
     // Closing is deferred until the close-button mouse gesture has released,
     // so winit never loses the corresponding mouse-up event.
     input_gate.window_open = true;
@@ -1578,17 +1627,20 @@ pub(super) fn update_character_import_status(
 }
 
 pub(super) fn sync_settings_minimized(
-    windows: Query<&UtilityWindow, With<SettingsWindow>>,
+    windows: Query<(&Window, Option<&UtilityWindow>), With<SettingsWindow>>,
     mut gate: ResMut<SettingsInputGate>,
 ) {
-    let minimized = windows.iter().any(|window| {
-        window
-            .native_handle()
+    let minimized = windows.iter().any(|(_, utility)| {
+        utility
+            .and_then(UtilityWindow::native_handle)
             .is_some_and(crate::platform::is_window_minimized)
     });
     if gate.minimized != minimized {
         gate.minimized = minimized;
     }
+    gate.pointer_over_window = windows
+        .iter()
+        .any(|(window, _)| window.cursor_position().is_some());
 }
 
 pub(super) fn handle_roaming_radius_slider(
@@ -1941,6 +1993,88 @@ pub(super) fn observe_settings_window_removed(
 #[cfg(test)]
 mod walking_checkbox_tests {
     use super::*;
+
+    #[test]
+    fn settings_open_allows_pet_drag_but_panel_hover_and_close_retain_ui_input() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.insert_resource(SettingsInputGate {
+            window_open: true,
+            ..default()
+        })
+        .init_resource::<crate::alarm_settings::AlarmSettingsInputGate>()
+        .init_resource::<crate::animation_manager::AnimationManagerInputGate>()
+        .init_resource::<crate::interaction::DesktopPetInteraction>()
+        .add_systems(Update, sync_settings_minimized);
+        let window = app
+            .world_mut()
+            .spawn((SettingsWindow, Window::default()))
+            .id();
+        app.update();
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        // Opening the editor still suspends autonomy/startup greetings.
+        assert!(
+            !app.world_mut()
+                .run_system_once(nera_input_available)
+                .unwrap()
+        );
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(Some(Vec2::splat(20.0)));
+        app.update();
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_blocked)
+                .unwrap()
+        );
+        for state in [
+            crate::interaction::InteractionState::Pressed,
+            crate::interaction::InteractionState::Dragging,
+        ] {
+            app.world_mut()
+                .resource_mut::<crate::interaction::DesktopPetInteraction>()
+                .state = state;
+            assert!(
+                app.world_mut()
+                    .run_system_once(crate::interaction::nera_utility_input_available)
+                    .unwrap()
+            );
+        }
+        app.world_mut()
+            .resource_mut::<crate::interaction::DesktopPetInteraction>()
+            .state = crate::interaction::InteractionState::Hover;
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(None);
+        app.update();
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        app.world_mut()
+            .resource_mut::<SettingsInputGate>()
+            .close_requested = true;
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_blocked)
+                .unwrap()
+        );
+        app.world_mut()
+            .resource_mut::<SettingsInputGate>()
+            .minimized = true;
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn settings_camera_and_tree_are_released_without_touching_main_camera() {

@@ -76,7 +76,7 @@ fn interaction_feedback(
             }
         }
     }
-    if presentation.is_desktop_pet() {
+    if presentation.is_desktop_pet() || presentation.is_screensaver() {
         if headpat
             && visual == VisualState::HeadStroke
             && cloud.mode() != Some(crate::cloud::CloudMode::Rest)
@@ -87,7 +87,8 @@ fn interaction_feedback(
                 anchor: PetFxAnchor::Head,
             });
         }
-        if previous.falling
+        if presentation.is_desktop_pet()
+            && previous.falling
             && !physics.falling
             && physics.support.is_some()
             && !cloud.owns_placement()

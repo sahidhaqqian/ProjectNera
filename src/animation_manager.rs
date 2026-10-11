@@ -1613,6 +1613,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<crate::settings::SettingsInputGate>();
         world.init_resource::<crate::alarm_settings::AlarmSettingsInputGate>();
+        world.init_resource::<crate::interaction::DesktopPetInteraction>();
         world.insert_resource(AnimationManagerInputGate {
             window_open: true,
             pointer_over_window: false,

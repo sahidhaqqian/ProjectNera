@@ -259,9 +259,8 @@ fn main() {
                 mark_nera_live_bones,
                 attach_bone_colliders,
                 update_look_at_target,
-                // A secondary Settings window owns application mouse input while
-                // it is open. Reset Nera capture state first so Settings clicks
-                // cannot become body hits / drags through global ButtonInput.
+                // Utility hover owns new gestures. A captured pet drag keeps
+                // its release; mouse-down provenance stays PrimaryWindow-only.
                 suspend_nera_interaction_for_settings.run_if(nera_utility_input_blocked),
                 cloud::update_cloud,
                 // Native placement changes first, then Phase 5.3 derives the
@@ -286,6 +285,7 @@ fn main() {
                 // Start the wave after aging existing actions, so its first
                 // frame retains the clip's full playback duration.
                 startup_entrance::advance_startup_entrance,
+                animation::screensaver::update_screensaver_animation,
                 sync_look_at_for_animation,
                 apply_animation_state,
             )
@@ -320,7 +320,7 @@ fn main() {
                 .run_if(move || !scripted_pointer)
                 .after(update_click_through)
                 .run_if(startup_entrance::pet_is_revealed)
-                .run_if(presentation::desktop_pet_active)
+                .run_if(presentation::avatar_hit_testing_active)
                 .run_if(nera_utility_input_available),
         )
         // Pose-first support calibration: Sitting_Enter starts in Update,

@@ -307,6 +307,12 @@ pub(crate) struct DesktopPetInteraction {
 }
 
 impl DesktopPetInteraction {
+    fn has_pointer_capture(&self) -> bool {
+        matches!(
+            self.state,
+            InteractionState::Pressed | InteractionState::Dragging
+        ) || self.right_pressed_body_part.is_some()
+    }
     /// Drop every in-flight pointer gesture.
     ///
     /// `ButtonInput<MouseButton>` is application-global while `drag_nera_window`
@@ -351,9 +357,11 @@ pub(crate) fn nera_utility_input_available(
     settings_gate: Res<settings::SettingsInputGate>,
     alarm_gate: Res<alarm_settings::AlarmSettingsInputGate>,
     manager_gate: Res<animation_manager::AnimationManagerInputGate>,
+    interaction: Res<DesktopPetInteraction>,
 ) -> bool {
-    settings::nera_input_available(settings_gate)
-        && alarm_settings::nera_input_available(alarm_gate)
+    (interaction.has_pointer_capture()
+        || (!settings::nera_pointer_input_blocked(&settings_gate)
+            && !alarm_settings::nera_pointer_input_blocked(&alarm_gate)))
         && !manager_gate.pointer_over_window
 }
 
@@ -369,9 +377,11 @@ pub(crate) fn nera_utility_input_blocked(
     settings_gate: Res<settings::SettingsInputGate>,
     alarm_gate: Res<alarm_settings::AlarmSettingsInputGate>,
     manager_gate: Res<animation_manager::AnimationManagerInputGate>,
+    interaction: Res<DesktopPetInteraction>,
 ) -> bool {
-    settings::nera_input_blocked(settings_gate)
-        || alarm_settings::nera_input_blocked(alarm_gate)
+    (!interaction.has_pointer_capture()
+        && (settings::nera_pointer_input_blocked(&settings_gate)
+            || alarm_settings::nera_pointer_input_blocked(&alarm_gate)))
         || manager_gate.pointer_over_window
 }
 
@@ -553,8 +563,21 @@ pub(crate) fn update_click_through(
 }
 
 #[cfg(target_os = "windows")]
+fn primary_window_press(
+    event: &bevy::input::mouse::MouseButtonInput,
+    primary: Entity,
+) -> Option<MouseButton> {
+    (event.window == primary && event.state == bevy::input::ButtonState::Pressed)
+        .then_some(event.button)
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn drag_nera_window(
-    mouse: Res<ButtonInput<MouseButton>>,
+    input: (
+        Res<ButtonInput<MouseButton>>,
+        MessageReader<bevy::input::mouse::MouseButtonInput>,
+        Query<Entity, With<PrimaryWindow>>,
+    ),
     settings: Res<crate::settings::NeraSettings>,
     mut interaction: ResMut<DesktopPetInteraction>,
     mut environment: ResMut<DesktopEnvironment>,
@@ -571,6 +594,17 @@ pub(crate) fn drag_nera_window(
     mut sfx: MessageWriter<crate::pet_feedback::PetSfx>,
     mut fx: MessageWriter<crate::pet_feedback::PetFx>,
 ) {
+    let (mouse, mut button_events, windows) = input;
+    let primary = windows.single().ok();
+    let mut left_pressed_here = false;
+    let mut right_pressed_here = false;
+    for event in button_events.read() {
+        match primary.and_then(|window| primary_window_press(event, window)) {
+            Some(MouseButton::Left) => left_pressed_here = true,
+            Some(MouseButton::Right) => right_pressed_here = true,
+            _ => {}
+        }
+    }
     let Some(hwnd) = environment.nera_hwnd else {
         return;
     };
@@ -584,7 +618,10 @@ pub(crate) fn drag_nera_window(
 
     // Right click is emitted on release, not press. Capture the gesture while
     // RMB is down so click-through cannot lose the release to another window.
-    if interaction.state == InteractionState::Hover && mouse.just_pressed(MouseButton::Right) {
+    if interaction.state == InteractionState::Hover
+        && right_pressed_here
+        && mouse.just_pressed(MouseButton::Right)
+    {
         if let Some(body_part) = hovered.part {
             interaction.right_press_origin = Some(cursor);
             interaction.right_pressed_body_part = Some(body_part);
@@ -617,7 +654,10 @@ pub(crate) fn drag_nera_window(
     // Mouse-down only captures the gesture. It is NOT a drag yet. This is the
     // core Phase 5.1 distinction that prevents head clicks from being treated
     // as window movement once body-part reactions arrive in 5.2/5.4.
-    if interaction.state == InteractionState::Hover && mouse.just_pressed(MouseButton::Left) {
+    if interaction.state == InteractionState::Hover
+        && left_pressed_here
+        && mouse.just_pressed(MouseButton::Left)
+    {
         if let (Some(rect), Some(body_part)) = (environment.nera_rect, hovered.part) {
             interaction.state = InteractionState::Pressed;
             interaction.pressed_body_part = Some(body_part);
@@ -875,5 +915,56 @@ pub(crate) fn drag_nera_window(
         {
             interaction.unsnap_cooldown_until = None;
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod utility_input_tests {
+    use super::*;
+    use bevy::{
+        ecs::system::RunSystemOnce,
+        input::{ButtonState, mouse::MouseButtonInput},
+    };
+
+    #[test]
+    fn utility_mouse_down_cannot_start_a_pet_gesture() {
+        let mut world = World::new();
+        let pet = world.spawn_empty().id();
+        let utility = world.spawn_empty().id();
+        for button in [MouseButton::Left, MouseButton::Right] {
+            let mut event = MouseButtonInput {
+                window: utility,
+                button,
+                state: ButtonState::Pressed,
+            };
+            assert_eq!(primary_window_press(&event, pet), None);
+            event.window = pet;
+            assert_eq!(primary_window_press(&event, pet), Some(button));
+            event.state = ButtonState::Released;
+            assert_eq!(primary_window_press(&event, pet), None);
+        }
+    }
+
+    #[test]
+    fn manager_gate_remains_authoritative_over_captured_pet_drags() {
+        let mut world = World::new();
+        world.init_resource::<settings::SettingsInputGate>();
+        world.init_resource::<alarm_settings::AlarmSettingsInputGate>();
+        world.init_resource::<animation_manager::AnimationManagerInputGate>();
+        world.init_resource::<DesktopPetInteraction>();
+        assert!(world.run_system_once(nera_utility_input_available).unwrap());
+        assert!(!world.run_system_once(nera_utility_input_blocked).unwrap());
+        // Manager behavior is unchanged. A captured pet drag only bypasses
+        // Settings/Alarm pointer hover, not another presentation owner.
+        world
+            .resource_mut::<animation_manager::AnimationManagerInputGate>()
+            .pointer_over_window = true;
+        world.resource_mut::<DesktopPetInteraction>().state = InteractionState::Dragging;
+        assert!(!world.run_system_once(nera_utility_input_available).unwrap());
+        assert!(world.run_system_once(nera_utility_input_blocked).unwrap());
+        world
+            .resource_mut::<animation_manager::AnimationManagerInputGate>()
+            .pointer_over_window = false;
+        assert!(world.run_system_once(nera_utility_input_available).unwrap());
     }
 }

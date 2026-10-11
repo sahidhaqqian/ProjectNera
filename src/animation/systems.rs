@@ -239,7 +239,11 @@ pub(crate) fn sync_interaction_animation_actions(
         info!("Nera detached: Death01 triggered while sitting/attached");
     }
 
-    if head_patted.read().count() > 0 && !resting && (!cloud_seated || cloud_ready) {
+    if head_patted.read().count() > 0
+        && !touch.headpat_blocked()
+        && !resting
+        && (!cloud_seated || cloud_ready)
+    {
         if let Some(clip) = clips.head_stroke {
             state.request_one_shot(TemporaryAction::HeadStroke, clip.duration);
             if state.visual_state() == super::VisualState::HeadStroke {

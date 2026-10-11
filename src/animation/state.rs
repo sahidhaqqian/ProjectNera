@@ -211,6 +211,7 @@ impl TouchReactionClip {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum TemporaryAction {
+    Screensaver(super::screensaver::ScreensaverClip),
     Walking,
     StartupGreeting,
     Floating,
@@ -252,6 +253,7 @@ pub(super) enum AnimationPriority {
     IdleVariation = 40,
     /// The first greeting is automatic and yields immediately to the user.
     StartupGreeting = 50,
+    Screensaver = 55,
     Reaction = 60,
     Menu = 70,
     Floating = 80,
@@ -264,6 +266,7 @@ pub(super) enum AnimationPriority {
 impl TemporaryAction {
     fn priority(self) -> AnimationPriority {
         match self {
+            Self::Screensaver(_) => AnimationPriority::Screensaver,
             Self::Walking => AnimationPriority::Walking,
             Self::StartupGreeting => AnimationPriority::StartupGreeting,
             Self::HitHead
@@ -318,6 +321,7 @@ pub(super) struct TimedSupportTransition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VisualState {
+    Screensaver(super::screensaver::ScreensaverClip),
     Idle,
     Walking,
     StartupGreeting,
@@ -516,6 +520,15 @@ impl NeraAnimationState {
             "Nera support restored after Attention -> {:?}",
             self.base_pose
         );
+    }
+
+    pub(crate) fn cancel_screensaver_animation(&mut self) {
+        let before = self.active_actions.len();
+        self.active_actions
+            .retain(|active| !matches!(active.action, TemporaryAction::Screensaver(_)));
+        if self.active_actions.len() != before {
+            self.bump_revision();
+        }
     }
 
     pub(super) fn start_persistent_action(&mut self, action: TemporaryAction) {
@@ -974,6 +987,7 @@ impl NeraAnimationState {
 
         if let Some(action) = self.highest_action() {
             return match action {
+                TemporaryAction::Screensaver(clip) => VisualState::Screensaver(clip),
                 TemporaryAction::Walking => VisualState::Walking,
                 TemporaryAction::StartupGreeting => VisualState::StartupGreeting,
                 TemporaryAction::Floating => VisualState::Floating,

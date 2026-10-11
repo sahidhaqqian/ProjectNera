@@ -120,6 +120,8 @@ pub(crate) fn update_look_at_target(
     environment: Res<DesktopEnvironment>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
+    cameras: Query<&GlobalTransform, With<NeraMainCamera>>,
+    bones: Query<(&VrmBone, &GlobalTransform), With<crate::interaction::NeraLiveBone>>,
 ) {
     let Some(window) = window_query.iter().next() else {
         return;
@@ -133,7 +135,25 @@ pub(crate) fn update_look_at_target(
     // eases the target back here instead of snapping the gaze in one frame.
     let neutral = Vec3::new(0.0, 0.5, 2.0);
 
-    let desired = if settings.follow_mouse
+    let desired = if presentation.is_screensaver() {
+        let eyes: Vec<_> = bones
+            .iter()
+            .filter(|(bone, _)| matches!(bone.as_str(), "leftEye" | "rightEye"))
+            .map(|(_, pose)| pose.translation())
+            .collect();
+        let eye = if eyes.is_empty() {
+            bones
+                .iter()
+                .find(|(bone, _)| bone.as_str() == "head")
+                .map(|(_, pose)| pose.translation())
+        } else {
+            Some(eyes.iter().copied().sum::<Vec3>() / eyes.len() as f32)
+        };
+        match (cameras.single().ok(), eye) {
+            (Some(camera), Some(eye)) => viewer_gaze_target(camera.translation(), eye),
+            _ => neutral,
+        }
+    } else if settings.follow_mouse
         && !presentation.is_screensaver()
         && cloud.mode() != Some(crate::cloud::CloudMode::Rest)
     {
@@ -161,7 +181,30 @@ pub(crate) fn update_look_at_target(
     // Frame-rate independent exponential smoothing. A value around 12 keeps
     // gaze responsive while removing the robotic cursor-to-bone snapping.
     let blend = 1.0 - (-12.0 * time.delta_secs()).exp();
-    target_transform.translation = target_transform.translation.lerp(desired, blend);
+    target_transform.translation = if presentation.is_screensaver() {
+        desired
+    } else {
+        target_transform.translation.lerp(desired, blend)
+    };
+}
+
+fn viewer_gaze_target(camera: Vec3, eyes: Vec3) -> Vec3 {
+    // Looking toward the viewer at eye level avoids looking down at the
+    // portrait camera's waist/chest centre, and never samples the cursor.
+    Vec3::new(camera.x, eyes.y, camera.z)
+}
+
+#[cfg(test)]
+mod viewer_gaze_tests {
+    #[test]
+    fn portrait_target_looks_at_the_viewer_at_eye_level_instead_of_the_camera_centre() {
+        use super::*;
+        let eye = Vec3::new(0.05, 1.45, 0.1);
+        let target = viewer_gaze_target(Vec3::new(0.0, 0.8, 3.0), eye);
+        assert_eq!(target, Vec3::new(0.0, eye.y, 3.0));
+        assert_eq!((target - eye).y, 0.0);
+        assert!((target - eye).z > 0.0);
+    }
 }
 
 fn horizontal_gaze_x(cursor_x: f32, window_width: f32, intensity: f32, legacy: bool) -> f32 {
@@ -195,12 +238,12 @@ pub(crate) fn sync_look_at_for_animation(
     // Rest owns the entire head pose, including its loading/fallback seated loop.
     // Derive suppression from the attachment owner; user preferences remain intact.
     let resting = cloud.is_some_and(|cloud| cloud.mode() == Some(crate::cloud::CloudMode::Rest));
-    // Screensaver shows the authored animation facing forward; cursor motion
-    // must not add eye/head/spine tracking or change saved follow preferences.
+    // Screensaver owns an eye-level viewer target; the authored head/spine pose
+    // remains untouched and saved follow preferences stay intact.
     let screensaver = presentation.is_some_and(|state| state.is_screensaver());
     let allow_look_at =
-        settings.follow_eyes && !animation.suppresses_look_at() && !resting && !screensaver;
-    let allow_body_tracking = allow_look_at && settings.follow_head;
+        !resting && (screensaver || (settings.follow_eyes && !animation.suppresses_look_at()));
+    let allow_body_tracking = allow_look_at && settings.follow_head && !screensaver;
 
     if allow_look_at {
         if current_look_at.is_none() {

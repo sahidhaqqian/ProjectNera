@@ -21,25 +21,31 @@ use std::{
         Mutex, OnceLock,
         atomic::{AtomicIsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use bevy::prelude::*;
 
 use windows::{
     Win32::{
-        Foundation::{COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{
+            COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+        },
         Graphics::Gdi::{
-            BeginPaint, CreatePen, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, Ellipse,
-            EndPaint, GetStockObject, HGDIOBJ, InvalidateRect, LineTo, MoveToEx, NULL_PEN,
-            PAINTSTRUCT, PS_SOLID, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+            BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen,
+            CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DeleteObject, Ellipse, EndPaint,
+            GetStockObject, GetTextExtentPoint32W, HDC, HGDIOBJ, HOLLOW_BRUSH, InvalidateRect,
+            LineTo, MoveToEx, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, Polygon,
+            Polyline, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, LWA_COLORKEY,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, KillTimer, LWA_COLORKEY,
             RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
-            SetLayeredWindowAttributes, SetWindowPos, ShowWindow, WM_DESTROY, WM_ERASEBKGND,
-            WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP,
-            WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, WM_DESTROY,
+            WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+            WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_POPUP,
         },
     },
     core::{Error, Result, w},
@@ -111,16 +117,18 @@ const WHEEL_CENTER: f32 = WHEEL_SIZE as f32 * 0.5;
 const OUTER_RADIUS: f32 = 184.0;
 const INNER_RADIUS: f32 = 94.0;
 const ITEM_RADIUS: f32 = 139.0;
-const HOVER_BUBBLE_RADIUS: i32 = 31;
+const SELECTION_TIMER: usize = 1;
+const SELECTION_FEEDBACK_MS: u32 = 150;
 
 /// Rare chroma key. Every pixel painted with this exact RGB becomes invisible.
 const KEY_RGB: (u8, u8, u8) = (1, 2, 3);
 
 const RING_RGB: (u8, u8, u8) = (16, 20, 34);
 const RING_INNER_RGB: (u8, u8, u8) = (23, 28, 47);
-const HOVER_RGB: (u8, u8, u8) = (46, 52, 79);
+const HOVER_RGB: (u8, u8, u8) = (40, 37, 66);
+const SELECTED_RGB: (u8, u8, u8) = (106, 79, 151);
 const LINE_RGB: (u8, u8, u8) = (48, 55, 80);
-const ACCENT_RGB: (u8, u8, u8) = (156, 105, 255);
+const ICON_RGB: (u8, u8, u8) = (205, 190, 248);
 const TEXT_RGB: (u8, u8, u8) = (245, 244, 252);
 const MUTED_RGB: (u8, u8, u8) = (108, 116, 145);
 
@@ -138,7 +146,7 @@ enum RadialPage {
     Cloud,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RadialItemAction {
     Disabled,
     Open(RadialPage),
@@ -147,8 +155,23 @@ enum RadialItemAction {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum RadialIcon {
+    Cloud,
+    Settings,
+    Play,
+    Alarm,
+    Games,
+    Sparkle,
+    Monitor,
+    Moon,
+    Ride,
+    Close,
+    Back,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct RadialItem {
-    glyph: &'static str,
+    icon: RadialIcon,
     label: &'static str,
     action: RadialItemAction,
 }
@@ -161,37 +184,37 @@ impl RadialItem {
 
 const ROOT_ITEMS: [RadialItem; 7] = [
     RadialItem {
-        glyph: "☁",
+        icon: RadialIcon::Cloud,
         label: "Cloud",
         action: RadialItemAction::Open(RadialPage::Cloud),
     },
     RadialItem {
-        glyph: "⚙",
+        icon: RadialIcon::Settings,
         label: "Settings",
         action: RadialItemAction::Command(NeraActionMenuCommand::Settings),
     },
     RadialItem {
-        glyph: "▶",
+        icon: RadialIcon::Play,
         label: "Animation",
         action: RadialItemAction::Command(NeraActionMenuCommand::AnimationManager),
     },
     RadialItem {
-        glyph: "◷",
+        icon: RadialIcon::Alarm,
         label: "Alarm",
         action: RadialItemAction::Command(NeraActionMenuCommand::AlarmSettings),
     },
     RadialItem {
-        glyph: "◆",
+        icon: RadialIcon::Games,
         label: "Games",
         action: RadialItemAction::Disabled,
     },
     RadialItem {
-        glyph: "✦",
+        icon: RadialIcon::Sparkle,
         label: "Chibi",
         action: RadialItemAction::Command(NeraActionMenuCommand::Chibi),
     },
     RadialItem {
-        glyph: "◉",
+        icon: RadialIcon::Monitor,
         label: "Screensaver",
         action: RadialItemAction::Command(NeraActionMenuCommand::Screensaver),
     },
@@ -199,28 +222,28 @@ const ROOT_ITEMS: [RadialItem; 7] = [
 
 const CLOUD_ITEMS: [RadialItem; 4] = [
     RadialItem {
-        glyph: "Z",
+        icon: RadialIcon::Moon,
         label: "Rest",
         action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
             crate::cloud::CloudCommand::Summon(crate::cloud::CloudMode::Rest),
         )),
     },
     RadialItem {
-        glyph: "~",
+        icon: RadialIcon::Ride,
         label: "Ride",
         action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
             crate::cloud::CloudCommand::Summon(crate::cloud::CloudMode::Ride),
         )),
     },
     RadialItem {
-        glyph: "×",
+        icon: RadialIcon::Close,
         label: "Dismiss",
         action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
             crate::cloud::CloudCommand::Dismiss,
         )),
     },
     RadialItem {
-        glyph: "<",
+        icon: RadialIcon::Back,
         label: "Back",
         action: RadialItemAction::Back,
     },
@@ -261,7 +284,45 @@ fn navigate_back(hwnd: HWND, page: RadialPage) {
 struct NativeRadialState {
     page: RadialPage,
     hover: Option<usize>,
+    /// Presentation feedback only; the typed command still belongs to Bevy.
+    pending: Option<PendingSelection>,
     result_sent: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingSelection {
+    index: usize,
+    ready_at: Instant,
+}
+
+impl NativeRadialState {
+    fn begin_selection(&mut self, index: usize, now: Instant) -> bool {
+        if self.result_sent
+            || self.pending.is_some()
+            || !items_for(self.page)
+                .get(index)
+                .is_some_and(|item| item.enabled())
+        {
+            return false;
+        }
+        self.hover = Some(index);
+        self.pending = Some(PendingSelection {
+            index,
+            ready_at: now + Duration::from_millis(SELECTION_FEEDBACK_MS.into()),
+        });
+        true
+    }
+
+    fn take_ready_selection(&mut self, now: Instant) -> Option<RadialItemAction> {
+        let pending = self.pending?;
+        if self.result_sent || now < pending.ready_at {
+            return None;
+        }
+        self.pending = None;
+        items_for(self.page)
+            .get(pending.index)
+            .map(|item| item.action)
+    }
 }
 
 impl Default for NativeRadialState {
@@ -269,6 +330,7 @@ impl Default for NativeRadialState {
         Self {
             page: RadialPage::Root,
             hover: None,
+            pending: None,
             result_sent: false,
         }
     }
@@ -603,20 +665,202 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().collect()
 }
 
-unsafe fn select(hdc: windows::Win32::Graphics::Gdi::HDC, object: HGDIOBJ) -> HGDIOBJ {
+unsafe fn select(hdc: HDC, object: HGDIOBJ) -> HGDIOBJ {
     unsafe { SelectObject(hdc, object) }
+}
+
+/// Small native vector icons avoid tiny/missing Unicode font glyphs.
+unsafe fn paint_icon(hdc: HDC, icon: RadialIcon, cx: i32, cy: i32, color: COLORREF) {
+    let pen = unsafe { CreatePen(PS_SOLID, 2, color) };
+    let fill = unsafe { CreateSolidBrush(color) };
+    let old_pen = unsafe { select(hdc, HGDIOBJ(pen.0)) };
+    let old_brush = unsafe { select(hdc, GetStockObject(HOLLOW_BRUSH)) };
+    let points = |coords: &[(i32, i32)]| -> Vec<POINT> {
+        coords
+            .iter()
+            .map(|&(x, y)| POINT {
+                x: cx + x,
+                y: cy + y,
+            })
+            .collect()
+    };
+    let line = |coords: &[(i32, i32)]| {
+        let _ = unsafe { Polyline(hdc, &points(coords)) };
+    };
+    let polygon = |coords: &[(i32, i32)]| {
+        let _ = unsafe { Polygon(hdc, &points(coords)) };
+    };
+    let circle = |x: i32, y: i32, radius: i32| {
+        let _ = unsafe {
+            Ellipse(
+                hdc,
+                cx + x - radius,
+                cy + y - radius,
+                cx + x + radius,
+                cy + y + radius,
+            )
+        };
+    };
+
+    match icon {
+        RadialIcon::Cloud | RadialIcon::Ride => {
+            line(&[
+                (-12, 5),
+                (-12, 1),
+                (-10, -2),
+                (-6, -3),
+                (-5, -7),
+                (-2, -10),
+                (3, -10),
+                (7, -7),
+                (8, -3),
+                (10, -3),
+                (13, 0),
+                (13, 5),
+                (10, 8),
+                (-9, 8),
+                (-12, 5),
+            ]);
+            if matches!(icon, RadialIcon::Ride) {
+                line(&[(-5, 2), (6, 2), (3, -1)]);
+                line(&[(6, 2), (3, 5)]);
+            }
+        }
+        RadialIcon::Settings => {
+            let gear: Vec<_> = (0..32)
+                .map(|index| {
+                    let angle = TAU * index as f32 / 32.0;
+                    let radius = if index % 4 < 2 { 13.0 } else { 10.0 };
+                    POINT {
+                        x: cx + (angle.cos() * radius).round() as i32,
+                        y: cy + (angle.sin() * radius).round() as i32,
+                    }
+                })
+                .collect();
+            let _ = unsafe { Polygon(hdc, &gear) };
+            circle(0, 0, 5);
+        }
+        RadialIcon::Play => {
+            polygon(&[(-8, -12), (12, 0), (-8, 12)]);
+        }
+        RadialIcon::Alarm => {
+            circle(0, 1, 10);
+            line(&[(0, -5), (0, 1), (5, 4)]);
+            line(&[(-12, -7), (-7, -12)]);
+            line(&[(7, -12), (12, -7)]);
+            line(&[(-7, 9), (-10, 13)]);
+            line(&[(7, 9), (10, 13)]);
+        }
+        RadialIcon::Games => {
+            let _ = unsafe { RoundRect(hdc, cx - 13, cy - 7, cx + 14, cy + 10, 8, 8) };
+            line(&[(-10, 1), (-2, 1)]);
+            line(&[(-6, -3), (-6, 5)]);
+            circle(5, -1, 2);
+            circle(9, 4, 2);
+        }
+        RadialIcon::Sparkle => {
+            let _ = unsafe { select(hdc, HGDIOBJ(fill.0)) };
+            polygon(&[
+                (0, -14),
+                (4, -4),
+                (14, 0),
+                (4, 4),
+                (0, 14),
+                (-4, 4),
+                (-14, 0),
+                (-4, -4),
+            ]);
+        }
+        RadialIcon::Monitor => {
+            let _ = unsafe { RoundRect(hdc, cx - 13, cy - 10, cx + 14, cy + 8, 4, 4) };
+            line(&[(0, 8), (0, 13)]);
+            line(&[(-7, 13), (7, 13)]);
+        }
+        RadialIcon::Moon => {
+            polygon(&[
+                (-2, -12),
+                (-8, -9),
+                (-12, -4),
+                (-12, 3),
+                (-8, 9),
+                (-2, 12),
+                (5, 11),
+                (10, 7),
+                (12, 2),
+                (6, 4),
+                (1, 2),
+                (-2, -3),
+                (-3, -8),
+            ]);
+        }
+        RadialIcon::Close => {
+            line(&[(-9, -9), (9, 9)]);
+            line(&[(9, -9), (-9, 9)]);
+        }
+        RadialIcon::Back => {
+            line(&[(0, -10), (-10, 0), (0, 10)]);
+            line(&[(-10, 0), (12, 0)]);
+        }
+    }
+    let _ = unsafe { select(hdc, old_brush) };
+    let _ = unsafe { select(hdc, old_pen) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(fill.0)) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(pen.0)) };
+}
+
+fn sector_polygon(index: usize, count: usize) -> Vec<POINT> {
+    let segment = TAU / count as f32;
+    let start = -PI * 0.5 + (index as f32 - 0.5) * segment;
+    let mut points = vec![POINT {
+        x: WHEEL_CENTER as i32,
+        y: WHEEL_CENTER as i32,
+    }];
+    points.extend((0..=32).map(|step| {
+        let angle = start + segment * step as f32 / 32.0;
+        POINT {
+            x: (WHEEL_CENTER + angle.cos() * OUTER_RADIUS).round() as i32,
+            y: (WHEEL_CENTER + angle.sin() * OUTER_RADIUS).round() as i32,
+        }
+    }));
+    points
 }
 
 unsafe fn paint_wheel(hwnd: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+    let state = native_state()
+        .lock()
+        .map(|state| *state)
+        .unwrap_or_default();
+    unsafe { render_wheel(hdc, &state) };
+    let _ = unsafe { EndPaint(hwnd, &ps) };
+}
 
+unsafe fn render_wheel(hdc: HDC, state: &NativeRadialState) {
     let key_brush = unsafe { CreateSolidBrush(rgb(KEY_RGB)) };
     let ring_brush = unsafe { CreateSolidBrush(rgb(RING_RGB)) };
     let inner_brush = unsafe { CreateSolidBrush(rgb(RING_INNER_RGB)) };
     let hover_brush = unsafe { CreateSolidBrush(rgb(HOVER_RGB)) };
-    let accent_brush = unsafe { CreateSolidBrush(rgb(ACCENT_RGB)) };
+    let selected_brush = unsafe { CreateSolidBrush(rgb(SELECTED_RGB)) };
     let line_pen = unsafe { CreatePen(PS_SOLID, 1, rgb(LINE_RGB)) };
+    let label_font = unsafe {
+        CreateFontW(
+            -14,
+            0,
+            0,
+            0,
+            500,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        )
+    };
 
     // Fill entire square with the chroma key.
     let full = RECT {
@@ -642,40 +886,23 @@ unsafe fn paint_wheel(hwnd: HWND) {
         )
     };
 
-    let state = native_state()
-        .lock()
-        .map(|state| *state)
-        .unwrap_or_default();
-
     let items = items_for(state.page);
 
-    // Hover bubble.
-    if let Some(index) = state.hover {
+    // Fill the whole selected segment before punching out the center.
+    if let Some(index) = state.pending.map(|pending| pending.index).or(state.hover) {
         if items
             .get(index)
             .copied()
             .map(RadialItem::enabled)
             .unwrap_or(false)
         {
-            let (cx, cy) = item_position(index, items.len());
-            let _ = unsafe { select(hdc, HGDIOBJ(hover_brush.0)) };
-            let _ = unsafe {
-                Ellipse(
-                    hdc,
-                    cx - HOVER_BUBBLE_RADIUS,
-                    cy - HOVER_BUBBLE_RADIUS,
-                    cx + HOVER_BUBBLE_RADIUS,
-                    cy + HOVER_BUBBLE_RADIUS,
-                )
+            let brush = if state.pending.is_some() {
+                selected_brush
+            } else {
+                hover_brush
             };
-
-            // Tiny accent dot toward the outside edge.
-            let outer_angle = -PI * 0.5 + TAU * index as f32 / items.len() as f32;
-            let ax = (WHEEL_CENTER + outer_angle.cos() * 171.0).round() as i32;
-            let ay = (WHEEL_CENTER + outer_angle.sin() * 171.0).round() as i32;
-
-            let _ = unsafe { select(hdc, HGDIOBJ(accent_brush.0)) };
-            let _ = unsafe { Ellipse(hdc, ax - 3, ay - 3, ax + 3, ay + 3) };
+            let _ = unsafe { select(hdc, HGDIOBJ(brush.0)) };
+            let _ = unsafe { Polygon(hdc, &sector_polygon(index, items.len())) };
         }
     }
 
@@ -722,26 +949,29 @@ unsafe fn paint_wheel(hwnd: HWND) {
         )
     };
 
-    // Text / glyphs.
-    let _ = unsafe { select(hdc, GetStockObject(DEFAULT_GUI_FONT)) };
+    // Separate 28px vector icons from measured, centered labels.
+    let font = if label_font.0.is_null() {
+        unsafe { GetStockObject(DEFAULT_GUI_FONT) }
+    } else {
+        HGDIOBJ(label_font.0)
+    };
+    let old_font = unsafe { select(hdc, font) };
     let _ = unsafe { SetBkMode(hdc, TRANSPARENT) };
 
     for (index, item) in items.iter().copied().enumerate() {
         let (cx, cy) = item_position(index, items.len());
 
-        let selected = state.hover == Some(index) && item.enabled();
-        let color = if !item.enabled() {
-            rgb(MUTED_RGB)
-        } else if selected {
-            rgb(TEXT_RGB)
+        let pressed = state.pending.is_some_and(|pending| pending.index == index);
+        let icon_color = if !item.enabled() {
+            MUTED_RGB
+        } else if pressed {
+            TEXT_RGB
         } else {
-            rgb(TEXT_RGB)
+            ICON_RGB
         };
-
-        let _ = unsafe { SetTextColor(hdc, color) };
-
-        let glyph_text = item.glyph;
-        let glyph = wide(glyph_text);
+        unsafe { paint_icon(hdc, item.icon, cx, cy - 8, rgb(icon_color)) };
+        let _ =
+            unsafe { SetTextColor(hdc, rgb(if item.enabled() { TEXT_RGB } else { MUTED_RGB })) };
         let label_text = if matches!(
             item.action,
             RadialItemAction::Command(NeraActionMenuCommand::Chibi)
@@ -755,27 +985,23 @@ unsafe fn paint_wheel(hwnd: HWND) {
         };
         let label = wide(label_text);
 
-        // Default GUI font is intentionally used: no font asset needs to be
-        // shipped and Windows can font-link many Unicode symbols.
-        let glyph_x = cx - (glyph_text.chars().count() as i32 * 4);
-        let _ = unsafe { TextOutW(hdc, glyph_x, cy - 15, &glyph) };
-
-        let label_x = cx - (label_text.chars().count() as i32 * 3);
-        let _ = unsafe { TextOutW(hdc, label_x, cy + 7, &label) };
+        let mut extent = SIZE::default();
+        let _ = unsafe { GetTextExtentPoint32W(hdc, &label, &mut extent) };
+        let _ = unsafe { TextOutW(hdc, cx - extent.cx / 2, cy + 13, &label) };
     }
 
     // Restore old GDI objects before deleting our owned ones.
     let _ = unsafe { select(hdc, old_brush) };
     let _ = unsafe { select(hdc, old_pen) };
+    let _ = unsafe { select(hdc, old_font) };
 
     let _ = unsafe { DeleteObject(HGDIOBJ(key_brush.0)) };
     let _ = unsafe { DeleteObject(HGDIOBJ(ring_brush.0)) };
     let _ = unsafe { DeleteObject(HGDIOBJ(inner_brush.0)) };
     let _ = unsafe { DeleteObject(HGDIOBJ(hover_brush.0)) };
-    let _ = unsafe { DeleteObject(HGDIOBJ(accent_brush.0)) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(selected_brush.0)) };
     let _ = unsafe { DeleteObject(HGDIOBJ(line_pen.0)) };
-
-    let _ = unsafe { EndPaint(hwnd, &ps) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(label_font.0)) };
 }
 
 // =============================================================================
@@ -783,20 +1009,24 @@ unsafe fn paint_wheel(hwnd: HWND) {
 // =============================================================================
 
 fn set_page(hwnd: HWND, page: RadialPage) {
+    let _ = unsafe { KillTimer(Some(hwnd), SELECTION_TIMER) };
     if let Ok(mut state) = native_state().lock() {
         state.page = page;
         state.hover = None;
+        state.pending = None;
     }
 
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
 }
 
 fn finish_menu(hwnd: HWND, result: Option<NeraActionMenuCommand>) {
+    let _ = unsafe { KillTimer(Some(hwnd), SELECTION_TIMER) };
     if let Ok(mut state) = native_state().lock() {
         if state.result_sent {
             return;
         }
         state.result_sent = true;
+        state.pending = None;
     }
 
     send_action_menu_result(result);
@@ -804,10 +1034,14 @@ fn finish_menu(hwnd: HWND, result: Option<NeraActionMenuCommand>) {
 }
 
 fn activate_item(hwnd: HWND, x: i32, y: i32) {
-    let (page, hover) = native_state()
+    let state = native_state()
         .lock()
-        .map(|state| (state.page, state.hover))
-        .unwrap_or((RadialPage::Root, None));
+        .map(|state| *state)
+        .unwrap_or_default();
+    if state.pending.is_some() || state.result_sent {
+        return;
+    }
+    let page = state.page;
 
     let radius = radius_from_center(x, y);
 
@@ -823,15 +1057,38 @@ fn activate_item(hwnd: HWND, x: i32, y: i32) {
         return;
     }
 
-    let Some(index) = hover.or_else(|| sector_at(page, x, y)) else {
+    // The click coordinates are authoritative, even if hover has gone stale.
+    let Some(index) = sector_at(page, x, y) else {
         return;
     };
 
-    let Some(item) = items_for(page).get(index).copied() else {
+    let accepted = native_state()
+        .lock()
+        .is_ok_and(|mut state| state.begin_selection(index, Instant::now()));
+    if !accepted {
+        return;
+    }
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+    // A native timer keeps both the tray and Bevy responsive during feedback.
+    if unsafe { SetTimer(Some(hwnd), SELECTION_TIMER, SELECTION_FEEDBACK_MS, None) } == 0 {
+        warn!("Radial selection timer unavailable; dispatching selected action immediately");
+        complete_selection(
+            hwnd,
+            Instant::now() + Duration::from_millis(SELECTION_FEEDBACK_MS.into()),
+        );
+    }
+}
+
+fn complete_selection(hwnd: HWND, now: Instant) {
+    let ready = native_state().lock().ok().and_then(|mut state| {
+        let page = state.page;
+        state.take_ready_selection(now).map(|action| (page, action))
+    });
+    let Some((page, action)) = ready else {
         return;
     };
-
-    match item.action {
+    let _ = unsafe { KillTimer(Some(hwnd), SELECTION_TIMER) };
+    match action {
         RadialItemAction::Disabled => {}
         RadialItemAction::Open(next) => set_page(hwnd, next),
         RadialItemAction::Back => navigate_back(hwnd, page),
@@ -870,7 +1127,7 @@ unsafe extern "system" fn radial_window_proc(
             let next_hover = sector_at(page, x, y);
 
             let changed = if let Ok(mut state) = native_state().lock() {
-                if state.hover != next_hover {
+                if state.pending.is_none() && state.hover != next_hover {
                     state.hover = next_hover;
                     true
                 } else {
@@ -890,6 +1147,11 @@ unsafe extern "system" fn radial_window_proc(
         WM_LBUTTONUP => {
             let (x, y) = point_from_lparam(lparam);
             activate_item(hwnd, x, y);
+            LRESULT(0)
+        }
+
+        WM_TIMER if wparam.0 == SELECTION_TIMER => {
+            complete_selection(hwnd, Instant::now());
             LRESULT(0)
         }
 
@@ -921,9 +1183,11 @@ unsafe extern "system" fn radial_window_proc(
         }
 
         WM_DESTROY => {
+            let _ = unsafe { KillTimer(Some(hwnd), SELECTION_TIMER) };
             RADIAL_HWND.store(0, Ordering::Release);
 
             let should_send_cancel = if let Ok(mut state) = native_state().lock() {
+                state.pending = None;
                 if state.result_sent {
                     false
                 } else {
@@ -1053,8 +1317,61 @@ pub(crate) unsafe fn show_nera_action_menu(
 // =============================================================================
 
 #[cfg(test)]
+mod native_validation;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_waits_for_feedback_and_dispatches_once_despite_repeated_clicks() {
+        let now = Instant::now();
+        let delay = Duration::from_millis(SELECTION_FEEDBACK_MS.into());
+        let mut state = NativeRadialState::default();
+        assert!(state.begin_selection(5, now));
+        assert!(!state.begin_selection(1, now + delay / 2));
+        assert_eq!(state.hover, Some(5));
+        assert_eq!(state.take_ready_selection(now), None);
+        assert_eq!(
+            state.take_ready_selection(now + delay - Duration::from_millis(1)),
+            None
+        );
+        assert_eq!(
+            state.take_ready_selection(now + delay),
+            Some(RadialItemAction::Command(NeraActionMenuCommand::Chibi))
+        );
+        assert_eq!(state.take_ready_selection(now + delay * 2), None);
+    }
+
+    #[test]
+    fn disabled_invalid_or_closed_menu_cannot_schedule_an_action() {
+        let now = Instant::now();
+        let mut state = NativeRadialState::default();
+        assert!(!state.begin_selection(4, now)); // Games remains disabled.
+        assert!(!state.begin_selection(ROOT_ITEMS.len(), now));
+        assert!(state.pending.is_none());
+        state.result_sent = true;
+        assert!(!state.begin_selection(1, now));
+    }
+
+    #[test]
+    fn submenu_and_back_receive_the_same_selection_feedback() {
+        let now = Instant::now();
+        let ready = now + Duration::from_millis(SELECTION_FEEDBACK_MS.into());
+        let mut state = NativeRadialState::default();
+        assert!(state.begin_selection(0, now));
+        assert_eq!(state.take_ready_selection(now), None);
+        assert_eq!(
+            state.take_ready_selection(ready),
+            Some(RadialItemAction::Open(RadialPage::Cloud))
+        );
+        state.page = RadialPage::Cloud;
+        assert!(state.begin_selection(3, now));
+        assert_eq!(
+            state.take_ready_selection(ready),
+            Some(RadialItemAction::Back)
+        );
+    }
 
     #[test]
     fn wheel_opens_without_praying_before_pending_or_attached_seat_sync() {

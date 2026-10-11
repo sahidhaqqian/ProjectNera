@@ -389,7 +389,14 @@ New feature code should consume these instead of reimplementing raw mouse classi
 
 ### Input ownership
 
-Settings, Alarm Settings, Animation Manager/other utility surfaces, and Attention can temporarily block normal pet interaction. Entry/exit must reset in-flight pointer state so a missed release cannot leave the transparent pet window swallowing desktop clicks.
+Settings and Alarm Settings block new pet gestures only while the pointer is
+over their utility window or a close gesture awaits release. Opening either
+editor leaves the pet draggable. A captured pet gesture retains its release
+across utility hover; new presses must originate from the primary pet window,
+since Bevy's global mouse button resource includes utility clicks. Autonomy
+still yields while the editors are open. Animation Manager and Attention retain
+their existing input ownership. Blocked input and presentation entry/exit reset
+in-flight pointer state so missed releases cannot leave the pet swallowing clicks.
 
 ---
 
@@ -669,12 +676,12 @@ horizontal fill, 0.88 width limit and 0.38-second bottom-anchored entrance.
 
 Screensaver is the seventh radial root action (Games remains disabled). It
 reuses the primary transparent window, camera, loaded VRM and animation owner.
-Its orthographic full-body profile targets visible character height of 0.85 of
-the physical monitor height inside a centered 0.94-height canvas. Width follows
-compact rest skin bounds retained after GPU upload, with 0.90 horizontal fill,
-capped at 0.88 monitor width; unusually
-wide rigs prioritize fitting over the height target. Read-only humanoid/rest
-skin measurements include hair/clothing and the current body/head proportions.
+Its orthographic close-up frames the measured crown/hair through the humanoid
+hips, with 0.96 portrait fill inside a centered 0.94-monitor-height canvas and
+0.88-monitor-width canvas. Legs intentionally extend below the viewport.
+Outstretched arms or wide accessories may crop at the sides; their span does
+not shrink the portrait. Read-only compact rest skin/humanoid measurements
+include hair/clothing and the current body/head proportions.
 Only live humanoid bones supply landmarks; child VRMA source rigs are excluded.
 The existing Chibi standing correction supplies the thigh adjustment; framing
 does not change avatar scale or the Chibi overlay. Missing/unready geometry
@@ -684,10 +691,23 @@ until Cloud is dismissed.
 Screensaver uses the existing presentation snapshot/restore and pointer reset.
 Only a left/right press received by Nera's primary window on an existing body
 collider exits, after a 0.35-second entry grace. Existing click-through hit
-testing stays active; desktop drag/headpat/touch reactions stay suspended.
+testing and button-free headpat stay active; desktop drag/click-touch reactions
+stay suspended. Headpat uses the existing HeadStroke, expression and PetFx/PetSfx
+pipeline, interrupts the presentation clip, then returns to Breathing Idle.
 Cursor movement, scrolling, keyboard activity and clicks in other windows do
-not dismiss Screensaver. Cursor eye/head/spine tracking is suppressed so the
-authored animation owns the pose; saved follow preferences remain intact.
+not dismiss Screensaver. Eyes target the viewer at evaluated eye level rather
+than the cursor; head/spine tracking stays off so VRMA owns the head/body pose.
+Saved follow preferences remain intact and resume on exit.
+Both simple and character shadows, including shadow-map rendering, are hidden
+during Attention and resume from the saved desktop shadow preference on exit.
+`animation/screensaver.rs` schedules a lazy Waving greeting, looping Breathing
+Idle, and seven protected one-shot idle variations separated by random 30–60
+second breathing intervals without immediate repeats. The selected clip is a
+priority-55 action in `NeraAnimationState`, below headpat/reactions and Alarm;
+all clips use `NeraAnimationClips` and the same playback controller. Dwarf Idle
+2 gets a two-second PetFx firefly lead-in before the clip starts. The tiny
+screen-sized yellow insect waits beside the evaluated eyes, then flees along
+the authored hand sweep. Exit, Alarm preemption and rig replacement release this routine.
 Its conditional exit command cannot dismiss an Alarm that preempted it.
 Presentation positions remain temporary and are not saved as normal placement.
 Desktop feet/seat calibration is suspended during Attention. After restoration,
@@ -696,7 +716,8 @@ restored canvas; temporary presentation pixels never replace support anchors.
 
 The opt-in native smoke harness disables physical pointer capture and injects
 Bevy window events through the same click handler, so validation can run while
-the user works. It checks Normal/Chibi click exit, ignored scroll/cursor/keyboard,
+the user works. It checks Normal/Chibi click exit and headpat, viewer eye gaze,
+all nine real VRMAs and the firefly lead-in, ignored scroll/cursor/keyboard,
 continued VRMA playback and gaze suppression without controlling desktop input.
 
 Screenshot is a tray-only command, between separators before Exit. The existing
@@ -853,11 +874,14 @@ Animation
 Alarm
 Games      [disabled placeholder]
 Chibi
+Screensaver
 ```
 
 Cloud has Rest/Ride/Dismiss/Back. Alarm opens Alarm Settings directly. Chibi toggles `AvatarBodyMode`; the native menu stores only presentation text, not its own mode state.
 
 The menu emits typed `NeraActionMenuCommand` messages. Domain behavior belongs to the receiving subsystem.
+
+The native wheel draws vector icons and highlights the selected sector briefly before dispatch. Its pending selection is presentation-only: a nonblocking Win32 timer completes it once; page navigation, focus loss, or dismissal cancels it. Disabled entries do not accept selection.
 
 `tray/native.rs` owns Win32 tray icon/menu/callback processing; `tray.rs` bridges those commands into Bevy. Domain behavior should not migrate onto the tray thread.
 

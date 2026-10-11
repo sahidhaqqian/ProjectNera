@@ -9,6 +9,15 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         .strip_prefix("animasi_basic/")?;
     Some(match file {
         "idle.vrma" => (Face::Default, 1.0),
+        "Breathing_Idle.vrma"
+        | "Holding_Idle.vrma"
+        | "Dwarf_Idle_4.vrma"
+        | "Standing_WBriefcase_Idle_2.vrma"
+        | "Dwarf_Idle.vrma"
+        | "Dwarf_Idle_3.vrma"
+        | "Offensive_Idle.vrma"
+        | "Dwarf_Idle_2.vrma" => (Face::Default, 1.0),
+        "Waving.vrma" => (Face::Joy, 0.55),
         "Walking.vrma" => (Face::Joy, 0.2),
         "Sitting_Enter.vrma" | "Sitting_Idle_Loop.vrma" | "Sitting_2.vrma" | "Sitting_4.vrma" => {
             (Face::Default, 1.0)
@@ -41,6 +50,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
 pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Option<(Face, f32)> {
     use VisualState as Body;
     let file = match visual {
+        Body::Screensaver(clip) => return for_clip(clip.path()),
         Body::TouchReaction(clip) => return for_clip(clip.path()),
         Body::HeadStroke => "ShakeHeadNo1.vrma",
         Body::HitChest => "Hit_Chest.vrma",
@@ -110,7 +120,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 33);
+        assert_eq!(count, 42);
     }
     #[test]
     fn authored_touch_clips_share_faces_with_basic_animation_previews() {

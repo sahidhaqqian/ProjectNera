@@ -50,6 +50,7 @@ pub(crate) struct OpenAlarmSettingsWindow;
 pub(crate) struct AlarmSettingsInputGate {
     window_open: bool,
     minimized: bool,
+    pointer_over_window: bool,
     close_requested: bool,
 }
 
@@ -59,6 +60,56 @@ pub(crate) fn nera_input_available(gate: Res<AlarmSettingsInputGate>) -> bool {
 
 pub(crate) fn nera_input_blocked(gate: Res<AlarmSettingsInputGate>) -> bool {
     gate.window_open && !gate.minimized
+}
+
+pub(crate) fn nera_pointer_input_blocked(gate: &AlarmSettingsInputGate) -> bool {
+    gate.window_open && !gate.minimized && (gate.pointer_over_window || gate.close_requested)
+}
+
+/// Native harness probes Bevy cursor facts without moving the OS pointer.
+#[cfg(debug_assertions)]
+pub(crate) fn smoke_pointer_routing(world: &mut World) -> bool {
+    use bevy::ecs::system::RunSystemOnce;
+    let Some(window) = world
+        .query_filtered::<(Entity, &UtilityWindow), With<AlarmSettingsWindow>>()
+        .iter(world)
+        .find(|(_, shell)| shell.native_handle().is_some())
+        .map(|(entity, _)| entity)
+    else {
+        return false;
+    };
+    assert!(world.resource::<AlarmSettingsInputGate>().window_open);
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(None);
+    world.run_system_once(sync_alarm_window_minimized).unwrap();
+    assert!(!nera_pointer_input_blocked(
+        world.resource::<AlarmSettingsInputGate>()
+    ));
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(Some(Vec2::splat(20.0)));
+    world.run_system_once(sync_alarm_window_minimized).unwrap();
+    assert!(nera_pointer_input_blocked(
+        world.resource::<AlarmSettingsInputGate>()
+    ));
+    world
+        .get_mut::<Window>(window)
+        .unwrap()
+        .set_cursor_position(None);
+    world.run_system_once(sync_alarm_window_minimized).unwrap();
+    assert!(!nera_pointer_input_blocked(
+        world.resource::<AlarmSettingsInputGate>()
+    ));
+    world
+        .resource_mut::<AlarmSettingsInputGate>()
+        .close_requested = true;
+    info!(
+        "PRESENTATION_NATIVE Alarm editor HWND: pet pointer allowed outside panel; panel hover blocked; normal close requested"
+    );
+    true
 }
 
 #[derive(Component)]
@@ -249,17 +300,20 @@ fn open_alarm_settings_window(
 }
 
 fn sync_alarm_window_minimized(
-    windows: Query<&UtilityWindow, With<AlarmSettingsWindow>>,
+    windows: Query<(&Window, Option<&UtilityWindow>), With<AlarmSettingsWindow>>,
     mut gate: ResMut<AlarmSettingsInputGate>,
 ) {
     let minimized = windows
         .single()
         .ok()
-        .and_then(UtilityWindow::native_handle)
+        .and_then(|(_, utility)| utility.and_then(UtilityWindow::native_handle))
         .is_some_and(crate::platform::is_window_minimized);
     if gate.minimized != minimized {
         gate.minimized = minimized;
     }
+    gate.pointer_over_window = windows
+        .iter()
+        .any(|(window, _)| window.cursor_position().is_some());
 }
 
 fn rebuild_alarm_settings_ui(
@@ -1907,6 +1961,82 @@ fn schedule_summary(alarm: &AlarmConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alarm_editor_open_allows_pet_drag_but_panel_hover_and_close_retain_ui_input() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.insert_resource(AlarmSettingsInputGate {
+            window_open: true,
+            ..default()
+        })
+        .init_resource::<crate::settings::SettingsInputGate>()
+        .init_resource::<crate::animation_manager::AnimationManagerInputGate>()
+        .init_resource::<crate::interaction::DesktopPetInteraction>()
+        .add_systems(Update, sync_alarm_window_minimized);
+        let window = app
+            .world_mut()
+            .spawn((AlarmSettingsWindow, Window::default()))
+            .id();
+        app.update();
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        assert!(
+            !app.world_mut()
+                .run_system_once(nera_input_available)
+                .unwrap()
+        );
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(Some(Vec2::splat(20.0)));
+        app.update();
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_blocked)
+                .unwrap()
+        );
+        app.world_mut()
+            .resource_mut::<crate::interaction::DesktopPetInteraction>()
+            .state = crate::interaction::InteractionState::Dragging;
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        app.world_mut()
+            .resource_mut::<crate::interaction::DesktopPetInteraction>()
+            .state = crate::interaction::InteractionState::Hover;
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(None);
+        app.update();
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+        app.world_mut()
+            .resource_mut::<AlarmSettingsInputGate>()
+            .close_requested = true;
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_blocked)
+                .unwrap()
+        );
+        app.world_mut()
+            .resource_mut::<AlarmSettingsInputGate>()
+            .minimized = true;
+        assert!(
+            app.world_mut()
+                .run_system_once(crate::interaction::nera_utility_input_available)
+                .unwrap()
+        );
+    }
 
     #[test]
     fn manager_preserves_every_quick_preset_and_emits_the_existing_runtime_command() {

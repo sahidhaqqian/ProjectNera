@@ -23,6 +23,7 @@ use crate::{
     desktop_physics::DesktopPhysicsState,
     environment::{DesktopEnvironment, PlacementState},
     interaction::{DesktopPetInteraction, InteractionState, NeraLiveBone},
+    presentation::PresentationState,
     startup_entrance::StartupEntrance,
 };
 
@@ -83,7 +84,8 @@ impl Plugin for NeraShadowPlugin {
                     apply_simple_shadow,
                     apply_character_shadow_receiver,
                     apply_light_settings,
-                ),
+                )
+                    .after(crate::cloud::update_cloud),
             );
     }
 }
@@ -179,8 +181,10 @@ fn shadow_is_grounded(
     physics: &DesktopPhysicsState,
     interaction: &DesktopPetInteraction,
     entrance: Option<&StartupEntrance>,
+    presentation: Option<&PresentationState>,
 ) -> bool {
     settings.shadow_enabled
+        && presentation.is_none_or(PresentationState::is_desktop_pet)
         // Shadow entities are separate roots: hiding the loading avatar does
         // not hide them. Keep both shadow modes off until Nera is revealed.
         && !entrance.is_some_and(StartupEntrance::is_waiting)
@@ -196,6 +200,7 @@ fn apply_simple_shadow(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
+    presentation: Option<Res<PresentationState>>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
@@ -208,6 +213,7 @@ fn apply_simple_shadow(
         &physics,
         &interaction,
         entrance.as_deref(),
+        presentation.as_deref(),
     ) && settings.uses_simple_shadow()
         && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
@@ -365,6 +371,7 @@ fn apply_character_shadow_receiver(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
+    presentation: Option<Res<PresentationState>>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
@@ -377,6 +384,7 @@ fn apply_character_shadow_receiver(
         &physics,
         &interaction,
         entrance.as_deref(),
+        presentation.as_deref(),
     ) && settings.uses_character_shadow()
         && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
@@ -414,6 +422,7 @@ fn apply_light_settings(
     physics: Res<DesktopPhysicsState>,
     interaction: Res<DesktopPetInteraction>,
     entrance: Option<Res<StartupEntrance>>,
+    presentation: Option<Res<PresentationState>>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
     mut lights: Query<&mut DirectionalLight, With<NeraMainLight>>,
 ) {
@@ -424,6 +433,7 @@ fn apply_light_settings(
         &physics,
         &interaction,
         entrance.as_deref(),
+        presentation.as_deref(),
     ) && settings.uses_character_shadow()
         && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
@@ -434,6 +444,31 @@ fn apply_light_settings(
         // effect we want here. Keep them disabled even in Character mode.
         light.contact_shadows_enabled = false;
     }
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn assert_smoke_presentation_shadow_hidden(world: &mut World) {
+    assert!(world.resource::<PresentationState>().is_screensaver());
+    let mut simple = world.query_filtered::<&Visibility, With<SimpleShadowLayer>>();
+    assert_eq!(simple.iter(world).count(), 3);
+    assert!(
+        simple
+            .iter(world)
+            .all(|visibility| *visibility == Visibility::Hidden)
+    );
+    let mut character = world.query_filtered::<&Visibility, With<CharacterShadowReceiver>>();
+    assert_eq!(character.iter(world).count(), 1);
+    assert!(
+        character
+            .iter(world)
+            .all(|visibility| *visibility == Visibility::Hidden)
+    );
+    assert!(
+        world
+            .query_filtered::<&DirectionalLight, With<NeraMainLight>>()
+            .iter(world)
+            .all(|light| !light.shadow_maps_enabled)
+    );
 }
 
 #[cfg(debug_assertions)]
@@ -466,6 +501,112 @@ pub(crate) fn assert_smoke_shadow_ground(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_hides_both_shadow_modes_and_restores_desktop_preference() {
+        use crate::presentation::{AttentionKind, PresentationMode};
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .insert_resource(DesktopEnvironment {
+                feet_anchor_logical: Some(Vec2::new(300.0, 800.0)),
+                ..default()
+            })
+            .init_resource::<DesktopPhysicsState>()
+            .init_resource::<DesktopPetInteraction>()
+            .init_resource::<PresentationState>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<ShadowOnlyMaterial>>()
+            .add_systems(
+                Update,
+                (
+                    apply_simple_shadow,
+                    apply_character_shadow_receiver,
+                    apply_light_settings,
+                ),
+            );
+        let simple = app
+            .world_mut()
+            .spawn((
+                SimpleShadowLayer {
+                    material: default(),
+                    edge: 0.0,
+                    alpha_weight: 1.0,
+                },
+                Transform::default(),
+                Visibility::Visible,
+            ))
+            .id();
+        let character = app
+            .world_mut()
+            .spawn((
+                CharacterShadowReceiver {
+                    material: default(),
+                },
+                Transform::default(),
+                Visibility::Visible,
+            ))
+            .id();
+        let light = app
+            .world_mut()
+            .spawn((NeraMainLight, DirectionalLight::default()))
+            .id();
+        app.world_mut().spawn((
+            NeraLiveBone,
+            VrmBone::from("leftFoot"),
+            GlobalTransform::default(),
+        ));
+        for shadow_type in [0, 1] {
+            app.world_mut().resource_mut::<NeraSettings>().shadow_type = shadow_type;
+            for mode in [
+                PresentationMode::Attention(AttentionKind::Screensaver),
+                PresentationMode::Attention(AttentionKind::Alarm),
+            ] {
+                *app.world_mut().resource_mut::<PresentationState>() =
+                    PresentationState::for_test(mode);
+                app.update();
+                assert_eq!(
+                    *app.world().get::<Visibility>(simple).unwrap(),
+                    Visibility::Hidden
+                );
+                assert_eq!(
+                    *app.world().get::<Visibility>(character).unwrap(),
+                    Visibility::Hidden
+                );
+                assert!(
+                    !app.world()
+                        .get::<DirectionalLight>(light)
+                        .unwrap()
+                        .shadow_maps_enabled
+                );
+                assert!(app.world().resource::<NeraSettings>().shadow_enabled);
+            }
+            *app.world_mut().resource_mut::<PresentationState>() = PresentationState::default();
+            app.update();
+            assert_eq!(
+                *app.world().get::<Visibility>(simple).unwrap(),
+                if shadow_type == 0 {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                }
+            );
+            assert_eq!(
+                *app.world().get::<Visibility>(character).unwrap(),
+                if shadow_type == 1 {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                }
+            );
+            assert_eq!(
+                app.world()
+                    .get::<DirectionalLight>(light)
+                    .unwrap()
+                    .shadow_maps_enabled,
+                shadow_type == 1
+            );
+        }
+    }
 
     #[test]
     fn loading_avatar_has_no_shadow_but_scenes_without_entrance_keep_shadows() {

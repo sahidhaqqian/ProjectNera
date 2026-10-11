@@ -23,6 +23,15 @@ struct NativeSmoke {
     captures: Vec<serde_json::Value>,
     checks: Vec<String>,
     capture_label: String,
+    variant: usize,
+    variant_started: bool,
+    saw_greeting: bool,
+    saw_firefly: bool,
+    swat_started: f32,
+    swat_capture: usize,
+    utility_requested: bool,
+    settings_checked: bool,
+    alarm_editor_checked: bool,
 }
 
 pub(crate) fn install(app: &mut App) {
@@ -143,13 +152,40 @@ fn script_avatar_click(world: &mut World) {
     });
 }
 
+fn script_headpat(world: &mut World) {
+    let eyes: Vec<_> = world
+        .query_filtered::<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>()
+        .iter(world)
+        .filter(|(bone, _)| matches!(bone.as_str(), "leftEye" | "rightEye"))
+        .map(|(_, pose)| pose.translation())
+        .collect();
+    assert!(!eyes.is_empty());
+    let eye = eyes.iter().copied().sum::<Vec3>() / eyes.len() as f32;
+    let (camera, view) = world
+        .query_filtered::<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>()
+        .single(world)
+        .unwrap();
+    let cursor = camera.world_to_viewport(view, eye).unwrap();
+    assert_eq!(
+        crate::interaction::smoke_parts_at_cursor(world, vec![cursor])[0],
+        Some(crate::interaction::BodyPart::Head)
+    );
+    world.write_message(crate::interaction::NeraHeadPatted {
+        pointer: crate::interaction::NeraPointerPosition {
+            screen: IVec2::ZERO,
+            local: cursor,
+        },
+    });
+}
+
 fn check_screensaver_pose_ownership(world: &mut World) {
+    crate::settings::assert_smoke_presentation_shadow_hidden(world);
     use bevy_vrm1::{prelude::LookAt, vrm::body_tracking::BodyTracking};
     let (look, tracking) = world.query_filtered::<(Option<&LookAt>, Option<&BodyTracking>), With<crate::avatar::NeraAvatar>>()
         .single(world).unwrap();
     assert!(
-        look.is_none() && tracking.is_none(),
-        "Screensaver cursor gaze remained active"
+        look.is_some() && tracking.is_none(),
+        "Screensaver needs viewer eye gaze without head/spine cursor tracking"
     );
     assert!(
         world.query::<&AnimationPlayer>().iter(world).any(|player| {
@@ -159,6 +195,31 @@ fn check_screensaver_pose_ownership(world: &mut World) {
         }),
         "Screensaver must retain authored animation playback"
     );
+    let landmarks: Vec<_> = world
+        .query_filtered::<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>()
+        .iter(world)
+        .filter(|(bone, _)| matches!(bone.as_str(), "head" | "leftFoot" | "rightFoot"))
+        .map(|(bone, transform)| (bone.as_str().to_string(), transform.translation()))
+        .collect();
+    let (camera, view) = world
+        .query_filtered::<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>()
+        .single(world)
+        .unwrap();
+    let size = camera.logical_viewport_size().unwrap();
+    for (bone, position) in landmarks {
+        let pixel = camera.world_to_viewport(view, position).unwrap();
+        if bone == "head" {
+            assert!(
+                pixel.x > 0.0 && pixel.x < size.x && pixel.y > 0.0 && pixel.y < size.y,
+                "close-up head must remain visible: {pixel:?} in {size:?}"
+            );
+        } else {
+            assert!(
+                pixel.y > size.y,
+                "close-up must crop legs: {bone} at {pixel:?} in {size:?}"
+            );
+        }
+    }
 }
 
 fn check_restore(world: &mut World) {
@@ -203,11 +264,30 @@ fn run(world: &mut World) {
     let now = world.resource::<Time<Real>>().elapsed_secs();
     let stage = world.resource::<NativeSmoke>().stage;
     let dt = now - world.resource::<NativeSmoke>().at;
-    if now > 70.0 {
+    if now > 180.0 {
         panic!("presentation native smoke timed out at stage {stage}");
     }
     let next = match stage {
         0 if now > 7.0 => {
+            if !world.resource::<NativeSmoke>().utility_requested {
+                world.write_message(crate::settings::OpenSettingsWindow);
+                world.write_message(crate::alarm_settings::OpenAlarmSettingsWindow);
+                world.resource_mut::<NativeSmoke>().utility_requested = true;
+                return;
+            }
+            if !world.resource::<NativeSmoke>().settings_checked {
+                let checked = crate::settings::smoke_pointer_routing(world);
+                world.resource_mut::<NativeSmoke>().settings_checked = checked;
+            }
+            if !world.resource::<NativeSmoke>().alarm_editor_checked {
+                let checked = crate::alarm_settings::smoke_pointer_routing(world);
+                world.resource_mut::<NativeSmoke>().alarm_editor_checked = checked;
+            }
+            let smoke = world.resource::<NativeSmoke>();
+            if !smoke.settings_checked || !smoke.alarm_editor_checked {
+                return;
+            }
+            world.resource_mut::<NativeSmoke>().checks.push("real Settings/Alarm editor HWNDs: scripted pointer gate allows pet input outside panel and blocks panel hover".into());
             capture(world, "desktop-normal");
             true
         }
@@ -231,7 +311,7 @@ fn run(world: &mut World) {
             assert!(world.resource::<PresentationState>().is_screensaver());
             check_screensaver_pose_ownership(world);
             script_avatar_click(world);
-            world.resource_mut::<NativeSmoke>().checks.push("Normal: scroll/cursor/keyboard ignored, gaze suppressed, authored animation active, scripted body click exits".into());
+            world.resource_mut::<NativeSmoke>().checks.push("Normal: scroll/cursor/keyboard ignored, viewer eye gaze active, authored head pose active, scripted body click exits".into());
             true
         }
         4 if dt > 0.8 => {
@@ -286,13 +366,20 @@ fn run(world: &mut World) {
             check_screensaver_pose_ownership(world);
             capture(world, "screensaver-chibi");
             script_non_click_input(world);
+            script_headpat(world);
             true
         }
         11 if dt > 0.45 => {
             assert!(world.resource::<PresentationState>().is_screensaver());
             check_screensaver_pose_ownership(world);
+            assert_eq!(
+                world
+                    .resource::<crate::animation::NeraAnimationState>()
+                    .visual_state(),
+                crate::animation::VisualState::HeadStroke
+            );
             script_avatar_click(world);
-            world.resource_mut::<NativeSmoke>().checks.push("Chibi: scroll/cursor/keyboard ignored, gaze suppressed, authored animation active, scripted body click exits".into());
+            world.resource_mut::<NativeSmoke>().checks.push("Chibi: headpat accepted without exit, viewer eye gaze active, scroll ignored, scripted body click exits".into());
             true
         }
         12 if dt > 0.8 => {
@@ -302,8 +389,123 @@ fn run(world: &mut World) {
             true
         }
         13 if dt > 1.0 => {
+            enter();
+            true
+        }
+        14 => {
+            use crate::animation::screensaver::{ScreensaverClip as Clip, smoke_playing};
+            if smoke_playing(world, Clip::Waving) {
+                world.resource_mut::<NativeSmoke>().saw_greeting = true;
+            }
+            if smoke_playing(world, Clip::Breathing) {
+                assert!(
+                    world.resource::<NativeSmoke>().saw_greeting,
+                    "entry Waving never actually played"
+                );
+                capture(world, "routine-breathing");
+                script_headpat(world);
+                true
+            } else {
+                false
+            }
+        }
+        15 if dt > 0.4 => {
+            assert!(world.resource::<PresentationState>().is_screensaver());
+            assert_eq!(
+                world
+                    .resource::<crate::animation::NeraAnimationState>()
+                    .visual_state(),
+                crate::animation::VisualState::HeadStroke
+            );
+            assert!(
+                world
+                    .resource::<crate::animation::NeraAnimationClips>()
+                    .head_stroke_playing(
+                        world.resource::<crate::animation::NeraAnimationPlayback>()
+                    )
+            );
+            check_screensaver_pose_ownership(world);
+            capture(world, "routine-headpat");
+            true
+        }
+        16 => {
+            use crate::animation::screensaver::{
+                ScreensaverClip as Clip, smoke_playing, smoke_select,
+            };
+            if smoke_playing(world, Clip::Breathing) {
+                smoke_select(world, Clip::Holding);
+                true
+            } else {
+                false
+            }
+        }
+        17 => {
+            use crate::animation::screensaver::{
+                ScreensaverClip as Clip, smoke_playing, smoke_select,
+            };
+            let variants = [
+                Clip::Holding,
+                Clip::Dwarf4,
+                Clip::Briefcase2,
+                Clip::Dwarf,
+                Clip::Dwarf3,
+                Clip::Offensive,
+                Clip::Dwarf2,
+            ];
+            let index = world.resource::<NativeSmoke>().variant;
+            let clip = variants[index];
+            if clip == Clip::Dwarf2
+                && !world.resource::<NativeSmoke>().saw_firefly
+                && world
+                    .query::<&crate::pet_feedback::PetParticle>()
+                    .iter(world)
+                    .any(|particle| particle.is_firefly())
+            {
+                world.resource_mut::<NativeSmoke>().saw_firefly = true;
+                capture(world, "routine-firefly");
+            }
+            if smoke_playing(world, clip) && !world.resource::<NativeSmoke>().variant_started {
+                world.resource_mut::<NativeSmoke>().variant_started = true;
+                world.resource_mut::<NativeSmoke>().swat_started = now;
+                world
+                    .resource_mut::<NativeSmoke>()
+                    .checks
+                    .push(format!("actual VRMA played: {}", clip.path()));
+                info!("PRESENTATION_NATIVE actual routine clip: {}", clip.path());
+            }
+            if clip == Clip::Dwarf2 && smoke_playing(world, clip) {
+                let smoke = world.resource::<NativeSmoke>();
+                let frame = smoke.swat_capture;
+                if frame < 4 && now - smoke.swat_started >= 0.25 + frame as f32 * 0.4 {
+                    world.resource_mut::<NativeSmoke>().swat_capture += 1;
+                    capture(world, &format!("dwarf2-pose-{frame}"));
+                }
+            }
+            if world.resource::<NativeSmoke>().variant_started
+                && smoke_playing(world, Clip::Breathing)
+            {
+                if index + 1 < variants.len() {
+                    world.resource_mut::<NativeSmoke>().variant += 1;
+                    world.resource_mut::<NativeSmoke>().variant_started = false;
+                    smoke_select(world, variants[index + 1]);
+                    false
+                } else {
+                    assert!(world.resource::<NativeSmoke>().saw_firefly);
+                    world.resource_mut::<NativeSmoke>().checks.push("Waving -> looping Breathing; Normal/Chibi headpat; seven real variations -> Breathing; real firefly precedes Dwarf Idle 2".into());
+                    script_avatar_click(world);
+                    true
+                }
+            } else {
+                false
+            }
+        }
+        18 if dt > 0.8 => {
+            check_restore(world);
+            true
+        }
+        19 if dt > 0.5 => {
             let smoke = world.resource::<NativeSmoke>();
-            assert_eq!(smoke.captures.len(), 4);
+            assert_eq!(smoke.captures.len(), 11);
             for capture in &smoke.captures {
                 assert!(capture["alpha_zero_pixels"].as_u64().unwrap() > 0);
                 if capture["label"]
@@ -313,16 +515,21 @@ fn run(world: &mut World) {
                 {
                     let visible = capture["visible_monitor_height"].as_f64().unwrap();
                     assert!(
-                        (0.80..=0.90).contains(&visible),
+                        (0.85..=0.95).contains(&visible),
                         "visible occupancy {visible}"
                     );
                     let bounds = capture["bounds"].as_array().unwrap();
-                    assert!(bounds[0].as_u64().unwrap() > 0 && bounds[1].as_u64().unwrap() > 0);
-                    assert!(bounds[2].as_u64().unwrap() + 1 < capture["width"].as_u64().unwrap());
-                    assert!(bounds[3].as_u64().unwrap() + 1 < capture["height"].as_u64().unwrap());
+                    assert!(
+                        bounds[1].as_u64().unwrap() > 0,
+                        "crown must not clip at top"
+                    );
+                    assert!(
+                        bounds[3].as_u64().unwrap() + 2 >= capture["height"].as_u64().unwrap(),
+                        "lower body must intentionally continue below the portrait viewport"
+                    );
                 }
             }
-            let report = serde_json::json!({"status":"PASSED","checks":smoke.checks,"captures":smoke.captures,"pictures":screenshot::pictures_folder(),"physical_radial_tray_clicks":"NOT PERFORMED","physical_body_click":"NOT PERFORMED","scripted_body_click":"PASSED","physical_pointer_capture_suppressed_for_harness":true});
+            let report = serde_json::json!({"status":"PASSED","framing":"upper-body close-up; head visible, legs cropped","checks":smoke.checks,"captures":smoke.captures,"pictures":screenshot::pictures_folder(),"physical_radial_tray_clicks":"NOT PERFORMED","physical_body_click":"NOT PERFORMED","physical_headpat":"NOT PERFORMED","scripted_headpat":"PASSED","scripted_body_click":"PASSED","variation_selection":"scripted acceleration; production 30-60 second intervals covered by unit tests","physical_pointer_capture_suppressed_for_harness":true});
             std::fs::write(
                 output().join("report.json"),
                 serde_json::to_vec_pretty(&report).unwrap(),

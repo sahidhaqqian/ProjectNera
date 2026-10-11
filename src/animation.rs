@@ -18,6 +18,7 @@ use bevy::prelude::*;
 mod library;
 mod limbs;
 mod playback;
+pub(crate) mod screensaver;
 mod state;
 mod systems;
 pub(crate) mod touch;
@@ -50,6 +51,7 @@ pub(crate) fn reset_for_character_change(world: &mut World) {
             !matches!(
                 active.action,
                 TemporaryAction::LibraryAnimation(_)
+                    | TemporaryAction::Screensaver(_)
                     | TemporaryAction::TouchReaction(_)
                     | TemporaryAction::AutoDance(_)
             )
@@ -145,6 +147,7 @@ impl Plugin for NeraAnimationPlugin {
             .add_message::<touch::TouchReactionAccepted>()
             .init_resource::<NeraAnimationClips>()
             .init_resource::<NeraAnimationPlayback>()
+            .init_resource::<screensaver::ScreensaverRoutine>()
             .init_resource::<AlarmAnimationRuntime>()
             .init_resource::<library::LibraryPlayback>()
             .init_resource::<walking_loop::WalkingCycle>()

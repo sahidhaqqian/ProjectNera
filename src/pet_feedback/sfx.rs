@@ -120,7 +120,10 @@ pub(super) fn play_sfx(
 ) {
     let mut active = players.iter().count();
     for request in requests.read() {
-        if settings.audio_muted || !presentation.is_desktop_pet() {
+        if settings.audio_muted
+            || !(presentation.is_desktop_pet()
+                || (presentation.is_screensaver() && request.0 == PetSfxKind::HeadPat))
+        {
             continue;
         }
         let sound = catalog
@@ -149,7 +152,9 @@ fn expire_players(
 ) {
     for (entity, mut player) in &mut players {
         player.remaining -= time.delta_secs();
-        if player.remaining <= 0.0 || !presentation.is_desktop_pet() {
+        if player.remaining <= 0.0
+            || !(presentation.is_desktop_pet() || presentation.is_screensaver())
+        {
             commands.entity(entity).despawn();
         }
     }

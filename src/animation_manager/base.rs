@@ -142,6 +142,42 @@ pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
         key: "animasi_basic/Shoulder Rubbing.vrma",
         label: "Arm touch: shoulder rubbing",
     },
+    BaseAnimation {
+        key: "animasi_basic/Waving.vrma",
+        label: "Screensaver: greeting",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Breathing_Idle.vrma",
+        label: "Screensaver: breathing idle",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Holding_Idle.vrma",
+        label: "Screensaver: holding idle",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Dwarf_Idle_4.vrma",
+        label: "Screensaver: dwarf idle 4",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Standing_WBriefcase_Idle_2.vrma",
+        label: "Screensaver: briefcase idle 2",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Dwarf_Idle.vrma",
+        label: "Screensaver: dwarf idle",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Dwarf_Idle_3.vrma",
+        label: "Screensaver: dwarf idle 3",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Offensive_Idle.vrma",
+        label: "Screensaver: offensive idle",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Dwarf_Idle_2.vrma",
+        label: "Screensaver: dwarf idle 2 / firefly",
+    },
 ];
 
 pub(super) fn is_base_animation(key: &str) -> bool {
@@ -168,6 +204,17 @@ mod tests {
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn screensaver_animations_exist_and_use_the_same_protected_base_registry() {
+        for clip in crate::animation::screensaver::ScreensaverClip::ALL {
+            let key = clip.path().strip_prefix("animations/").unwrap();
+            assert!(is_base_animation(key), "{key}");
+            let bytes =
+                fs::read(PathBuf::from(crate::nera_asset_path()).join(clip.path())).unwrap();
+            assert_eq!(&bytes[..4], b"glTF");
+        }
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -205,7 +252,7 @@ mod tests {
 
     #[test]
     fn base_keys_are_unique() {
-        assert_eq!(BASE_ANIMATIONS.len(), 33);
+        assert_eq!(BASE_ANIMATIONS.len(), 42);
         for (index, entry) in BASE_ANIMATIONS.iter().enumerate() {
             assert_eq!(base_order(entry.key), Some(index));
             assert!(!entry.label.is_empty());

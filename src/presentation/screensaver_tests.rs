@@ -194,17 +194,21 @@ fn alarm_preempts_screensaver_preserves_desktop_snapshot_and_ignores_stale_input
 }
 
 #[test]
-fn full_body_visible_height_is_85_percent_and_normal_chibi_geometry_is_finite() {
+fn screensaver_frames_crown_to_waist_and_crops_legs_for_normal_and_chibi() {
     let (mut app, _, _, _) = app_with_skin();
     for (body, head, offset) in [(1.0, 1.0, 0.0), (0.62, 1.9, -0.19)] {
-        let bounds = app
+        let (bounds, full) = app
             .world_mut()
             .run_system_once(
                 move |geometry: full_body::FullBodyGeometry, avatars: PortraitAvatars| {
-                    geometry.bounds(&avatars, body, head, offset, true)
+                    (
+                        geometry
+                            .portrait_bounds(&avatars, body, head, offset, true)
+                            .unwrap(),
+                        geometry.bounds(&avatars, body, head, offset, true).unwrap(),
+                    )
                 },
             )
-            .unwrap()
             .unwrap();
         let monitor = crate::platform::PhysicalRect {
             left: -1920,
@@ -216,13 +220,51 @@ fn full_body_visible_height_is_85_percent_and_normal_chibi_geometry_is_finite() 
         let visible = (bounds.top_y - bounds.bottom_y) / layout.viewport_height
             * layout.window_height as f32
             / 1080.0;
-        assert!((visible - 0.85).abs() < 0.001);
+        assert!((visible - 0.94 * 0.96).abs() < 0.001);
+        let view_bottom = layout.camera_y - layout.viewport_height * 0.5;
+        let view_top = layout.camera_y + layout.viewport_height * 0.5;
+        assert!(view_bottom < bounds.bottom_y && bounds.top_y < view_top);
+        assert!(
+            full.bottom_y < view_bottom,
+            "feet must be outside the close-up"
+        );
+        let previous_full_body_viewport = (full.top_y - full.bottom_y) * 0.94 / 0.85;
+        assert!(layout.viewport_height < previous_full_body_viewport * 0.75);
         assert!(layout.camera_z.is_finite() && layout.viewport_height > 0.0);
         assert!(layout.window_width < 1920);
     }
     assert_eq!(ATTENTION_WINDOW_MONITOR_HEIGHT_RATIO, 0.78);
     assert_eq!(ATTENTION_UPPER_BODY_VIEW_FRACTION, 0.80);
     assert_eq!(ATTENTION_ENTER_SECONDS, 0.38);
+}
+
+#[test]
+fn screensaver_arm_span_never_zooms_the_portrait_back_out() {
+    let bounds = UpperBodyBounds {
+        min_x: -0.5,
+        max_x: 0.5,
+        bottom_y: 0.5,
+        top_y: 1.5,
+        front_z: 0.1,
+    };
+    let monitor = crate::platform::PhysicalRect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    let portrait = compute_screensaver_layout(monitor, bounds);
+    let wide = compute_screensaver_layout(
+        monitor,
+        UpperBodyBounds {
+            min_x: -5.0,
+            max_x: 5.0,
+            ..bounds
+        },
+    );
+    assert_eq!(portrait.viewport_height, wide.viewport_height);
+    assert_eq!(portrait.window_width, wide.window_width);
+    assert_eq!(portrait.window_height, wide.window_height);
 }
 
 #[test]
@@ -378,7 +420,7 @@ fn screensaver_restores_window_and_taskbar_seat_without_replaying_entry() {
 }
 
 #[test]
-fn screensaver_releases_cursor_gaze_preserves_authored_pose_and_restores_preferences() {
+fn screensaver_uses_viewer_eye_gaze_preserves_authored_head_pose_and_restores_preferences() {
     use crate::{
         avatar::{LookAtTarget, sync_look_at_for_animation},
         settings::NeraSettings,
@@ -405,7 +447,7 @@ fn screensaver_releases_cursor_gaze_preserves_authored_pose_and_restores_prefere
             AttentionKind::Screensaver,
         ));
     app.update();
-    assert!(app.world().get::<LookAt>(avatar).is_none());
+    assert!(app.world().get::<LookAt>(avatar).is_some());
     assert!(app.world().get::<BodyTracking>(avatar).is_none());
     assert_eq!(
         *app.world().get::<Transform>(avatar).unwrap(),

@@ -27,6 +27,7 @@ pub(crate) fn grounding_policy(visual: VisualState, library_path: Option<&str>) 
     use GroundingPolicy::*;
     match visual {
         VisualState::Death => BodyContact,
+        VisualState::Screensaver(_) => Authored,
         VisualState::Floating
         | VisualState::Falling
         | VisualState::Landing
@@ -82,6 +83,7 @@ pub(super) struct ClipSlot {
 
 #[derive(Resource, Default)]
 pub(crate) struct NeraAnimationClips {
+    pub(super) screensaver: [Option<ClipSlot>; 9],
     pub(super) library: Option<ClipSlot>,
     pub(super) idle: Option<ClipSlot>,
     pub(super) walking: Option<ClipSlot>,
@@ -407,6 +409,7 @@ const IDLE_SITTING_RUBBING_ARM_VRMA_PATH: &str =
 /// the actual `VrmaHandle` is inserted only when a feature first requests it.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LazyNeraVrma {
+    Screensaver(super::screensaver::ScreensaverClip),
     SleepingIdle,
     AlarmJump,
     Praying,
@@ -420,6 +423,7 @@ pub(crate) enum LazyNeraVrma {
 impl LazyNeraVrma {
     fn path(self) -> &'static str {
         match self {
+            Self::Screensaver(clip) => clip.path(),
             Self::SleepingIdle => SLEEPING_IDLE_VRMA_PATH,
             Self::AlarmJump => ALARM_JUMP_VRMA_PATH,
             Self::Praying => PRAYING_VRMA_PATH,
@@ -508,6 +512,14 @@ pub(crate) fn spawn_animation_library(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands<'_>,
     asset_server: &AssetServer,
 ) {
+    for clip in super::screensaver::ScreensaverClip::ALL {
+        parent
+            .spawn((
+                Name::new(format!("Screensaver {clip:?} (lazy)")),
+                LazyNeraVrma::Screensaver(clip),
+            ))
+            .observe(super::screensaver::register);
+    }
     for clip in TouchReactionClip::ALL {
         parent
             .spawn((
@@ -713,6 +725,15 @@ pub(super) fn clip_for_visual(
     clips: &NeraAnimationClips,
 ) -> (Option<ClipSlot>, RepeatAnimation, &'static str) {
     match visual {
+        VisualState::Screensaver(kind) => (
+            clips.screensaver[kind.index()],
+            if kind == super::screensaver::ScreensaverClip::Breathing {
+                RepeatAnimation::Forever
+            } else {
+                RepeatAnimation::Count(1)
+            },
+            "Screensaver",
+        ),
         VisualState::LibraryAnimation(entity) => (
             clips.library.filter(|clip| clip.entity == entity),
             RepeatAnimation::Count(1),
@@ -833,6 +854,7 @@ fn base_fallback(state: &NeraAnimationState, clips: &NeraAnimationClips) -> Opti
 pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
     match visual {
         VisualState::LimbReaction(_) | VisualState::TouchReaction(_) => REACTION_BLEND,
+        VisualState::Screensaver(_) => IDLE_VARIATION_BLEND,
         VisualState::LibraryAnimation(_) => REACTION_BLEND,
         VisualState::HeadStroke => HEAD_STROKE_BLEND,
         VisualState::Falling | VisualState::Landing => SUPPORT_BLEND,

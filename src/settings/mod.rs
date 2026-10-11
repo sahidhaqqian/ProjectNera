@@ -16,7 +16,11 @@ mod shadow;
 mod startup;
 mod ui;
 #[cfg(debug_assertions)]
+pub(crate) use shadow::assert_smoke_presentation_shadow_hidden;
+#[cfg(debug_assertions)]
 pub(crate) use shadow::assert_smoke_shadow_ground;
+#[cfg(debug_assertions)]
+pub(crate) use ui::smoke_pointer_routing;
 #[cfg(debug_assertions)]
 pub(crate) use ui::smoke_throw_controls;
 
@@ -24,7 +28,7 @@ pub(crate) use model::{ActivityLevel, AlarmConfig, NeraSettings};
 pub(crate) use runtime::{save_settings_before_exit, save_settings_deferred};
 pub(crate) use ui::{
     OpenSettingsWindow, ReturnToActionMenu, SettingsInputGate, nera_input_available,
-    nera_input_blocked,
+    nera_input_blocked, nera_pointer_input_blocked,
 };
 
 use bevy::prelude::*;
