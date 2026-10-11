@@ -49,6 +49,17 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
 
 pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Option<(Face, f32)> {
     use VisualState as Body;
+    if let Body::IdleMicro(action) = visual {
+        match action {
+            IdleMicroAction::CursorNotice => return Some((Face::Surprised, 0.25)),
+            IdleMicroAction::CursorReach | IdleMicroAction::EdgePeek => {
+                return Some((Face::Joy, 0.3));
+            }
+            IdleMicroAction::CursorCatch => return Some((Face::Joy, 0.65)),
+            IdleMicroAction::CursorEscape => return Some((Face::Embarrassed, 0.4)),
+            _ => {}
+        }
+    }
     let file = match visual {
         Body::Screensaver(clip) => return for_clip(clip.path()),
         Body::TouchReaction(clip) => return for_clip(clip.path()),
@@ -75,6 +86,11 @@ pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Opt
             IdleMicroAction::Bored => "Bored.vrma",
             IdleMicroAction::AngryGesture => "Angry_Gesture.vrma",
             IdleMicroAction::SittingRubbingArm => "Sitting_Rubbing_Arm.vrma",
+            IdleMicroAction::CursorNotice
+            | IdleMicroAction::CursorReach
+            | IdleMicroAction::CursorCatch
+            | IdleMicroAction::CursorEscape
+            | IdleMicroAction::EdgePeek => unreachable!("living faces resolved above"),
         },
         Body::LibraryAnimation(_) => return library_path.and_then(for_clip),
         _ => return None,

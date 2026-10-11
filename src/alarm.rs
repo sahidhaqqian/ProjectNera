@@ -84,6 +84,20 @@ enum AlarmPhase {
     },
 }
 
+/// Read-only projection for UI; deadlines remain owned by `AlarmState`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AlarmStatus {
+    Idle,
+    Armed {
+        remaining: Duration,
+        duration: Duration,
+    },
+    Ringing,
+}
+
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct AlarmRuntimeSet;
+
 #[derive(Resource, Debug)]
 pub(crate) struct AlarmState {
     phase: AlarmPhase,
@@ -107,16 +121,47 @@ impl Default for AlarmState {
 }
 
 impl AlarmState {
+    #[cfg(test)]
+    pub(crate) fn for_test(status: AlarmStatus) -> Self {
+        let phase = match status {
+            AlarmStatus::Idle => AlarmPhase::Idle,
+            AlarmStatus::Armed {
+                remaining,
+                duration,
+            } => AlarmPhase::Armed {
+                deadline: Instant::now() + remaining,
+                duration,
+            },
+            AlarmStatus::Ringing => AlarmPhase::Ringing {
+                started_at: Instant::now(),
+            },
+        };
+        Self {
+            phase,
+            pending: Vec::new(),
+        }
+    }
+
     pub(crate) fn is_ringing(&self) -> bool {
         matches!(self.phase, AlarmPhase::Ringing { .. })
     }
 
     pub(crate) fn remaining(&self) -> Option<Duration> {
-        let AlarmPhase::Armed { deadline, .. } = self.phase else {
+        let AlarmStatus::Armed { remaining, .. } = self.status_at(Instant::now()) else {
             return None;
         };
+        Some(remaining)
+    }
 
-        Some(deadline.saturating_duration_since(Instant::now()))
+    pub(crate) fn status_at(&self, now: Instant) -> AlarmStatus {
+        match self.phase {
+            AlarmPhase::Idle => AlarmStatus::Idle,
+            AlarmPhase::Armed { deadline, duration } => AlarmStatus::Armed {
+                remaining: deadline.saturating_duration_since(now),
+                duration,
+            },
+            AlarmPhase::Ringing { .. } => AlarmStatus::Ringing,
+        }
     }
 
     /// Scheduled alarms can interrupt a future quick/snooze timer, but never
@@ -258,7 +303,8 @@ impl Plugin for AlarmPlugin {
                     abort_ringing_if_attention_never_started,
                     tick_alarm_deadline,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(AlarmRuntimeSet),
             );
     }
 }
@@ -296,7 +342,7 @@ pub(crate) fn memory_audit_ring_source(world: &mut World) -> Option<AssetId<Audi
         .map(|player| player.0.id())
 }
 
-fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {
+pub(crate) fn preset_duration(choice: AlarmMenuChoice) -> Option<Duration> {
     match choice {
         AlarmMenuChoice::FiveMinutes => Some(Duration::from_secs(5 * 60)),
         AlarmMenuChoice::TenMinutes => Some(Duration::from_secs(10 * 60)),
@@ -366,6 +412,12 @@ fn consume_alarm_menu_commands(
                 };
                 display.label = "Quick Alarm".to_string();
                 display.sound = settings.alarm_sound;
+                // Presets are whole minutes. Record their actual local due
+                // time when accepted, so the editor can show it immediately.
+                #[cfg(target_os = "windows")]
+                {
+                    set_timer_display_time(&mut display, duration);
+                }
 
                 info!("Nera alarm armed -> {:?} ({:?})", preset, duration,);
             }
@@ -377,6 +429,7 @@ fn consume_alarm_control_commands(
     mut commands: Commands,
     mut controls: MessageReader<AlarmControlCommand>,
     mut state: ResMut<AlarmState>,
+    mut display: ResMut<AlarmDisplayInfo>,
     mut presentation: MessageWriter<PresentationCommand>,
     mut animation: MessageWriter<AlarmAnimationCommand>,
     alarm_audio: Query<(Entity, Option<&AudioSink>), With<AlarmAudioPlayback>>,
@@ -412,6 +465,8 @@ fn consume_alarm_control_commands(
         // Presentation teardown restores the exact DesktopPet snapshot. The
         // normal PresentationExited alarm cleanup intentionally sees Armed here
         // and leaves the newly scheduled snooze intact.
+        #[cfg(target_os = "windows")]
+        set_timer_display_time(&mut display, duration);
         presentation.write(PresentationCommand::ExitAttention);
 
         info!(
@@ -419,6 +474,15 @@ fn consume_alarm_control_commands(
             duration, stopped,
         );
     }
+}
+
+#[cfg(target_os = "windows")]
+fn set_timer_display_time(display: &mut AlarmDisplayInfo, duration: Duration) {
+    let now = local_datetime();
+    let minutes =
+        (u64::from(now.hour) * 60 + u64::from(now.minute) + duration.as_secs() / 60) % (24 * 60);
+    display.hour = (minutes / 60) as u8;
+    display.minute = (minutes % 60) as u8;
 }
 
 #[cfg(target_os = "windows")]
@@ -724,6 +788,62 @@ fn abort_ringing_if_attention_never_started(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_quick_preset_updates_status_and_due_time_cancel_clears_it_and_ringing_rejects_it() {
+        let mut app = App::new();
+        app.init_resource::<AlarmState>()
+            .init_resource::<AlarmDisplayInfo>()
+            .init_resource::<NeraSettings>()
+            .add_message::<NeraActionMenuCommand>()
+            .add_message::<PresentationCommand>()
+            .add_systems(Update, consume_alarm_menu_commands);
+        let saved = app.world().resource::<NeraSettings>().alarm_book.clone();
+        app.world_mut()
+            .write_message(NeraActionMenuCommand::Alarm(AlarmMenuChoice::FiveMinutes));
+        app.update();
+        assert!(
+            matches!(app.world().resource::<AlarmState>().status_at(Instant::now()),
+            AlarmStatus::Armed { remaining, duration }
+            if remaining > Duration::from_secs(299) && duration == Duration::from_secs(300))
+        );
+        #[cfg(target_os = "windows")]
+        {
+            let mut expected = AlarmDisplayInfo::default();
+            set_timer_display_time(&mut expected, Duration::from_secs(300));
+            let display = app.world().resource::<AlarmDisplayInfo>();
+            assert_eq!(
+                (display.hour, display.minute),
+                (expected.hour, expected.minute)
+            );
+        }
+        app.world_mut()
+            .write_message(NeraActionMenuCommand::Alarm(AlarmMenuChoice::Cancel));
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<AlarmState>()
+                .status_at(Instant::now()),
+            AlarmStatus::Idle
+        );
+        app.insert_resource(AlarmState::for_test(AlarmStatus::Ringing));
+        let old = app.world().resource::<AlarmDisplayInfo>().clone();
+        app.world_mut()
+            .write_message(NeraActionMenuCommand::Alarm(AlarmMenuChoice::TenMinutes));
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<AlarmState>()
+                .status_at(Instant::now()),
+            AlarmStatus::Ringing
+        );
+        let display = app.world().resource::<AlarmDisplayInfo>();
+        assert_eq!(
+            (display.hour, display.minute, &display.label),
+            (old.hour, old.minute, &old.label)
+        );
+        assert_eq!(app.world().resource::<NeraSettings>().alarm_book, saved);
+    }
 
     fn pending_alarm(label: &str, deadline: Instant) -> PendingAlarm {
         PendingAlarm {

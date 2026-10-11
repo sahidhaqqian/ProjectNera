@@ -623,6 +623,10 @@ A new feature should normally add/reuse a semantic kind, not create a second aud
 
 `PetBehavior` decides low-priority actions; `WalkingRuntime` executes a chosen destination.
 
+Living Behavior V1 adds two routines inside that same brain. Cursor Play consumes read-only desktop cursor facts shared with gaze; its Notice/Reach/Catch/Escape stages use the existing idle-action priority, expression mapping and PetFx/PetSfx. A reversible humanoid two-bone reach composes after animation and body proportions, before VRM constraints, and restores its original rotations in PreUpdate. It never captures or moves the operating-system pointer. Missing/unusable arm chains leave normal gaze intact.
+
+Edge Peek is a monitor-floor-only WalkingRuntime journey: approach an exposed edge, briefly hide part of the canvas, emerge, then return to the pre-journey position. Physics grants bounded partial-canvas movement while keeping the measured foot contact inside the support plane; ordinary roaming/window-top bounds remain unchanged. Monitor seams, support changes, drag/user relocation, loading, Cloud and Attention interrupt the routine. Attention restores its own placement before pending edge recovery; a user/Cloud relocation invalidates that recovery. Temporary edge positions are excluded from position persistence. Cursor Play and Edge Peek preferences live in NeraSettings; Edge Peek also requires Allow Roaming.
+
 ### `PetBehavior`
 
 Owns:
@@ -685,8 +689,8 @@ include hair/clothing and the current body/head proportions.
 Only live humanoid bones supply landmarks; child VRMA source rigs are excluded.
 The existing Chibi standing correction supplies the thigh adjustment; framing
 does not change avatar scale or the Chibi overlay. Missing/unready geometry
-rejects entry with a log. Cloud-owned placement also rejects Screensaver entry
-until Cloud is dismissed.
+rejects entry with a log. A valid Screensaver request first dismisses Rest/Ride
+Cloud, then captures the free desktop state so exit cannot restore a stale Cloud seat.
 
 Screensaver uses the existing presentation snapshot/restore and pointer reset.
 Only a left/right press received by Nera's primary window on an existing body
@@ -748,6 +752,8 @@ The editor does not own scheduler state.
 `alarm_settings.rs` owns only the alarm-manager window, draft/edit state, quick-preset UI, and persistent `AlarmConfig` edits.
 
 The radial Alarm action opens Alarm Settings directly. 5m/10m/15m/30m/45m/1h/2h presets now live in that utility window.
+
+The active timer card and selected preset read `AlarmState` after runtime processing. They show the accepted timer's remaining time, local due time, and ringing state, including after reopening the editor. Quick timers remain runtime deadlines; the saved alarm list represents persistent `AlarmConfig` entries.
 
 ### Alarm sounds
 

@@ -257,6 +257,10 @@ pub(crate) struct NeraSettings {
     /// Allows Nera to walk around the desktop while otherwise idle.
     /// Disabled by default, including profiles created before walking existed.
     pub(crate) walking_enabled: bool,
+    /// Cursor play observes only; it never captures or moves the mouse.
+    pub(crate) cursor_play: bool,
+    /// Requires Allow Roaming and an exposed, safe monitor edge.
+    pub(crate) edge_peek: bool,
     /// Opt-in local Windows music observation; MusicDetectionState owns evidence.
     pub(crate) audio_reactive_dance: bool,
     pub(crate) gravity_enabled: bool,
@@ -363,6 +367,8 @@ impl Default for NeraSettings {
             body_mode: "normal".to_string(),
             ground_offset: 0,
             walking_enabled: false,
+            cursor_play: true,
+            edge_peek: true,
             audio_reactive_dance: false,
             gravity_enabled: true,
             throw_enabled: true,

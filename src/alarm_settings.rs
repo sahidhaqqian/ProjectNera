@@ -15,12 +15,17 @@ use bevy::{
 
 use crate::action_menu::{AlarmMenuChoice, NeraActionMenuCommand};
 use crate::alarm::sounds::{AlarmSoundLibrary, PreviewAlarmSound, STOP_PREVIEW};
+use crate::alarm::{AlarmDisplayInfo, AlarmRuntimeSet, AlarmState, AlarmStatus};
 use crate::settings::{AlarmConfig, NeraSettings, save_settings_deferred};
 use crate::utility_window::font_cache::{FontCacheOwner, UtilityFontCache};
 use crate::utility_window::{UtilityWindow, spawn_window_controls};
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
 mod memory_audit;
+#[cfg(all(debug_assertions, target_os = "windows"))]
+mod timer_smoke;
+#[cfg(all(debug_assertions, target_os = "windows"))]
+pub(crate) use timer_smoke::install as install_timer_smoke;
 
 const MAX_ALARMS: usize = 12;
 const QUICK_PRESETS: [(&str, AlarmMenuChoice); 7] = [
@@ -132,6 +137,16 @@ struct AlarmSettingsDragRegion;
 #[derive(Component)]
 struct AlarmSettingsScrollArea;
 
+#[derive(Component)]
+struct ActiveTimerCard;
+
+#[derive(Component, Clone, Copy)]
+enum ActiveTimerText {
+    Title,
+    Countdown,
+    Detail,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum AlarmSettingsView {
     #[default]
@@ -223,6 +238,7 @@ impl Plugin for AlarmSettingsPlugin {
                 )
                     .chain(),
             )
+            .add_systems(PostUpdate, sync_active_timer_ui.after(AlarmRuntimeSet))
             .add_systems(Last, cleanup_alarm_sound_preview);
     }
 }
@@ -543,6 +559,7 @@ fn spawn_alarm_list_ui(
                 );
             });
 
+        spawn_active_timer_card(panel);
         if !status.is_empty() {
             panel.spawn((
                 Text::new(status),
@@ -555,7 +572,7 @@ fn spawn_alarm_list_ui(
         }
         panel.spawn((
             Text::new(format!(
-                "{} alarm{} · {} enabled",
+                "{} saved alarm{} · {} enabled",
                 alarms.len(),
                 if alarms.len() == 1 { "" } else { "s" },
                 enabled,
@@ -631,6 +648,139 @@ fn spawn_alarm_list_ui(
             TextColor(MUTED),
         ));
     });
+}
+
+fn spawn_active_timer_card(panel: &mut ChildSpawnerCommands) {
+    panel
+        .spawn((
+            ActiveTimerCard,
+            Node {
+                width: percent(100),
+                display: Display::None,
+                flex_shrink: 0.0,
+                padding: UiRect::axes(px(16), px(12)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                border_radius: BorderRadius::all(px(16)),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.055, 0.14, 0.15)),
+            Outline::new(px(1), Val::ZERO, Color::srgb(0.20, 0.48, 0.45)),
+        ))
+        .with_children(|card| {
+            for (part, size, color) in [
+                (ActiveTimerText::Title, 14.0, Color::srgb(0.57, 0.91, 0.79)),
+                (ActiveTimerText::Countdown, 30.0, PRIMARY),
+                (ActiveTimerText::Detail, 13.0, BODY),
+            ] {
+                card.spawn((
+                    part,
+                    Text::default(),
+                    TextFont {
+                        font_size: FontSize::Px(size),
+                        ..default()
+                    },
+                    TextColor(color),
+                ));
+            }
+        });
+}
+
+fn timer_countdown(remaining: std::time::Duration) -> String {
+    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
+    if seconds >= 3600 {
+        format!(
+            "{:02}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else {
+        format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
+fn sync_active_timer_ui(
+    alarm: Option<Res<AlarmState>>,
+    display: Option<Res<AlarmDisplayInfo>>,
+    library: Res<AlarmSoundLibrary>,
+    mut cards: Query<&mut Node, With<ActiveTimerCard>>,
+    mut labels: Query<(&ActiveTimerText, &mut Text)>,
+    mut buttons: Query<(&AlarmSettingsAction, &Interaction, &mut BackgroundColor), With<Button>>,
+) {
+    if cards.is_empty() {
+        return;
+    }
+    let status = alarm.as_ref().map_or(AlarmStatus::Idle, |alarm| {
+        alarm.status_at(std::time::Instant::now())
+    });
+    for mut card in &mut cards {
+        let next = if status == AlarmStatus::Idle {
+            Display::None
+        } else {
+            Display::Flex
+        };
+        if card.display != next {
+            card.display = next;
+        }
+    }
+    if let Some(display) = display.as_ref() {
+        let (title, countdown, detail) = match status {
+            AlarmStatus::Armed { remaining, .. } => (
+                if display.label == "Quick Alarm" {
+                    "Quick timer active".to_string()
+                } else {
+                    format!("{} · active", display.label)
+                },
+                timer_countdown(remaining),
+                format!(
+                    "Rings at {} · {}",
+                    format_alarm_clock(display.hour, display.minute),
+                    library.name(display.sound)
+                ),
+            ),
+            AlarmStatus::Ringing => (
+                "Alarm ringing".into(),
+                "Ringing now".into(),
+                display.label.clone(),
+            ),
+            AlarmStatus::Idle => (String::new(), String::new(), String::new()),
+        };
+        for (part, mut text) in &mut labels {
+            let next = match part {
+                ActiveTimerText::Title => &title,
+                ActiveTimerText::Countdown => &countdown,
+                ActiveTimerText::Detail => &detail,
+            };
+            if text.0 != *next {
+                text.0.clone_from(next);
+            }
+        }
+    }
+    // Selection color follows the accepted runtime timer, never the last click.
+    for (action, interaction, mut background) in &mut buttons {
+        let AlarmSettingsAction::QuickPreset(choice) = *action else {
+            continue;
+        };
+        let active = display
+            .as_ref()
+            .is_some_and(|display| display.label == "Quick Alarm")
+            && matches!(status, AlarmStatus::Armed { duration, .. }
+                if QUICK_PRESETS.iter().any(|(_, preset)| *preset == choice)
+                && crate::alarm::preset_duration(choice) == Some(duration));
+        let color = if active {
+            match interaction {
+                Interaction::Pressed => BLUE_PRESSED,
+                Interaction::Hovered => BLUE_HOVER,
+                Interaction::None => BLUE,
+            }
+        } else {
+            action_color(*action, *interaction, None)
+        };
+        if background.0 != color {
+            background.0 = color;
+        }
+    }
 }
 
 fn spawn_sound_library_ui(
@@ -1489,11 +1639,7 @@ fn handle_alarm_settings_actions(
         match *action {
             AlarmSettingsAction::QuickPreset(choice) => {
                 alarm_commands.write(NeraActionMenuCommand::Alarm(choice));
-                ui.sound_status = if choice == AlarmMenuChoice::Cancel {
-                    "Quick timer cancelled".into()
-                } else {
-                    "Quick timer started".into()
-                };
+                ui.sound_status.clear();
                 ui.rebuild = true;
             }
             AlarmSettingsAction::OpenSoundLibrary => {
@@ -1697,6 +1843,10 @@ pub(crate) fn smoke_action(world: &mut World, action: &str) {
         "sound" => AlarmSettingsAction::DraftCycleSound,
         "preview" => AlarmSettingsAction::PreviewDraftSound,
         "save" => AlarmSettingsAction::Save,
+        "quick5" => AlarmSettingsAction::QuickPreset(AlarmMenuChoice::FiveMinutes),
+        "quick10" => AlarmSettingsAction::QuickPreset(AlarmMenuChoice::TenMinutes),
+        "cancel_timer" => AlarmSettingsAction::QuickPreset(AlarmMenuChoice::Cancel),
+        "close" => AlarmSettingsAction::Close,
         _ => panic!("unknown alarm smoke action"),
     };
     let button = world
@@ -1927,15 +2077,19 @@ fn observe_alarm_settings_window_removed(
 }
 
 fn format_alarm_time(alarm: &AlarmConfig) -> String {
-    let hour12 = match alarm.hour.min(23) % 12 {
+    format_alarm_clock(alarm.hour, alarm.minute)
+}
+
+fn format_alarm_clock(hour: u8, minute: u8) -> String {
+    let hour12 = match hour.min(23) % 12 {
         0 => 12,
         value => value,
     };
     format!(
         "{:02}:{:02} {}",
         hour12,
-        alarm.minute.min(59),
-        if alarm.hour < 12 { "AM" } else { "PM" },
+        minute.min(59),
+        if hour < 12 { "AM" } else { "PM" },
     )
 }
 
@@ -1961,6 +2115,160 @@ fn schedule_summary(alarm: &AlarmConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_countdown_rounds_up_and_includes_hours_without_early_zero() {
+        use std::time::Duration;
+        assert_eq!(timer_countdown(Duration::from_millis(299_999)), "05:00");
+        assert_eq!(timer_countdown(Duration::from_millis(1)), "00:01");
+        assert_eq!(timer_countdown(Duration::ZERO), "00:00");
+        assert_eq!(timer_countdown(Duration::from_secs(7200)), "02:00:00");
+        assert_eq!(format_alarm_clock(0, 5), "12:05 AM");
+    }
+
+    #[test]
+    fn active_timer_card_selection_cancel_and_reopen_follow_runtime_without_editing_saved_alarms() {
+        use std::time::Duration;
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<MouseWheel>()
+            .add_message::<PreviewAlarmSound>()
+            .insert_resource(AlarmDisplayInfo {
+                label: "Quick Alarm".into(),
+                hour: 13,
+                minute: 5,
+                sound: 1,
+            })
+            .insert_resource(AlarmState::for_test(AlarmStatus::Armed {
+                remaining: Duration::from_secs(300),
+                duration: Duration::from_secs(300),
+            }))
+            .add_plugins(AlarmSettingsPlugin);
+        let saved = app.world().resource::<NeraSettings>().alarm_book.clone();
+        app.world_mut().write_message(OpenAlarmSettingsWindow);
+        app.update();
+        let card = app
+            .world_mut()
+            .query_filtered::<Entity, With<ActiveTimerCard>>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(
+            app.world().get::<Node>(card).unwrap().display,
+            Display::Flex
+        );
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0 == "05:00")
+        );
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0.starts_with("Rings at 01:05 PM"))
+        );
+        assert!(
+            app.world_mut()
+                .query::<(&AlarmSettingsAction, &BackgroundColor)>()
+                .iter(app.world())
+                .any(|(action, color)| matches!(
+                    action,
+                    AlarmSettingsAction::QuickPreset(AlarmMenuChoice::FiveMinutes)
+                ) && color.0 == BLUE)
+        );
+        app.insert_resource(AlarmState::for_test(AlarmStatus::Armed {
+            remaining: Duration::from_secs(12),
+            duration: Duration::from_secs(300),
+        }));
+        app.update();
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0 == "00:12")
+        );
+        assert_eq!(
+            app.world().get::<Node>(card).unwrap().display,
+            Display::Flex
+        );
+        let window = app
+            .world_mut()
+            .query_filtered::<Entity, With<AlarmSettingsWindow>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut().despawn(window);
+        app.update();
+        app.world_mut().write_message(OpenAlarmSettingsWindow);
+        app.update();
+        assert!(
+            app.world_mut()
+                .query_filtered::<&Node, With<ActiveTimerCard>>()
+                .iter(app.world())
+                .all(|node| node.display == Display::Flex)
+        );
+        assert!(
+            app.world_mut()
+                .query::<&Text>()
+                .iter(app.world())
+                .any(|text| text.0 == "00:12")
+        );
+        app.insert_resource(AlarmState::default());
+        app.update();
+        assert!(
+            app.world_mut()
+                .query_filtered::<&Node, With<ActiveTimerCard>>()
+                .iter(app.world())
+                .all(|node| node.display == Display::None)
+        );
+        assert!(
+            !app.world_mut()
+                .query::<(&AlarmSettingsAction, &BackgroundColor)>()
+                .iter(app.world())
+                .any(|(action, color)| matches!(
+                    action,
+                    AlarmSettingsAction::QuickPreset(AlarmMenuChoice::FiveMinutes)
+                ) && color.0 == BLUE)
+        );
+        assert_eq!(app.world().resource::<NeraSettings>().alarm_book, saved);
+    }
+
+    #[test]
+    fn rejected_preset_while_ringing_never_displays_a_false_started_confirmation() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<AlarmSettingsInputGate>()
+            .init_resource::<AlarmSettingsUiState>()
+            .init_resource::<AlarmSoundLibrary>()
+            .insert_resource(AlarmState::for_test(AlarmStatus::Ringing))
+            .init_resource::<AlarmDisplayInfo>()
+            .add_message::<NeraActionMenuCommand>()
+            .add_message::<PreviewAlarmSound>()
+            .add_systems(
+                Update,
+                (handle_alarm_settings_actions, sync_active_timer_ui).chain(),
+            );
+        app.world_mut().spawn((ActiveTimerCard, Node::default()));
+        let title = app
+            .world_mut()
+            .spawn((ActiveTimerText::Title, Text::default()))
+            .id();
+        app.world_mut().spawn((
+            Button,
+            Interaction::Pressed,
+            AlarmSettingsAction::QuickPreset(AlarmMenuChoice::FiveMinutes),
+            BackgroundColor(BLUE),
+        ));
+        app.update();
+        assert!(
+            app.world()
+                .resource::<AlarmSettingsUiState>()
+                .sound_status
+                .is_empty()
+        );
+        assert_eq!(app.world().get::<Text>(title).unwrap().0, "Alarm ringing");
+    }
 
     #[test]
     fn alarm_editor_open_allows_pet_drag_but_panel_hover_and_close_retain_ui_input() {

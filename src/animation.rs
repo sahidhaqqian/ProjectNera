@@ -711,6 +711,7 @@ mod tests {
 
     fn clips_with_all_micro_actions() -> NeraAnimationClips {
         NeraAnimationClips {
+            idle: Some(clip(3)),
             idle_look_around: Some(clip(3)),
             idle_relax: Some(clip(4)),
             idle_sleepy: Some(clip(5)),
@@ -1071,12 +1072,21 @@ mod tests {
             assert!(!action.label().is_empty());
         }
 
-        // The clip lookup must be a bijection over the candidate list, or the
-        // scheduler would silently play the wrong animation.
+        // Cover random fidgets and separately admitted context routines. Living
+        // stages deliberately share Idle playback with their reversible overlay.
         assert_eq!(
             IdleMicroAction::ALL.len(),
-            IdleMicroAction::STANDING.len() + IdleMicroAction::SITTING.len()
+            IdleMicroAction::STANDING.len()
+                + IdleMicroAction::SITTING.len()
+                + IdleMicroAction::LIVING.len()
         );
+        for action in IdleMicroAction::LIVING {
+            assert!(!IdleMicroAction::for_pose(BasePose::Idle).contains(&action));
+            assert_eq!(
+                clips.idle_micro(action).unwrap().entity,
+                clips.idle.unwrap().entity
+            );
+        }
     }
 
     #[test]

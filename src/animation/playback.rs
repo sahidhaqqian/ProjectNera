@@ -262,6 +262,11 @@ impl NeraAnimationClips {
             IdleMicroAction::Bored => self.idle_bored,
             IdleMicroAction::AngryGesture => self.idle_angry_gesture,
             IdleMicroAction::SittingRubbingArm => self.idle_sitting_rubbing_arm,
+            IdleMicroAction::CursorNotice
+            | IdleMicroAction::CursorReach
+            | IdleMicroAction::CursorCatch
+            | IdleMicroAction::CursorEscape
+            | IdleMicroAction::EdgePeek => self.idle,
         }
     }
 }
@@ -444,7 +449,12 @@ impl LazyNeraVrma {
             IdleMicroAction::AngryGesture => Some(Self::IdleAngryGesture),
             IdleMicroAction::LookAround
             | IdleMicroAction::Relax
-            | IdleMicroAction::SittingRubbingArm => None,
+            | IdleMicroAction::SittingRubbingArm
+            | IdleMicroAction::CursorNotice
+            | IdleMicroAction::CursorReach
+            | IdleMicroAction::CursorCatch
+            | IdleMicroAction::CursorEscape
+            | IdleMicroAction::EdgePeek => None,
         }
     }
 }

@@ -94,6 +94,100 @@ fn app_with_skin() -> (App, Entity, Entity, Entity) {
 }
 
 #[test]
+fn screensaver_leaves_rest_and_ride_cloud_before_snapshot_and_never_restores_a_stale_seat() {
+    use crate::{
+        animation::{SittingPose, VisualState},
+        cloud::{CloudMode, CloudRuntime},
+        desktop_physics::DesktopPhysicsState,
+        pet_feedback::{PetSfx, PetSfxKind},
+    };
+    for mode in [CloudMode::Rest, CloudMode::Ride] {
+        let (mut app, window, _, avatar) = app_with_skin();
+        let rect = app
+            .world()
+            .resource::<DesktopEnvironment>()
+            .nera_rect
+            .unwrap();
+        let original_window = WindowPosition::At(IVec2::new(rect.left, rect.top));
+        let visual = app.world_mut().spawn_empty().id();
+        app.insert_resource(CloudRuntime::for_test(mode, avatar, visual));
+        app.init_resource::<DesktopPhysicsState>();
+        app.world_mut()
+            .resource_mut::<DesktopEnvironment>()
+            .set_attached_anchor(AvatarAnchor::Seat);
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .enter_cloud_seat(SittingPose::Sitting4);
+        app.world_mut()
+            .write_message(PresentationCommand::EnterAttention(
+                AttentionKind::Screensaver,
+            ));
+        app.update();
+        assert!(app.world().resource::<PresentationState>().is_screensaver());
+        assert!(!app.world().resource::<CloudRuntime>().owns_placement());
+        let snapshot = app
+            .world()
+            .resource::<PresentationState>()
+            .snapshot
+            .as_ref()
+            .unwrap();
+        assert_eq!(snapshot.attached_anchor, AvatarAnchor::Feet);
+        assert!(matches!(snapshot.placement, PlacementState::Free));
+        let feedback: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<PetSfx>>()
+            .drain()
+            .collect();
+        assert!(
+            feedback
+                .iter()
+                .any(|sfx| sfx.0 == PetSfxKind::CloudDisappear)
+        );
+        assert_eq!(
+            feedback.iter().any(|sfx| sfx.0 == PetSfxKind::Wake),
+            mode == CloudMode::Rest
+        );
+        app.world_mut()
+            .write_message(PresentationCommand::ExitScreensaver);
+        app.update();
+        assert!(app.world().resource::<PresentationState>().is_desktop_pet());
+        assert!(!app.world().resource::<CloudRuntime>().owns_placement());
+        assert_eq!(
+            app.world().resource::<DesktopEnvironment>().attached_anchor,
+            AvatarAnchor::Feet
+        );
+        assert_eq!(
+            app.world().get::<Window>(window).unwrap().position,
+            original_window
+        );
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            VisualState::Idle
+        );
+    }
+}
+
+#[test]
+fn unavailable_screensaver_geometry_does_not_dismiss_cloud() {
+    use crate::{
+        cloud::{CloudMode, CloudRuntime},
+        desktop_physics::DesktopPhysicsState,
+    };
+    let (mut app, _, _, avatar) = app_with_skin();
+    let visual = app.world_mut().spawn_empty().id();
+    app.insert_resource(CloudRuntime::for_test(CloudMode::Rest, avatar, visual));
+    app.init_resource::<DesktopPhysicsState>();
+    app.world_mut().entity_mut(avatar).remove::<Initialized>();
+    app.world_mut()
+        .write_message(PresentationCommand::EnterAttention(
+            AttentionKind::Screensaver,
+        ));
+    app.update();
+    assert!(app.world().resource::<PresentationState>().is_desktop_pet());
+    assert!(app.world().resource::<CloudRuntime>().owns_placement());
+}
+
+#[test]
 fn screensaver_repeated_entry_exit_restores_exact_snapshot_without_scaling_avatar() {
     let (mut app, window, camera, avatar) = app_with_skin();
     let root = *app.world().get::<Transform>(avatar).unwrap();

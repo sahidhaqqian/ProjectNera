@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 
 const RESUME_DELAY: f32 = 6.0;
 mod dance;
+pub(crate) mod living;
 
 #[derive(SystemParam)]
 pub(crate) struct DanceContext<'w, 's> {
@@ -50,6 +51,7 @@ struct HomeAnchor {
 #[derive(Resource)]
 pub(crate) struct PetBehavior {
     dance: dance::AutoDance,
+    living: living::LivingBehavior,
     home: Option<HomeAnchor>,
     history: VecDeque<Behavior>,
     decision_in: f32,
@@ -67,6 +69,7 @@ impl Default for PetBehavior {
     fn default() -> Self {
         Self {
             dance: Default::default(),
+            living: Default::default(),
             home: None,
             history: VecDeque::with_capacity(3),
             decision_in: RESUME_DELAY,
@@ -85,6 +88,15 @@ impl Default for PetBehavior {
 impl PetBehavior {
     pub(crate) fn reset_auto_dance(&mut self) {
         self.dance.reset();
+    }
+    pub(crate) fn cursor_pose(&self) -> Option<living::CursorPose> {
+        self.living.cursor_pose()
+    }
+    pub(crate) fn living_gaze(&self) -> Option<Vec2> {
+        self.living.gaze()
+    }
+    pub(crate) fn living_blocks_position_save(&self) -> bool {
+        self.living.blocks_position_save()
     }
     fn observe_surface(
         &mut self,
@@ -130,6 +142,7 @@ impl PetBehavior {
         self.rng.range_f32(min, max)
     }
     fn interrupt(&mut self, walking: &mut WalkingRuntime, animation: &mut NeraAnimationState) {
+        self.living.interrupt(animation);
         walking.cancel(animation);
         animation.cancel_idle_variation();
         self.edge_return = false;
@@ -298,9 +311,9 @@ pub(crate) fn update_pet_behavior(
     real_time: Res<Time<Real>>,
     context: BehaviorContext,
     clips: Res<NeraAnimationClips>,
-    physics: Res<DesktopPhysicsState>,
+    mut physics: ResMut<DesktopPhysicsState>,
     mut released: MessageReader<NeraReleased>,
-    environment: Res<DesktopEnvironment>,
+    mut environment: ResMut<DesktopEnvironment>,
     mut animation: ResMut<NeraAnimationState>,
     mut walking: ResMut<WalkingRuntime>,
     mut brain: ResMut<PetBehavior>,
@@ -308,9 +321,17 @@ pub(crate) fn update_pet_behavior(
     asset_server: Res<AssetServer>,
     lazy_loaders: Query<(Entity, &LazyNeraVrma, Option<&LazyNeraVrmaRequested>)>,
     mut dance_context: DanceContext,
+    mut living_context: living::LivingContext,
 ) {
     let dt = time.delta_secs().min(0.05);
     let settings = &context.settings;
+    brain.living.recover(
+        &context,
+        &mut physics,
+        &mut environment,
+        &mut walking,
+        &mut animation,
+    );
     if released.read().any(|r| r.was_dragging)
         || context.interaction.state == InteractionState::Dragging
     {
@@ -376,6 +397,7 @@ pub(crate) fn update_pet_behavior(
         &mut dance_context.library,
         &mut brain_ref.rng,
     ) {
+        brain.living.interrupt(&mut animation);
         walking.cancel(&mut animation);
         return;
     }
@@ -384,6 +406,10 @@ pub(crate) fn update_pet_behavior(
         || environment.hidden_for_target_suspend
         || real_time.delta_secs() >= 0.5
         || (settings.pause_roaming_fullscreen && brain.fullscreen)
+        || dance_context
+            .loading
+            .as_ref()
+            .is_some_and(|status| status.loading)
     {
         brain.interrupt(&mut walking, &mut animation);
         return;
@@ -415,6 +441,23 @@ pub(crate) fn update_pet_behavior(
         return;
     }
     let surface = physics.walking_surface(&environment);
+    if brain.living.tick(
+        dt,
+        settings,
+        &clips,
+        &mut living_context,
+        &mut physics,
+        &mut environment,
+        &mut walking,
+        &mut animation,
+    ) {
+        if let (Some(home), Some(rect), Some(surface)) =
+            (&mut brain.home, environment.nera_rect, surface)
+        {
+            home.expected_x = rect.left.saturating_sub(surface.origin_x);
+        }
+        return;
+    }
     let scale = environment.nera_scale_factor.clamp(0.5, 4.0) as f32 * settings.character_scale();
     if let (Some(surface), Some(rect), Some(monitor)) = (surface, environment.nera_rect, monitor) {
         if brain.observe_surface(surface, rect, monitor, scale, &walking) {
@@ -499,6 +542,7 @@ pub(crate) fn update_pet_behavior(
                             speed,
                             scale,
                             return_trip: brain.edge_return,
+                            edge_peek: false,
                         },
                         x,
                         turn,
@@ -574,6 +618,9 @@ mod tests {
             bevy::asset::AssetPlugin::default(),
         ));
         app.init_resource::<Time>()
+            .init_resource::<living::LivingPointer>()
+            .add_message::<crate::pet_feedback::PetFx>()
+            .add_message::<crate::pet_feedback::PetSfx>()
             .init_resource::<Time<Real>>()
             .init_resource::<NeraSettings>()
             .init_resource::<DesktopPetInteraction>()
@@ -693,6 +740,7 @@ mod tests {
                 speed: 90.0,
                 scale: 1.0,
                 return_trip: false,
+                edge_peek: false,
             },
             100,
             0.3,

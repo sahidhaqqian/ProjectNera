@@ -18,6 +18,7 @@ pub(crate) struct WalkIntent {
     pub speed: f32,
     pub scale: f32,
     pub return_trip: bool,
+    pub edge_peek: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,9 +162,14 @@ pub(crate) fn update_walking(
     mut runtime: ResMut<WalkingRuntime>,
 ) {
     let Some(intent) = runtime.intent else { return };
-    let (Some(surface), Some(rect)) =
-        (physics.walking_surface(&environment), environment.nera_rect)
-    else {
+    let (Some(surface), Some(rect)) = (
+        (if intent.edge_peek {
+            physics.peek_surface(&environment)
+        } else {
+            physics.walking_surface(&environment)
+        }),
+        environment.nera_rect,
+    ) else {
         runtime.cancel(&mut animation);
         return;
     };
@@ -195,7 +201,11 @@ pub(crate) fn update_walking(
         return;
     }
     let next_x = runtime.next_step(local_x, intent.target_x, intent.speed, intent.scale, dt);
-    if !physics.walk_horizontal(surface.origin_x.saturating_add(next_x), &mut environment) {
+    if !physics.walk_horizontal_for(
+        surface.origin_x.saturating_add(next_x),
+        &mut environment,
+        intent.edge_peek,
+    ) {
         runtime.cancel(&mut animation);
         return;
     }
@@ -226,6 +236,7 @@ mod tests {
             speed: 90.0,
             scale: 1.0,
             return_trip: false,
+            edge_peek: false,
         }
     }
     #[test]

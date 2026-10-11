@@ -235,7 +235,37 @@ impl DesktopPhysicsState {
         left: i32,
         environment: &mut DesktopEnvironment,
     ) -> bool {
-        let Some(surface) = self.walking_surface(environment) else {
+        self.walk_horizontal_for(left, environment, false)
+    }
+
+    /// Clip the canvas only on monitor-floor support, retaining its foot contact.
+    pub(crate) fn peek_surface(&self, environment: &DesktopEnvironment) -> Option<WalkingSurface> {
+        let mut surface = self.walking_surface(environment)?;
+        if !matches!(surface.key, WalkingSurfaceKey::Monitor(_)) {
+            return None;
+        }
+        let rect = environment.nera_rect?;
+        let monitor = environment.monitor?;
+        surface.bounds = peek_bounds(
+            monitor.work_area,
+            rect.width(),
+            self.support_anchor_logical?.x,
+            environment.nera_scale_factor,
+        )?;
+        Some(surface)
+    }
+
+    pub(crate) fn walk_horizontal_for(
+        &mut self,
+        left: i32,
+        environment: &mut DesktopEnvironment,
+        peek: bool,
+    ) -> bool {
+        let Some(surface) = (if peek {
+            self.peek_surface(environment)
+        } else {
+            self.walking_surface(environment)
+        }) else {
             return false;
         };
         let (Some(hwnd), Some(rect)) = (environment.nera_hwnd, environment.nera_rect) else {
@@ -681,6 +711,26 @@ fn move_nera(hwnd: NativeWindowHandle, x: i32, y: i32, environment: &mut Desktop
     }
 }
 
+fn peek_bounds(work: PhysicalRect, width: i32, feet_x: f32, scale: f64) -> Option<(i32, i32)> {
+    if width <= 0
+        || work.width() <= width
+        || !feet_x.is_finite()
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return None;
+    }
+    let foot = (feet_x * scale as f32).round() as i32;
+    // Asymmetric rigs keep ordinary roaming rather than leaving a tiny hit area.
+    if foot < width * 45 / 100 || foot > width * 55 / 100 {
+        return None;
+    }
+    let margin = (12.0 * scale).round().max(1.0) as i32;
+    let min = work.left.saturating_add(margin).saturating_sub(foot);
+    let max = work.right.saturating_sub(margin + 1).saturating_sub(foot);
+    (min < max).then_some((min, max))
+}
+
 fn startup_drop_origin(
     rect: PhysicalRect,
     work: PhysicalRect,
@@ -707,6 +757,26 @@ fn startup_drop_origin(
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+    #[test]
+    fn peek_keeps_contact_and_a_usable_canvas_on_negative_monitor_and_dpi() {
+        let work = PhysicalRect {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        for (width, scale) in [(600, 1.0), (750, 1.25)] {
+            let (left, right) = peek_bounds(work, width, 300.0, scale).unwrap();
+            let foot = (300.0 * scale) as i32;
+            assert!(left + foot > work.left);
+            assert!(right + foot < work.right);
+            assert!(left + width - work.left >= width * 45 / 100);
+            assert!(work.right - right >= width * 45 / 100);
+        }
+        assert!(peek_bounds(work, 600, 60.0, 1.0).is_none());
+        assert!(peek_bounds(work, 600, f32::NAN, 1.0).is_none());
+        assert!(peek_bounds(work, 2400, 1200.0, 1.0).is_none());
+    }
 
     #[test]
     fn throw_preferences_scale_launch_once_and_preserve_gravity() {

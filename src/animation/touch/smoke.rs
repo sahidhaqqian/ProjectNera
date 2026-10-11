@@ -469,7 +469,8 @@ fn begin_walk(world: &mut World) {
                             bounds,
                             speed: 45.0,
                             scale: 1.0,
-                            return_trip: false
+                            return_trip: false,
+                            edge_peek: false,
                         },
                         current,
                         0.2,

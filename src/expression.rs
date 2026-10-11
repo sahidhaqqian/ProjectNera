@@ -197,6 +197,9 @@ fn expression_for_idle_micro(action: IdleMicroAction) -> NeraExpression {
         // `nera_256.vrm` declares no blush preset, so the shy clip gets the
         // nearest available emotion instead of an override that would fight it.
         Fidget::Blush => Face::Happy,
+        Fidget::CursorNotice => Face::Surprised,
+        Fidget::CursorReach | Fidget::CursorCatch | Fidget::EdgePeek => Face::Happy,
+        Fidget::CursorEscape => Face::Relaxed,
     }
 }
 

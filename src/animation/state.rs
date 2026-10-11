@@ -65,12 +65,17 @@ pub(crate) enum IdleMicroAction {
     Bored,
     AngryGesture,
     SittingRubbingArm,
+    CursorNotice,
+    CursorReach,
+    CursorCatch,
+    CursorEscape,
+    EdgePeek,
 }
 
 impl IdleMicroAction {
     /// Complete vocabulary for capability/pose coverage in tests.
     #[cfg(test)]
-    pub(crate) const ALL: [IdleMicroAction; 8] = [
+    pub(crate) const ALL: [IdleMicroAction; 13] = [
         IdleMicroAction::LookAround,
         IdleMicroAction::Relax,
         IdleMicroAction::Sleepy,
@@ -79,6 +84,11 @@ impl IdleMicroAction {
         IdleMicroAction::Bored,
         IdleMicroAction::AngryGesture,
         IdleMicroAction::SittingRubbingArm,
+        Self::CursorNotice,
+        Self::CursorReach,
+        Self::CursorCatch,
+        Self::CursorEscape,
+        Self::EdgePeek,
     ];
 
     pub(crate) const STANDING: [Self; 7] = [
@@ -91,6 +101,14 @@ impl IdleMicroAction {
         Self::AngryGesture,
     ];
     pub(crate) const SITTING: [Self; 1] = [Self::SittingRubbingArm];
+    /// Context-driven routines are never random idle-fidget candidates.
+    pub(crate) const LIVING: [Self; 5] = [
+        Self::CursorNotice,
+        Self::CursorReach,
+        Self::CursorCatch,
+        Self::CursorEscape,
+        Self::EdgePeek,
+    ];
 
     pub(crate) fn for_pose(pose: BasePose) -> &'static [Self] {
         match pose {
@@ -116,6 +134,11 @@ impl IdleMicroAction {
             IdleMicroAction::Bored => "Idle/Bored",
             IdleMicroAction::AngryGesture => "Idle/AngryGesture",
             IdleMicroAction::SittingRubbingArm => "Sitting/RubbingArm",
+            Self::CursorNotice => "Living/CursorNotice",
+            Self::CursorReach => "Living/CursorReach",
+            Self::CursorCatch => "Living/CursorCatch",
+            Self::CursorEscape => "Living/CursorEscape",
+            Self::EdgePeek => "Living/EdgePeek",
         }
     }
 }

@@ -15,7 +15,6 @@ use crate::{
     animation::{NeraAnimationState, spawn_animation_library},
     character::ActiveCharacter,
     environment::DesktopEnvironment,
-    interaction::cursor_position_in_nera_window,
     settings::NeraSettings,
 };
 use bevy::{prelude::*, window::PrimaryWindow};
@@ -118,6 +117,8 @@ pub(crate) fn update_look_at_target(
     cloud: Res<crate::cloud::CloudRuntime>,
     presentation: Res<crate::presentation::PresentationState>,
     environment: Res<DesktopEnvironment>,
+    pointer: Res<crate::pet_behavior::living::LivingPointer>,
+    brain: Res<crate::pet_behavior::PetBehavior>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
     cameras: Query<&GlobalTransform, With<NeraMainCamera>>,
@@ -157,7 +158,15 @@ pub(crate) fn update_look_at_target(
         && !presentation.is_screensaver()
         && cloud.mode() != Some(crate::cloud::CloudMode::Rest)
     {
-        cursor_position_in_nera_window(&environment)
+        brain
+            .living_gaze()
+            .or(pointer.point)
+            .and_then(|point| {
+                environment.nera_rect.map(|rect| {
+                    (point - Vec2::new(rect.left as f32, rect.top as f32))
+                        / environment.nera_scale_factor.max(0.25) as f32
+                })
+            })
             .map(|cursor_pos| {
                 let intensity = f32::from(settings.follow_intensity.clamp(25, 100)) / 100.0;
 

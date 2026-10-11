@@ -247,6 +247,7 @@ fn begin_walk(world: &mut World) {
                         speed: 50.0,
                         scale: 1.0,
                         return_trip: false,
+                        edge_peek: false,
                     },
                     current,
                     0.2,

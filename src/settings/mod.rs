@@ -83,7 +83,7 @@ impl Plugin for NeraSettingsPlugin {
                         update_throw_settings_labels,
                     ),
                     update_audio_settings_labels,
-                    update_roaming_settings_labels,
+                    (update_roaming_settings_labels, update_living_labels).chain(),
                     apply_always_on_top,
                     apply_character_size.before(crate::startup_entrance::prepare_startup_entrance),
                     apply_audio_settings,

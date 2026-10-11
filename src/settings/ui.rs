@@ -132,6 +132,9 @@ pub(super) struct WalkingEnabledValue;
 pub(super) struct WalkingCheckmark;
 
 #[derive(Component)]
+pub(super) struct LivingValue(bool);
+
+#[derive(Component)]
 pub(super) struct ActivityLevelValue;
 
 #[derive(Component)]
@@ -223,6 +226,8 @@ pub(super) enum SettingsButtonAction {
     CycleCharacterSize,
     CycleGroundOffset,
     ToggleWalking,
+    ToggleCursorPlay,
+    ToggleEdgePeek,
     ToggleGravity,
     ToggleThrow,
     OpenCharacterManager,
@@ -472,6 +477,9 @@ fn spawn_settings_ui(
                             checkbox_row(card, "Throw Physics", if settings.throw_enabled { "ON" } else { "OFF" }, settings.throw_enabled, SettingsButtonAction::ToggleThrow, (ThrowValue, ThrowCheckmark));
                             settings_slider(card, "Throw Intensity", settings.throw_intensity_label(), f32::from(settings.throw_intensity.min(100)) / 100.0, (ThrowIntensityValue, ThrowIntensityTrack, ThrowIntensityThumb));
                             walking_checkbox(card, settings.walking_enabled);
+                            settings_row(card, "Cursor Play", if settings.cursor_play { "ON" } else { "OFF" }.into(), LivingValue(true), SettingsButtonAction::ToggleCursorPlay);
+                            settings_row(card, "Edge Peek / Hide", if settings.edge_peek { "ON" } else { "OFF" }.into(), LivingValue(false), SettingsButtonAction::ToggleEdgePeek);
+                            card.spawn((Text::new("Cursor Play follows nearby mouse movement · Edge Peek requires Allow Roaming"), TextFont { font_size: FontSize::Px(11.0), ..default() }, TextColor(Color::srgb(0.45, 0.5, 0.64))));
                             settings_row(
                                 card,
                                 "Activity",
@@ -1177,6 +1185,8 @@ fn button_color(action: SettingsButtonAction, interaction: Interaction) -> Color
         | SettingsButtonAction::CycleCharacterSize
         | SettingsButtonAction::CycleGroundOffset
         | SettingsButtonAction::ToggleWalking
+        | SettingsButtonAction::ToggleCursorPlay
+        | SettingsButtonAction::ToggleEdgePeek
         | SettingsButtonAction::ToggleGravity
         | SettingsButtonAction::ToggleThrow
         | SettingsButtonAction::OpenCharacterManager
@@ -1313,6 +1323,14 @@ pub(super) fn handle_settings_buttons(
                         "OFF"
                     }
                 );
+            }
+            SettingsButtonAction::ToggleCursorPlay => {
+                settings.cursor_play = !settings.cursor_play;
+                save_settings_deferred(&mut commands);
+            }
+            SettingsButtonAction::ToggleEdgePeek => {
+                settings.edge_peek = !settings.edge_peek;
+                save_settings_deferred(&mut commands);
             }
             SettingsButtonAction::CycleActivityLevel => {
                 settings.cycle_activity_level();
@@ -1766,6 +1784,24 @@ pub(super) fn scroll_settings_window(
         };
 
         scroll_position.0.y = (scroll_position.0.y - delta_y).clamp(0.0, max_y);
+    }
+}
+
+pub(super) fn update_living_labels(
+    settings: Res<NeraSettings>,
+    mut labels: Query<(&LivingValue, &mut Text)>,
+) {
+    for (kind, mut text) in &mut labels {
+        text.0 = if if kind.0 {
+            settings.cursor_play
+        } else {
+            settings.edge_peek
+        } {
+            "ON"
+        } else {
+            "OFF"
+        }
+        .into();
     }
 }
 

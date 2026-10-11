@@ -139,8 +139,12 @@ fn main() {
     // Scripted harnesses inject semantic/window events; never capture the
     // user's physical pointer while they work in another application.
     let scripted_pointer = feature_smoke
-        && std::env::args()
-            .any(|arg| matches!(arg.as_str(), "--touch-smoke" | "--presentation-smoke"));
+        && std::env::args().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--touch-smoke" | "--presentation-smoke" | "--alarm-timer-smoke" | "--living-smoke"
+            )
+        });
     #[cfg(not(debug_assertions))]
     let scripted_pointer = false;
 
@@ -248,6 +252,7 @@ fn main() {
         .init_resource::<desktop_physics::DesktopPhysicsState>()
         .init_resource::<walking::WalkingRuntime>()
         .init_resource::<pet_behavior::PetBehavior>()
+        .add_plugins(pet_behavior::living::LivingPlugin)
         .insert_resource(dance_pool::DancePool::load(&dance_pool::DancePool::file()))
         .init_resource::<startup_entrance::StartupEntrance>()
         .init_resource::<AvatarVisualGrounding>()
@@ -258,6 +263,7 @@ fn main() {
             (
                 mark_nera_live_bones,
                 attach_bone_colliders,
+                pet_behavior::living::sample_pointer,
                 update_look_at_target,
                 // Utility hover owns new gestures. A captured pet drag keeps
                 // its release; mouse-down provenance stays PrimaryWindow-only.

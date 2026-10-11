@@ -319,6 +319,7 @@ fn commit_character(
     converted: bool,
     migrated_from_vrm0: bool,
 ) {
+    crate::pet_behavior::living::clear_for_character_change(world);
     crate::cloud::clear_for_character_change(world);
     crate::pet_feedback::clear_for_character_change(world);
     let old: Vec<_> = world

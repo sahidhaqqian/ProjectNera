@@ -247,6 +247,7 @@ pub(super) fn record_primary_window_position(
     environment: Option<Res<crate::environment::DesktopEnvironment>>,
     physics: Option<Res<crate::desktop_physics::DesktopPhysicsState>>,
     presentation: Option<Res<crate::presentation::PresentationState>>,
+    brain: Option<Res<crate::pet_behavior::PetBehavior>>,
 ) {
     let Ok(primary_entity) = primary.single() else {
         moved.clear();
@@ -261,6 +262,10 @@ pub(super) fn record_primary_window_position(
         .filter(|event| event.window == primary_entity)
         .map(|event| event.position)
         .last();
+    // A partly hidden edge position is temporary; keep the previous saved home.
+    if brain.is_some_and(|brain| brain.living_blocks_position_save()) {
+        return;
+    }
     let entrance_blocks_save = entrance
         .as_ref()
         .is_some_and(|entrance| entrance.blocks_position_save());
@@ -546,6 +551,8 @@ mod tests {
             body_mode: "normal".to_string(),
             ground_offset: 0,
             walking_enabled: false,
+            cursor_play: false,
+            edge_peek: false,
             gravity_enabled: true,
             throw_enabled: true,
             throw_intensity: 50,

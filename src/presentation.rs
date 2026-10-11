@@ -31,6 +31,7 @@ pub(crate) use smoke::install as install_smoke;
 
 use bevy::{
     camera::ScalingMode,
+    ecs::system::SystemParam,
     prelude::*,
     window::{CursorOptions, PrimaryWindow, WindowLevel, WindowPosition},
 };
@@ -197,8 +198,13 @@ impl Plugin for PresentationPlugin {
         // The isolated visual harness must not dismiss itself while the user
         // works in other apps. The input harness invokes the same click observer
         // with scripted window events instead of controlling the user's input.
-        let observe_input =
-            !cfg!(debug_assertions) || !std::env::args().any(|arg| arg == "--presentation-smoke");
+        let observe_input = !cfg!(debug_assertions)
+            || !std::env::args().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--presentation-smoke" | "--alarm-timer-smoke" | "--living-smoke"
+                )
+            });
         app.init_resource::<PresentationState>()
             .add_message::<PresentationCommand>()
             .add_message::<PresentationEntered>()
@@ -289,6 +295,14 @@ type PortraitAvatars<'w, 's> = Query<
     ),
 >;
 
+#[derive(SystemParam)]
+struct PresentationCloudExit<'w> {
+    cloud: Option<ResMut<'w, crate::cloud::CloudRuntime>>,
+    physics: Option<ResMut<'w, crate::desktop_physics::DesktopPhysicsState>>,
+    sfx: MessageWriter<'w, crate::pet_feedback::PetSfx>,
+    fx: MessageWriter<'w, crate::pet_feedback::PetFx>,
+}
+
 fn handle_presentation_commands(
     mut requests: MessageReader<PresentationCommand>,
     mut entered: MessageWriter<PresentationEntered>,
@@ -305,7 +319,7 @@ fn handle_presentation_commands(
     avatar_query: PortraitAvatars,
     body_proportions: Option<Res<crate::avatar::body_mode::BodyProportions>>,
     full_body: full_body::FullBodyGeometry,
-    cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    mut cloud_exit: PresentationCloudExit,
 ) {
     for request in requests.read() {
         match *request {
@@ -317,14 +331,6 @@ fn handle_presentation_commands(
                     continue;
                 }
 
-                if kind == AttentionKind::Screensaver
-                    && cloud.as_ref().is_some_and(|cloud| cloud.owns_placement())
-                {
-                    warn!(
-                        "Screensaver entry skipped while Cloud owns placement; dismiss Cloud first"
-                    );
-                    continue;
-                }
                 let Ok((mut window, mut cursor)) = window_query.single_mut() else {
                     warn!("Presentation: primary Nera window unavailable");
                     continue;
@@ -372,6 +378,28 @@ fn handle_presentation_commands(
                 } else {
                     None
                 };
+                // Validate the portrait first, then let Cloud release its own
+                // placement/pose before taking the desktop restore snapshot.
+                // Screensaver exits to a free pet, never a stale Cloud seat.
+                if kind == AttentionKind::Screensaver
+                    && cloud_exit
+                        .cloud
+                        .as_ref()
+                        .is_some_and(|cloud| cloud.owns_placement())
+                {
+                    let Some(physics) = cloud_exit.physics.as_mut() else {
+                        warn!("Screensaver entry deferred: Cloud physics unavailable");
+                        continue;
+                    };
+                    crate::cloud::dismiss_cloud(
+                        cloud_exit.cloud.as_mut().unwrap(),
+                        &mut environment,
+                        physics,
+                        &mut animation,
+                        &mut cloud_exit.sfx,
+                        &mut cloud_exit.fx,
+                    );
+                }
                 if !preempting {
                     state.snapshot = Some(PresentationSnapshot {
                         window_left: rect.left,
@@ -1271,6 +1299,8 @@ mod tests {
             .add_message::<PresentationCommand>()
             .add_message::<PresentationEntered>()
             .add_message::<PresentationExited>()
+            .add_message::<crate::pet_feedback::PetSfx>()
+            .add_message::<crate::pet_feedback::PetFx>()
             .add_systems(Update, handle_presentation_commands)
             .add_systems(Last, maintain_attention_presentation);
         let rect = crate::platform::PhysicalRect {

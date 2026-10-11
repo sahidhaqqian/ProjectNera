@@ -77,6 +77,13 @@ pub(crate) struct CloudRuntime {
 }
 
 impl CloudRuntime {
+    #[cfg(test)]
+    pub(crate) fn for_test(mode: CloudMode, avatar: Entity, visual: Entity) -> Self {
+        let mut cloud = Self::default();
+        cloud.summon(mode, avatar, visual, Vec2::new(300.0, 400.0));
+        cloud
+    }
+
     fn attachment(&self) -> Option<CloudAttachment> {
         match self.state {
             CloudState::Appearing { attachment, .. } | CloudState::Attached(attachment) => {
