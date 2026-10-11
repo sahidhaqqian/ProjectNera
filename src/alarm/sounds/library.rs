@@ -32,7 +32,7 @@ struct Catalog {
 }
 
 fn first_import_id() -> u16 {
-    SOUNDS.len() as u16
+    5
 }
 
 struct CachedSound {
@@ -74,7 +74,7 @@ impl AlarmSoundLibrary {
             .unwrap_or_default();
         catalog.entries.retain(|entry| {
             entry.id >= first_import_id()
-                && entry.id < super::STOP_PREVIEW
+                && entry.id < super::FIRST_EXTRA_BUNDLED_SOUND_ID
                 && owned_filename(&entry.filename, &entry.fingerprint)
         });
         catalog.entries.truncate(MAX_IMPORTS);
@@ -104,8 +104,8 @@ impl AlarmSoundLibrary {
         if id == RANDOM_SOUND {
             return "Random";
         }
-        if let Some((name, _)) = SOUNDS.get(id as usize) {
-            return name;
+        if let Some(index) = super::bundled_index(id) {
+            return SOUNDS[index].0;
         }
         self.catalog
             .entries
@@ -115,7 +115,8 @@ impl AlarmSoundLibrary {
     }
 
     pub(crate) fn next(&self, id: u16) -> u16 {
-        let choices: Vec<_> = (0..SOUNDS.len() as u16)
+        let choices: Vec<_> = super::BUNDLED_SOUND_IDS
+            .into_iter()
             .chain(self.catalog.entries.iter().map(|entry| entry.id))
             .chain(Some(RANDOM_SOUND))
             .collect();
@@ -156,7 +157,8 @@ impl AlarmSoundLibrary {
             self.cache.retain(|cached| cached.id != entry.id);
             return Ok((entry.id, true));
         }
-        if self.catalog.entries.len() >= MAX_IMPORTS || self.catalog.next_id >= super::STOP_PREVIEW
+        if self.catalog.entries.len() >= MAX_IMPORTS
+            || self.catalog.next_id >= super::FIRST_EXTRA_BUNDLED_SOUND_ID
         {
             return Err("Alarm sound library is full (32 imported sounds).".into());
         }
@@ -250,24 +252,27 @@ impl AlarmSoundLibrary {
     pub(crate) fn resolve(
         &mut self,
         selection: u16,
-        bundled: &[Handle<AudioSource>; 5],
+        bundled: &[Handle<AudioSource>; SOUNDS.len()],
         audio: &mut Assets<AudioSource>,
     ) -> Handle<AudioSource> {
         if selection != RANDOM_SOUND {
-            return bundled
-                .get(selection as usize)
+            return super::bundled_index(selection)
+                .and_then(|index| bundled.get(index))
                 .cloned()
                 .or_else(|| self.imported_handle(selection, audio))
                 .unwrap_or_else(|| bundled[DEFAULT_SOUND as usize].clone());
         }
-        let mut choices: Vec<_> = (0..SOUNDS.len() as u16)
-            .filter(|id| audio.contains(&bundled[*id as usize]))
+        let mut choices: Vec<_> = super::BUNDLED_SOUND_IDS
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| audio.contains(&bundled[*index]))
+            .map(|(_, id)| id)
             .chain(self.catalog.entries.iter().map(|entry| entry.id))
             .collect();
         while let Some(index) = self.rng.pick_index(choices.len()) {
             let id = choices.swap_remove(index);
-            if let Some(handle) = bundled
-                .get(id as usize)
+            if let Some(handle) = super::bundled_index(id)
+                .and_then(|index| bundled.get(index))
                 .cloned()
                 .or_else(|| self.imported_handle(id, audio))
             {
@@ -434,7 +439,7 @@ mod tests {
         }
         fn source(&self, name: &str) -> PathBuf {
             let path = self.0.join(name);
-            fs::copy(crate::nera_asset_file("sound/digital.wav"), &path).unwrap();
+            fs::copy(crate::nera_asset_file("sound/clock_beeps.wav"), &path).unwrap();
             path
         }
     }
@@ -442,6 +447,56 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn added_bundled_choices_preserve_imported_id_five_and_resolve_their_own_assets() {
+        let dir = TestDirectory::new();
+        let catalog_dir = dir.0.join("library");
+        let mut library = AlarmSoundLibrary::load(catalog_dir.clone());
+        let (import_id, _) = library.import(&dir.source("My alarm.wav")).unwrap();
+        assert_eq!(import_id, 5, "existing imported IDs must remain unchanged");
+        let mut library = AlarmSoundLibrary::load(catalog_dir);
+        assert_eq!(library.name(import_id), "My alarm");
+        assert_eq!(library.entries()[0].id, import_id);
+        let mut audio = Assets::<AudioSource>::default();
+        let bundled = std::array::from_fn(|_| {
+            audio.add(AudioSource {
+                bytes: vec![0].into(),
+            })
+        });
+        let imported = library.resolve(import_id, &bundled, &mut audio);
+        assert!(bundled.iter().all(|sound| sound.id() != imported.id()));
+        for (index, id) in super::super::BUNDLED_SOUND_IDS.into_iter().enumerate() {
+            assert_eq!(library.name(id), SOUNDS[index].0);
+            assert_eq!(
+                library.resolve(id, &bundled, &mut audio).id(),
+                bundled[index].id()
+            );
+            assert!(!library.remove(id).unwrap(), "built-ins must be protected");
+        }
+        let choices: Vec<_> = super::super::BUNDLED_SOUND_IDS
+            .into_iter()
+            .chain([import_id, RANDOM_SOUND])
+            .collect();
+        for (index, id) in choices.iter().copied().enumerate() {
+            assert_eq!(library.next(id), choices[(index + 1) % choices.len()]);
+        }
+        library.rng = crate::rng::NeraRng::seeded(1234);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..128 {
+            let handle = library.resolve(RANDOM_SOUND, &bundled, &mut audio);
+            assert!(
+                handle.id() == imported.id()
+                    || bundled.iter().any(|sound| sound.id() == handle.id())
+            );
+            seen.insert(handle.id());
+        }
+        assert_eq!(
+            seen.len(),
+            SOUNDS.len() + 1,
+            "Random includes all built-ins and imports"
+        );
     }
 
     #[test]
@@ -477,7 +532,11 @@ mod tests {
             })
         });
         let mut selected = Vec::new();
-        for path in ["sound/alarm.mp3", "sound/chime.ogg", "sound/digital.wav"] {
+        for path in [
+            "sound/alarm.mp3",
+            "sound/chime.ogg",
+            "sound/clock_beeps.wav",
+        ] {
             let (id, _) = library.import(&crate::nera_asset_file(path)).unwrap();
             let handle = library.resolve(id, &bundled, &mut audio);
             assert_ne!(handle.id(), bundled[0].id());
@@ -519,17 +578,17 @@ mod tests {
 
     #[test]
     fn invalid_wav_metadata_and_truncated_audio_are_rejected_before_decoder_assertions() {
-        let mut bytes = fs::read(crate::nera_asset_file("sound/digital.wav")).unwrap();
+        let mut bytes = fs::read(crate::nera_asset_file("sound/clock_beeps.wav")).unwrap();
         let fmt = bytes
             .windows(4)
             .position(|window| window == b"fmt ")
             .unwrap();
         bytes[fmt + 12..fmt + 16].fill(0);
         assert!(validate_audio(&bytes).is_err());
-        let mut bytes = fs::read(crate::nera_asset_file("sound/digital.wav")).unwrap();
+        let mut bytes = fs::read(crate::nera_asset_file("sound/clock_beeps.wav")).unwrap();
         bytes[fmt + 10..fmt + 12].fill(0);
         assert!(validate_audio(&bytes).is_err());
-        let mut bytes = fs::read(crate::nera_asset_file("sound/digital.wav")).unwrap();
+        let mut bytes = fs::read(crate::nera_asset_file("sound/clock_beeps.wav")).unwrap();
         bytes.truncate(bytes.len() / 2);
         assert!(validate_audio(&bytes).is_err());
     }
