@@ -609,7 +609,7 @@ PetSfx(PetSfxKind::...)
 PetFx { kind, anchor }
 ```
 
-`pet_feedback/sfx.rs` reuses Bevy Audio, master volume/mute, bounded concurrent cues, and safe missing-file behavior.
+`pet_feedback/sfx.rs` reuses Bevy Audio, master volume/mute, bounded concurrent cues, and safe missing-file behavior. Bundled CC0 cues and their provenance live in `assets/sound/pet/`. Cue gain is stored in `PlaybackSettings` and retained when Settings updates active audio sinks. Greeting is emitted once on entry to startup/screensaver waving; screensaver admits only greeting and headpat cues.
 
 `pet_feedback/particles.rs` owns shared meshes/materials, bounded particle count, short lifetimes, and anchors such as head/desktop point.
 
@@ -758,6 +758,11 @@ The active timer card and selected preset read `AlarmState` after runtime proces
 ### Alarm sounds
 
 `alarm/sounds/library.rs` owns imported alarm-sound storage/catalog, validation, stable IDs, duplicate identity, deletion cleanup, safe missing-file fallback, and Random/default/custom selection compatibility.
+
+Built-in sound IDs are explicitly mapped to asset slots. The original IDs 0–4
+remain stable; additional built-ins occupy the reserved IDs immediately below
+STOP_PREVIEW/Random. Imported IDs still start at 5 and do not change when the
+built-in choices grow.
 
 Editor preview audio is editor-owned. Closing Alarm Settings stops preview only; it must not stop a real ringing alarm.
 

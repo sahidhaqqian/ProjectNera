@@ -845,7 +845,8 @@ fn spawn_sound_library_ui(
                 ScrollPosition::default(),
             ))
             .with_children(|list| {
-                let sounds = (0..crate::alarm::sounds::SOUNDS.len() as u16)
+                let sounds = crate::alarm::sounds::BUNDLED_SOUND_IDS
+                    .into_iter()
                     .chain(Some(crate::alarm::sounds::RANDOM_SOUND))
                     .chain(library.entries().iter().map(|entry| entry.id));
                 for id in sounds {
@@ -1861,7 +1862,9 @@ pub(crate) fn smoke_action(world: &mut World, action: &str) {
 fn mutate_draft(draft: &mut AlarmConfig, action: AlarmSettingsAction) {
     match action {
         AlarmSettingsAction::DraftCycleSound => {
-            draft.sound = (draft.sound + 1) % crate::alarm::sounds::SOUNDS.len() as u16;
+            let next = crate::alarm::sounds::bundled_index(draft.sound)
+                .map_or(0, |index| (index + 1) % crate::alarm::sounds::SOUNDS.len());
+            draft.sound = crate::alarm::sounds::BUNDLED_SOUND_IDS[next];
         }
         AlarmSettingsAction::DraftToggleEnabled => draft.enabled = !draft.enabled,
         AlarmSettingsAction::DraftCycleLabel => draft.cycle_label(),

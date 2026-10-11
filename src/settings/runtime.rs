@@ -2,7 +2,7 @@
 use std::time::Duration;
 
 use bevy::{
-    audio::{AudioSink, AudioSinkPlayback, GlobalVolume, Volume},
+    audio::{AudioSink, AudioSinkPlayback, GlobalVolume, PlaybackSettings, Volume},
     prelude::*,
     settings::{SaveSettingsDeferred, SaveSettingsSync},
     window::{PrimaryWindow, WindowLevel, WindowMoved, WindowPosition},
@@ -379,7 +379,7 @@ pub(super) fn apply_audio_settings(
     settings: Res<NeraSettings>,
     mut applied: ResMut<AppliedRuntimeSettings>,
     mut global_volume: ResMut<GlobalVolume>,
-    mut active_sinks: Query<&mut AudioSink>,
+    mut active_sinks: Query<(&mut AudioSink, Option<&PlaybackSettings>)>,
 ) {
     if !settings.is_changed()
         || !applied.take_audio_change(settings.master_volume, settings.audio_muted)
@@ -392,11 +392,9 @@ pub(super) fn apply_audio_settings(
 
     // GlobalVolume is used when future sounds are created. Bevy intentionally
     // does not retroactively change already-playing sinks, so mirror the new
-    // value into live Nera audio too (currently the looping alarm).
-    for mut sink in &mut active_sinks {
-        sink.set_volume(Volume::Linear(
-            settings.master_volume.clamp(0, 100) as f32 / 100.0,
-        ));
+    // value into live Nera audio too, retaining each cue's quieter mix.
+    for (mut sink, playback) in &mut active_sinks {
+        sink.set_volume(live_audio_volume(settings.master_volume, playback));
 
         if settings.audio_muted {
             sink.mute();
@@ -410,6 +408,11 @@ pub(super) fn apply_audio_settings(
         settings.master_volume_label(),
         settings.audio_muted,
     );
+}
+
+fn live_audio_volume(master_volume: u8, playback: Option<&PlaybackSettings>) -> Volume {
+    Volume::Linear(master_volume.min(100) as f32 / 100.0)
+        * playback.map_or(Volume::Linear(1.0), |playback| playback.volume)
 }
 
 pub(super) fn apply_fps_limit(
@@ -457,6 +460,19 @@ pub(crate) fn save_settings_before_exit(commands: &mut Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn master_volume_changes_keep_pet_cues_quiet_and_alarm_at_its_existing_gain() {
+        let cue = PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.24));
+        assert!((live_audio_volume(50, Some(&cue)).to_linear() - 0.12).abs() < 0.0001);
+        assert_eq!(live_audio_volume(100, Some(&cue)).to_linear(), 0.24);
+        assert_eq!(live_audio_volume(0, Some(&cue)).to_linear(), 0.0);
+        assert_eq!(
+            live_audio_volume(75, Some(&PlaybackSettings::DESPAWN)).to_linear(),
+            0.75
+        );
+        assert_eq!(live_audio_volume(75, None).to_linear(), 0.75);
+    }
 
     #[test]
     fn runtime_setting_cache_only_accepts_relevant_value_changes() {

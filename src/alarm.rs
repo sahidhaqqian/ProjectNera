@@ -218,7 +218,7 @@ impl AlarmState {
 
 #[derive(Resource)]
 struct AlarmAssets {
-    sounds: [Handle<AudioSource>; 5],
+    sounds: [Handle<AudioSource>; sounds::SOUNDS.len()],
 }
 
 /// Every alarm audio entity carries this marker.
@@ -311,7 +311,9 @@ impl Plugin for AlarmPlugin {
 
 fn load_alarm_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(AlarmAssets {
-        sounds: std::array::from_fn(|index| asset_server.load(sounds::path(index as u16))),
+        sounds: std::array::from_fn(|index| {
+            asset_server.load(sounds::path(sounds::BUNDLED_SOUND_IDS[index]))
+        }),
     });
 
     info!("Nera alarm audio requested | {}", ALARM_SOUND_PATH,);

@@ -101,6 +101,15 @@ fn interaction_feedback(
             });
         }
         if previous.visual != Some(visual) && !matches!(visual, VisualState::TouchReaction(_)) {
+            if matches!(
+                visual,
+                VisualState::StartupGreeting
+                    | VisualState::Screensaver(
+                        crate::animation::screensaver::ScreensaverClip::Waving
+                    )
+            ) {
+                sfx.write(PetSfx(PetSfxKind::Greeting));
+            }
             let path = if let VisualState::LibraryAnimation(entity) = visual {
                 library.path_for(entity)
             } else {
@@ -116,12 +125,7 @@ fn interaction_feedback(
                             anchor: PetFxAnchor::Head,
                         });
                     }
-                    Face::Joy
-                        if matches!(
-                            visual,
-                            VisualState::StartupGreeting | VisualState::AlarmJump
-                        ) =>
-                    {
+                    Face::Joy if visual == VisualState::AlarmJump => {
                         sfx.write(PetSfx(PetSfxKind::Happy));
                     }
                     Face::Embarrassed if !headpat && visual != VisualState::HeadStroke => {
@@ -325,6 +329,44 @@ mod tests {
         app
     }
     #[test]
+    fn startup_wave_emits_one_greeting_without_a_duplicate_happy_cue() {
+        let mut app = app();
+        assert!(
+            app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .request_startup_greeting(std::time::Duration::from_secs(3))
+        );
+        app.update();
+        let (_, sounds) = drain_feedback(&mut app);
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(sounds[0].0, PetSfxKind::Greeting);
+        app.update();
+        assert!(app.world().resource::<Messages<PetSfx>>().is_empty());
+    }
+
+    #[test]
+    fn screensaver_wave_uses_the_same_greeting_once() {
+        use crate::presentation::{AttentionKind, PresentationMode};
+        let mut app = app();
+        app.insert_resource(PresentationState::for_test(PresentationMode::Attention(
+            AttentionKind::Screensaver,
+        )));
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .request_action_for_test(
+                crate::animation::TemporaryAction::Screensaver(
+                    crate::animation::screensaver::ScreensaverClip::Waving,
+                ),
+                std::time::Duration::from_secs(3),
+            );
+        app.update();
+        let (_, sounds) = drain_feedback(&mut app);
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(sounds[0].0, PetSfxKind::Greeting);
+        app.update();
+        assert!(app.world().resource::<Messages<PetSfx>>().is_empty());
+    }
+    #[test]
     fn headpat_burst_is_consumed_once_not_replayed_on_subsequent_updates() {
         let mut app = app();
         app.world_mut()
@@ -404,6 +446,13 @@ mod tests {
             .collect();
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].kind, PetFxKind::LandingPuff);
+        let sounds: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<PetSfx>>()
+            .drain()
+            .collect();
+        assert_eq!(sounds.len(), 1);
+        assert_eq!(sounds[0].0, PetSfxKind::Landing);
         app.update();
         assert!(app.world().resource::<Messages<PetFx>>().is_empty());
         app.world_mut()
