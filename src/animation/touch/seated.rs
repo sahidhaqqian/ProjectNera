@@ -185,7 +185,13 @@ fn preserve_touch_seat(
         *pose = TouchSeatPose { owner, ..default() };
     }
     let visual = animation.visual_state();
-    let touch = matches!(visual, VisualState::TouchReaction(_));
+    let touch = matches!(
+        visual,
+        VisualState::TouchReaction(_)
+            | VisualState::Treat
+            | VisualState::FocusCelebrate
+            | VisualState::FocusActivity(crate::focus::FocusPreset::Study)
+    );
     let returning = visual == VisualState::SittingLoop && pose.holding_touch;
     if touch {
         pose.holding_touch = true;
@@ -198,7 +204,10 @@ fn preserve_touch_seat(
         if pose.returning.is_zero() {
             pose.holding_touch = false;
         }
-    } else if visual == VisualState::SittingLoop {
+    } else if matches!(
+        visual,
+        VisualState::SittingLoop | VisualState::FocusActivity(crate::focus::FocusPreset::Work)
+    ) {
         pose.settling = pose
             .settling
             .saturating_sub(time.delta().min(Duration::from_millis(50)));
@@ -327,6 +336,26 @@ mod tests {
             assert_eq!(*app.world().get::<Transform>(hips).unwrap(), raw_hips);
             assert_eq!(*app.world().get::<Transform>(knee).unwrap(), raw_knee);
         }
+    }
+    #[test]
+    fn work_typing_keeps_authored_seated_body_instead_of_the_previous_sit_variant() {
+        let (mut app, hips, knee, _) = fixture();
+        assert!(
+            app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .request_focus_activity(crate::focus::FocusPreset::Work)
+        );
+        let typed_hips =
+            Transform::from_xyz(0.0, 0.65, 0.1).with_rotation(Quat::from_rotation_x(0.15));
+        let typed_knee = Transform::from_rotation(Quat::from_rotation_x(1.2));
+        *app.world_mut().get_mut::<Transform>(hips).unwrap() = typed_hips;
+        *app.world_mut().get_mut::<Transform>(knee).unwrap() = typed_knee;
+        app.world_mut()
+            .run_system_once(preserve_touch_seat)
+            .unwrap();
+        assert_eq!(*app.world().get::<Transform>(hips).unwrap(), typed_hips);
+        assert_eq!(*app.world().get::<Transform>(knee).unwrap(), typed_knee);
+        assert!(app.world().resource::<TouchSeatPose>().raw.is_empty());
     }
 
     #[test]

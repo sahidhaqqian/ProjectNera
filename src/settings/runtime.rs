@@ -557,6 +557,9 @@ mod tests {
         // default settings' native local-date lookup or any windowing APIs.
         let settings = NeraSettings {
             audio_reactive_dance: false,
+            focus_mode: 0,
+            focus_duration: 0,
+            focus_custom_minutes: 35,
             always_on_top: true,
             start_hidden: false,
             remember_position: true,

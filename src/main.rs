@@ -5,8 +5,10 @@ mod benchmark;
 mod character;
 mod cloud;
 mod dance_pool;
+mod focus;
 mod memory;
 mod music;
+mod treat;
 
 mod desktop_physics;
 
@@ -142,7 +144,12 @@ fn main() {
         && std::env::args().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--touch-smoke" | "--presentation-smoke" | "--alarm-timer-smoke" | "--living-smoke"
+                "--touch-smoke"
+                    | "--presentation-smoke"
+                    | "--alarm-timer-smoke"
+                    | "--living-smoke"
+                    | "--treat-focus-smoke"
+                    | "--focus-activity-smoke"
             )
         });
     #[cfg(not(debug_assertions))]
@@ -246,6 +253,7 @@ fn main() {
     ));
 
     app.insert_resource(ClearColor(Color::NONE))
+        .add_plugins((focus::FocusPlugin, treat::TreatPlugin))
         .init_resource::<DesktopPetInteraction>()
         .init_resource::<HoveredBodyPart>()
         .init_resource::<HeadPatGesture>()

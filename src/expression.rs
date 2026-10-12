@@ -144,7 +144,9 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
     match visual {
         // Petting is affection; poking is not. `HitHead` feeds the three-hit
         // damage combo that ends in Death, so it reads as surprise, not joy.
-        Body::HeadStroke | Body::StartupGreeting => Face::Happy,
+        Body::HeadStroke | Body::StartupGreeting | Body::Treat | Body::FocusCelebrate => {
+            Face::Happy
+        }
         Body::HitHead | Body::DodgeWhileSitting => Face::Surprised,
         Body::HitChest => Face::Angry,
         Body::LimbReaction(part) => match part {
@@ -172,6 +174,7 @@ fn expression_for_visual(visual: VisualState) -> NeraExpression {
         // and the short transitional clips are moments where a held emotion
         // would read as stuck rather than as expression.
         Body::Idle
+        | Body::FocusActivity(_)
         | Body::Screensaver(_)
         | Body::TouchReaction(_)
         | Body::Walking

@@ -92,6 +92,7 @@ pub(crate) enum AlarmMenuChoice {
 
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NeraActionMenuCommand {
+    Treat,
     Cloud(crate::cloud::CloudCommand),
     Animation(AnimationMenuChoice),
     AnimationManager,
@@ -156,6 +157,7 @@ enum RadialItemAction {
 
 #[derive(Clone, Copy, Debug)]
 enum RadialIcon {
+    Treat,
     Cloud,
     Settings,
     Play,
@@ -220,7 +222,7 @@ const ROOT_ITEMS: [RadialItem; 7] = [
     },
 ];
 
-const CLOUD_ITEMS: [RadialItem; 4] = [
+const CLOUD_ITEMS: [RadialItem; 5] = [
     RadialItem {
         icon: RadialIcon::Moon,
         label: "Rest",
@@ -241,6 +243,11 @@ const CLOUD_ITEMS: [RadialItem; 4] = [
         action: RadialItemAction::Command(NeraActionMenuCommand::Cloud(
             crate::cloud::CloudCommand::Dismiss,
         )),
+    },
+    RadialItem {
+        icon: RadialIcon::Treat,
+        label: "Treat",
+        action: RadialItemAction::Command(NeraActionMenuCommand::Treat),
     },
     RadialItem {
         icon: RadialIcon::Back,
@@ -555,6 +562,7 @@ pub(crate) fn poll_action_menu_result(
     mut open_alarm_settings: MessageWriter<OpenAlarmSettingsWindow>,
     mut open_animation_manager: MessageWriter<crate::animation_manager::OpenAnimationManager>,
     mut presentation: MessageWriter<crate::presentation::PresentationCommand>,
+    mut treat: MessageWriter<crate::treat::RequestTreat>,
 ) {
     let Some(tray) = tray else {
         return;
@@ -570,6 +578,9 @@ pub(crate) fn poll_action_menu_result(
         };
 
         match command {
+            NeraActionMenuCommand::Treat => {
+                treat.write(crate::treat::RequestTreat);
+            }
             NeraActionMenuCommand::Cloud(choice) => {
                 info!("Nera radial menu -> Cloud::{choice:?}");
             }
@@ -703,6 +714,12 @@ unsafe fn paint_icon(hdc: HDC, icon: RadialIcon, cx: i32, cy: i32, color: COLORR
     };
 
     match icon {
+        RadialIcon::Treat => {
+            polygon(&[(-11, 4), (-8, -5), (-3, -10), (5, -10), (11, -4), (11, 5)]);
+            line(&[(-11, 8), (11, 8)]);
+            line(&[(-4, -4), (-3, -3)]);
+            line(&[(5, -2), (6, -1)]);
+        }
         RadialIcon::Cloud | RadialIcon::Ride => {
             line(&[
                 (-12, 5),
@@ -1367,6 +1384,12 @@ mod tests {
         );
         state.page = RadialPage::Cloud;
         assert!(state.begin_selection(3, now));
+        assert_eq!(state.take_ready_selection(now), None);
+        assert_eq!(
+            state.take_ready_selection(ready),
+            Some(RadialItemAction::Command(NeraActionMenuCommand::Treat))
+        );
+        assert!(state.begin_selection(4, now));
         assert_eq!(
             state.take_ready_selection(ready),
             Some(RadialItemAction::Back)

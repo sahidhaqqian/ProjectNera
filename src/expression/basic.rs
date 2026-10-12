@@ -8,7 +8,7 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         .unwrap_or(path)
         .strip_prefix("animasi_basic/")?;
     Some(match file {
-        "idle.vrma" => (Face::Default, 1.0),
+        "idle.vrma" | "Typing.vrma" => (Face::Default, 1.0),
         "Breathing_Idle.vrma"
         | "Holding_Idle.vrma"
         | "Dwarf_Idle_4.vrma"
@@ -18,6 +18,8 @@ pub(crate) fn for_clip(path: &str) -> Option<(Face, f32)> {
         | "Offensive_Idle.vrma"
         | "Dwarf_Idle_2.vrma" => (Face::Default, 1.0),
         "Waving.vrma" => (Face::Joy, 0.55),
+        // Gentle joy keeps drinking eyes open, with the normal blink owner.
+        "Drinking.vrma" => (Face::Joy, 0.12),
         "Walking.vrma" => (Face::Joy, 0.2),
         "Sitting_Enter.vrma" | "Sitting_Idle_Loop.vrma" | "Sitting_2.vrma" | "Sitting_4.vrma" => {
             (Face::Default, 1.0)
@@ -61,8 +63,15 @@ pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Opt
         }
     }
     let file = match visual {
+        Body::FocusActivity(preset) => {
+            return Some(match preset {
+                crate::focus::FocusPreset::Study => (Face::Joy, 0.16),
+                crate::focus::FocusPreset::Work => (Face::Default, 1.0),
+            });
+        }
         Body::Screensaver(clip) => return for_clip(clip.path()),
         Body::TouchReaction(clip) => return for_clip(clip.path()),
+        Body::Treat => "Drinking.vrma",
         Body::HeadStroke => "ShakeHeadNo1.vrma",
         Body::HitChest => "Hit_Chest.vrma",
         Body::HitHead => "Hit_Head.vrma",
@@ -101,6 +110,16 @@ pub(crate) fn for_visual(visual: VisualState, library_path: Option<&str>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drinking_uses_gentle_joy_without_pinning_blink_or_full_happy_eyelids() {
+        assert_eq!(
+            for_visual(VisualState::Treat, None),
+            Some((Face::Joy, 0.12))
+        );
+        let weights = super::super::preset_weights(Face::Joy, 0.12, ["happy", "blink"]);
+        assert_eq!(weights, vec![("happy".into(), 0.12)]);
+    }
     #[test]
     fn ordinary_sitting_never_applies_sleep_or_timid_eyelids() {
         for file in [
@@ -136,7 +155,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 42);
+        assert_eq!(count, 44);
     }
     #[test]
     fn authored_touch_clips_share_faces_with_basic_animation_previews() {

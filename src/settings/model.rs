@@ -263,6 +263,10 @@ pub(crate) struct NeraSettings {
     pub(crate) edge_peek: bool,
     /// Opt-in local Windows music observation; MusicDetectionState owns evidence.
     pub(crate) audio_reactive_dance: bool,
+    /// Last Focus choices only. A running session never survives process exit.
+    pub(crate) focus_mode: u8,
+    pub(crate) focus_duration: u8,
+    pub(crate) focus_custom_minutes: u16,
     pub(crate) gravity_enabled: bool,
     pub(crate) throw_enabled: bool,
     /// Launch strength percentage. 100 preserves the original throw velocity.
@@ -370,6 +374,9 @@ impl Default for NeraSettings {
             cursor_play: true,
             edge_peek: true,
             audio_reactive_dance: false,
+            focus_mode: 0,
+            focus_duration: 0,
+            focus_custom_minutes: 35,
             gravity_enabled: true,
             throw_enabled: true,
             throw_intensity: 50,

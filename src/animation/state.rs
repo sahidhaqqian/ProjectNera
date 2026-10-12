@@ -244,6 +244,9 @@ pub(crate) enum TemporaryAction {
     HitChest,
     LimbReaction(crate::interaction::BodyPart),
     TouchReaction(TouchReactionClip),
+    Treat,
+    FocusCelebrate,
+    FocusActivity(crate::focus::FocusPreset),
     DodgeWhileSitting,
     HeadStroke,
     Death,
@@ -274,6 +277,7 @@ pub(super) enum AnimationPriority {
     /// Phase 5.8 idle fidgets. Below every real interaction layer, so a
     /// micro-action can never delay a reaction, a drag, physics, or the alarm.
     IdleVariation = 40,
+    Focus = 45,
     /// The first greeting is automatic and yields immediately to the user.
     StartupGreeting = 50,
     Screensaver = 55,
@@ -289,6 +293,7 @@ pub(super) enum AnimationPriority {
 impl TemporaryAction {
     fn priority(self) -> AnimationPriority {
         match self {
+            Self::FocusActivity(_) => AnimationPriority::Focus,
             Self::Screensaver(_) => AnimationPriority::Screensaver,
             Self::Walking => AnimationPriority::Walking,
             Self::StartupGreeting => AnimationPriority::StartupGreeting,
@@ -297,6 +302,8 @@ impl TemporaryAction {
             | Self::DodgeWhileSitting
             | Self::HeadStroke
             | Self::LimbReaction(_)
+            | Self::Treat
+            | Self::FocusCelebrate
             | Self::TouchReaction(_) => AnimationPriority::Reaction,
             Self::Praying => AnimationPriority::Menu,
             Self::LibraryAnimation(_) => AnimationPriority::Reaction,
@@ -358,6 +365,9 @@ pub(crate) enum VisualState {
     HitChest,
     LimbReaction(crate::interaction::BodyPart),
     TouchReaction(TouchReactionClip),
+    Treat,
+    FocusCelebrate,
+    FocusActivity(crate::focus::FocusPreset),
     DodgeWhileSitting,
     HeadStroke,
     Death,
@@ -555,13 +565,22 @@ impl NeraAnimationState {
     }
 
     pub(super) fn start_persistent_action(&mut self, action: TemporaryAction) {
+        if action.priority() > AnimationPriority::Focus {
+            self.cancel_focus_activity();
+        }
         if !matches!(action, TemporaryAction::AutoDance(_)) {
             self.cancel_auto_dance();
         }
         if action.priority() > AnimationPriority::Reaction {
             self.finish_action(TemporaryAction::DodgeWhileSitting);
-            self.active_actions
-                .retain(|active| !matches!(active.action, TemporaryAction::TouchReaction(_)));
+            self.active_actions.retain(|active| {
+                !matches!(
+                    active.action,
+                    TemporaryAction::TouchReaction(_)
+                        | TemporaryAction::Treat
+                        | TemporaryAction::FocusCelebrate
+                )
+            });
         }
         if action.priority() > AnimationPriority::StartupGreeting {
             self.cancel_startup_greeting();
@@ -589,6 +608,9 @@ impl NeraAnimationState {
     }
 
     pub(super) fn request_one_shot(&mut self, action: TemporaryAction, duration: Duration) {
+        if action.priority() > AnimationPriority::Focus {
+            self.cancel_focus_activity();
+        }
         if !matches!(action, TemporaryAction::AutoDance(_)) {
             self.cancel_auto_dance();
         }
@@ -603,8 +625,14 @@ impl NeraAnimationState {
         }
 
         if action.priority() > AnimationPriority::Reaction {
-            self.active_actions
-                .retain(|active| !matches!(active.action, TemporaryAction::TouchReaction(_)));
+            self.active_actions.retain(|active| {
+                !matches!(
+                    active.action,
+                    TemporaryAction::TouchReaction(_)
+                        | TemporaryAction::Treat
+                        | TemporaryAction::FocusCelebrate
+                )
+            });
         }
 
         self.finish_action(TemporaryAction::Walking);
@@ -793,6 +821,62 @@ impl NeraAnimationState {
         if self.active_actions.len() != before {
             self.bump_revision();
         }
+    }
+
+    pub(crate) fn request_treat(&mut self, duration: Duration) -> bool {
+        if duration.is_zero() || !self.can_request_touch_reaction() {
+            return false;
+        }
+        self.request_one_shot(TemporaryAction::Treat, duration);
+        true
+    }
+
+    pub(crate) fn cancel_treat(&mut self) {
+        self.finish_action(TemporaryAction::Treat);
+    }
+
+    pub(crate) fn request_focus_celebration(&mut self, duration: Duration) -> bool {
+        if duration.is_zero()
+            || !self.can_request_touch_reaction()
+            || !matches!(
+                self.visual_state(),
+                VisualState::Idle | VisualState::SittingLoop
+            )
+        {
+            return false;
+        }
+        self.request_one_shot(TemporaryAction::FocusCelebrate, duration);
+        true
+    }
+    pub(crate) fn request_focus_activity(&mut self, preset: crate::focus::FocusPreset) -> bool {
+        if self.support_transition.is_some()
+            || !matches!(
+                self.visual_state(),
+                VisualState::Idle | VisualState::SittingLoop | VisualState::FocusActivity(_)
+            )
+        {
+            return false;
+        }
+        if self.visual_state() != VisualState::FocusActivity(preset) {
+            self.cancel_focus_activity();
+            self.start_persistent_action(TemporaryAction::FocusActivity(preset));
+        }
+        true
+    }
+    pub(crate) fn cancel_focus_activity(&mut self) {
+        let before = self.active_actions.len();
+        self.active_actions
+            .retain(|active| !matches!(active.action, TemporaryAction::FocusActivity(_)));
+        if before != self.active_actions.len() {
+            self.bump_revision();
+        }
+    }
+
+    pub(crate) fn treat_remaining(&self) -> Option<Duration> {
+        self.active_actions
+            .iter()
+            .find(|active| active.action == TemporaryAction::Treat)?
+            .remaining
     }
 
     /// Phase 5.8 idle variation entry point.
@@ -1020,6 +1104,9 @@ impl NeraAnimationState {
                 TemporaryAction::HitChest => VisualState::HitChest,
                 TemporaryAction::LimbReaction(part) => VisualState::LimbReaction(part),
                 TemporaryAction::TouchReaction(clip) => VisualState::TouchReaction(clip),
+                TemporaryAction::Treat => VisualState::Treat,
+                TemporaryAction::FocusCelebrate => VisualState::FocusCelebrate,
+                TemporaryAction::FocusActivity(preset) => VisualState::FocusActivity(preset),
                 TemporaryAction::DodgeWhileSitting => VisualState::DodgeWhileSitting,
                 TemporaryAction::HeadStroke => VisualState::HeadStroke,
                 TemporaryAction::Death => VisualState::Death,
@@ -1121,6 +1208,9 @@ impl NeraAnimationState {
             | VisualState::HitHead
             | VisualState::HitChest
             | VisualState::TouchReaction(_)
+            | VisualState::Treat
+            | VisualState::FocusCelebrate
+            | VisualState::FocusActivity(crate::focus::FocusPreset::Work)
             | VisualState::DodgeWhileSitting
             | VisualState::IdleMicro(IdleMicroAction::LookAround)
             | VisualState::HeadStroke
@@ -1144,6 +1234,83 @@ impl NeraAnimationState {
 #[cfg(test)]
 mod touch_reaction_tests {
     use super::*;
+    #[test]
+    fn focus_activity_yields_to_touch_drag_alarm_and_never_leaves_a_stale_owner() {
+        use crate::focus::FocusPreset;
+        for preset in [FocusPreset::Study, FocusPreset::Work] {
+            let mut state = NeraAnimationState::default();
+            assert!(state.request_focus_activity(preset));
+            state.advance(Duration::from_secs(100));
+            assert_eq!(state.visual_state(), VisualState::FocusActivity(preset));
+            state.request_one_shot(TemporaryAction::HeadStroke, Duration::from_secs(2));
+            assert!(!state.request_focus_activity(preset));
+            state.advance(Duration::from_secs(2));
+            assert_eq!(state.visual_state(), VisualState::Idle);
+            assert!(state.request_focus_activity(preset));
+            state.start_persistent_action(TemporaryAction::Floating);
+            assert!(!state.request_focus_activity(preset));
+            state.finish_action(TemporaryAction::Floating);
+            assert_eq!(state.visual_state(), VisualState::Idle);
+            assert!(state.request_focus_activity(preset));
+            state.start_persistent_action(TemporaryAction::AlarmWave);
+            assert!(!state.request_focus_activity(preset));
+            state.cancel_focus_activity();
+            assert_eq!(state.visual_state(), VisualState::AlarmWave);
+            state.finish_action(TemporaryAction::AlarmWave);
+            assert_eq!(state.visual_state(), VisualState::Idle);
+            assert!(state.active_actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn treat_and_focus_yield_to_critical_owners_without_resuming_their_tail() {
+        for action in [TemporaryAction::Treat, TemporaryAction::FocusCelebrate] {
+            for critical in [
+                TemporaryAction::Floating,
+                TemporaryAction::AlarmJump,
+                TemporaryAction::Death,
+            ] {
+                let mut state = NeraAnimationState::default();
+                state.request_one_shot(action, Duration::from_secs(9));
+                state.request_one_shot(critical, Duration::from_secs(1));
+                assert!(!state.request_treat(Duration::from_secs(9)));
+                assert!(!state.request_focus_celebration(Duration::from_secs(2)));
+                state.advance(Duration::from_secs(1));
+                assert_eq!(state.visual_state(), VisualState::Idle);
+                assert!(state.active_actions.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn treat_returns_to_its_base_pose_and_headpat_can_replace_it() {
+        for sitting in [false, true] {
+            let mut state = NeraAnimationState::default();
+            if sitting {
+                state.enter_cloud_seat(SittingPose::Default);
+            }
+            assert!(state.request_treat(Duration::from_secs(9)));
+            assert_eq!(state.visual_state(), VisualState::Treat);
+            state.request_one_shot(TemporaryAction::HeadStroke, Duration::from_secs(2));
+            assert_eq!(state.treat_remaining(), None);
+            state.advance(Duration::from_secs(2));
+            assert_eq!(
+                state.visual_state(),
+                if sitting {
+                    VisualState::SittingLoop
+                } else {
+                    VisualState::Idle
+                }
+            );
+            assert!(state.request_focus_celebration(Duration::from_secs(2)));
+            state.advance(Duration::from_secs(2));
+            assert!(state.active_actions.is_empty());
+        }
+        let mut state = NeraAnimationState::default();
+        assert!(!state.request_treat(Duration::ZERO));
+        state.begin_support_transition(SupportTransition::SittingEnter, Duration::from_secs(1));
+        assert!(!state.request_treat(Duration::from_secs(9)));
+    }
 
     #[test]
     fn touch_uses_the_actual_duration_and_replaces_the_reaction_layer() {

@@ -19,6 +19,19 @@ use crate::alarm::{AlarmDisplayInfo, AlarmRuntimeSet, AlarmState, AlarmStatus};
 use crate::settings::{AlarmConfig, NeraSettings, save_settings_deferred};
 use crate::utility_window::font_cache::{FontCacheOwner, UtilityFontCache};
 use crate::utility_window::{UtilityWindow, spawn_window_controls};
+mod focus_ui;
+
+#[cfg(debug_assertions)]
+pub(crate) fn smoke_focus_control(world: &mut World, command: crate::focus::FocusCommand) {
+    // Existing scripted callers can select a Focus control from either tab.
+    if !focus_ui::has_controls(world) {
+        use bevy::ecs::system::RunSystemOnce;
+        smoke_action(world, "focus");
+        world.run_system_once(rebuild_alarm_settings_ui).unwrap();
+        world.flush();
+    }
+    focus_ui::smoke_control(world, command);
+}
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
 mod memory_audit;
@@ -151,6 +164,7 @@ enum ActiveTimerText {
 enum AlarmSettingsView {
     #[default]
     List,
+    Focus,
     Edit,
     TimePicker,
     DatePicker,
@@ -168,6 +182,8 @@ struct AlarmSettingsUiState {
 #[derive(Component, Clone, Copy, Debug)]
 enum AlarmSettingsAction {
     Close,
+    ShowAlarms,
+    ShowFocus,
     Add,
     Edit(u32),
     Toggle(u32),
@@ -208,6 +224,7 @@ pub(crate) struct AlarmSettingsPlugin;
 
 impl Plugin for AlarmSettingsPlugin {
     fn build(&self, app: &mut App) {
+        focus_ui::install(app);
         #[cfg(all(debug_assertions, target_os = "windows"))]
         if std::env::args().any(|arg| {
             matches!(
@@ -357,6 +374,19 @@ fn rebuild_alarm_settings_ui(
     }
 
     match ui.view {
+        AlarmSettingsView::Focus => {
+            spawn_root(&mut commands, window, camera, |panel| {
+                spawn_header(
+                    panel,
+                    window,
+                    "Focus",
+                    Some("Spend a quiet session with Nera"),
+                    false,
+                );
+                spawn_tabs(panel, true);
+                focus_ui::spawn(panel);
+            });
+        }
         AlarmSettingsView::List => {
             spawn_alarm_list_ui(
                 &mut commands,
@@ -498,6 +528,7 @@ fn spawn_alarm_list_ui(
             Some("Manage your Nera alarms"),
             false,
         );
+        spawn_tabs(panel, false);
         spawn_setting_row(
             panel,
             "Quick alarm sound",
@@ -601,6 +632,7 @@ fn spawn_alarm_list_ui(
                 Node {
                     width: percent(100),
                     flex_grow: 1.0,
+                    min_height: px(0),
                     flex_direction: FlexDirection::Column,
                     row_gap: px(10),
                     overflow: Overflow::scroll_y(),
@@ -648,6 +680,29 @@ fn spawn_alarm_list_ui(
             TextColor(MUTED),
         ));
     });
+}
+
+fn spawn_tabs(panel: &mut ChildSpawnerCommands, focus: bool) {
+    panel
+        .spawn(Node {
+            width: percent(100),
+            column_gap: px(8),
+            ..default()
+        })
+        .with_children(|row| {
+            spawn_small_button(
+                row,
+                "Alarms",
+                AlarmSettingsAction::ShowAlarms,
+                if focus { CARD } else { BLUE },
+            );
+            spawn_small_button(
+                row,
+                "Focus",
+                AlarmSettingsAction::ShowFocus,
+                if focus { BLUE } else { CARD },
+            );
+        });
 }
 
 fn spawn_active_timer_card(panel: &mut ChildSpawnerCommands) {
@@ -1736,6 +1791,15 @@ fn handle_alarm_settings_actions(
             AlarmSettingsAction::Close => {
                 gate.close_requested = true;
             }
+            AlarmSettingsAction::ShowAlarms | AlarmSettingsAction::ShowFocus => {
+                ui.view = if matches!(action, AlarmSettingsAction::ShowFocus) {
+                    AlarmSettingsView::Focus
+                } else {
+                    AlarmSettingsView::List
+                };
+                ui.draft = None;
+                ui.rebuild = true;
+            }
             AlarmSettingsAction::Add => {
                 let alarms = settings.alarm_configs();
                 if alarms.len() >= MAX_ALARMS {
@@ -1793,7 +1857,7 @@ fn handle_alarm_settings_actions(
                         ui.view = AlarmSettingsView::List;
                         ui.draft = None;
                     }
-                    AlarmSettingsView::List => {}
+                    AlarmSettingsView::List | AlarmSettingsView::Focus => {}
                 }
                 ui.rebuild = true;
             }
@@ -1841,6 +1905,8 @@ pub(crate) fn smoke_action(world: &mut World, action: &str) {
     use bevy::ecs::system::RunSystemOnce;
     let action = match action {
         "add" => AlarmSettingsAction::Add,
+        "focus" => AlarmSettingsAction::ShowFocus,
+        "alarms" => AlarmSettingsAction::ShowAlarms,
         "sound" => AlarmSettingsAction::DraftCycleSound,
         "preview" => AlarmSettingsAction::PreviewDraftSound,
         "save" => AlarmSettingsAction::Save,
@@ -2118,6 +2184,48 @@ fn schedule_summary(alarm: &AlarmConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn focus_and_alarm_tabs_use_real_controls_without_modifying_saved_alarms() {
+        let mut app = App::new();
+        app.init_resource::<NeraSettings>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_message::<MouseWheel>()
+            .add_message::<PreviewAlarmSound>()
+            .insert_resource(AlarmDisplayInfo {
+                label: "Quick Alarm".into(),
+                hour: 13,
+                minute: 5,
+                sound: 1,
+            })
+            .insert_resource(AlarmState::for_test(AlarmStatus::Idle))
+            .add_plugins(AlarmSettingsPlugin);
+        let saved = app.world().resource::<NeraSettings>().alarm_book.clone();
+        app.world_mut().write_message(OpenAlarmSettingsWindow);
+        app.update();
+        assert!(!focus_ui::has_controls(app.world_mut()));
+        smoke_action(app.world_mut(), "focus");
+        app.update();
+        assert_eq!(
+            app.world().resource::<AlarmSettingsUiState>().view,
+            AlarmSettingsView::Focus
+        );
+        assert!(focus_ui::has_controls(app.world_mut()));
+        smoke_focus_control(
+            app.world_mut(),
+            crate::focus::FocusCommand::Preset(crate::focus::FocusPreset::Work),
+        );
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<crate::focus::FocusCommand>>()
+                .drain()
+                .any(|command| command
+                    == crate::focus::FocusCommand::Preset(crate::focus::FocusPreset::Work))
+        );
+        smoke_action(app.world_mut(), "alarms");
+        app.update();
+        assert!(!focus_ui::has_controls(app.world_mut()));
+        assert_eq!(app.world().resource::<NeraSettings>().alarm_book, saved);
+    }
 
     #[test]
     fn timer_countdown_rounds_up_and_includes_hours_without_early_zero() {

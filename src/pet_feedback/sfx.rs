@@ -139,6 +139,7 @@ pub(super) fn play_sfx(
     sources: Res<Assets<AudioSource>>,
     settings: Res<crate::settings::NeraSettings>,
     presentation: Res<crate::presentation::PresentationState>,
+    focus: Option<Res<crate::focus::FocusSession>>,
     mut cooldown: ResMut<SfxCooldown>,
     players: Query<(), With<PetSfxPlayer>>,
     mut commands: Commands,
@@ -160,7 +161,12 @@ pub(super) fn play_sfx(
                     remaining: MAX_PLAY_SECONDS,
                 },
                 AudioPlayer::new(sound.clone()),
-                PlaybackSettings::DESPAWN.with_volume(Volume::Linear(request.0.gain())),
+                PlaybackSettings::DESPAWN.with_volume(Volume::Linear(
+                    request.0.gain()
+                        * focus
+                            .as_ref()
+                            .map_or(1.0, |focus| focus.sfx_factor(request.0)),
+                )),
             ));
             active += 1;
         }

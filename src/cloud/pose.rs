@@ -100,7 +100,10 @@ pub(crate) fn stabilize_cloud_pose(
     if owner.is_none() {
         return;
     }
-    let seated = animation.visual_state() == VisualState::SittingLoop;
+    let seated = matches!(
+        animation.visual_state(),
+        VisualState::SittingLoop | VisualState::FocusActivity(crate::focus::FocusPreset::Work)
+    );
     let base_clip = cloud
         .as_ref()
         .filter(|cloud| cloud.is_lying_rest())
@@ -148,6 +151,32 @@ mod tests {
         },
     };
     use std::time::Duration;
+    #[test]
+    fn ride_samples_authored_work_typing_instead_of_overwriting_it() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        let avatar = world.spawn_empty().id();
+        let visual = world.spawn_empty().id();
+        world.insert_resource(CloudRuntime::for_test(CloudMode::Ride, avatar, visual));
+        let typed = Transform::from_xyz(0.0, 0.55, 0.1).with_rotation(Quat::from_rotation_x(0.2));
+        let hips = world
+            .spawn((NeraLiveBone, VrmBone::from("hips"), typed))
+            .id();
+        world.insert_resource(CloudSeatPose {
+            owner: Some(visual),
+            settling: 0.0,
+            bones: vec![(hips, Transform::IDENTITY)],
+            ..default()
+        });
+        let mut state = NeraAnimationState::default();
+        state.enter_cloud_seat(SittingPose::Default);
+        assert!(state.request_focus_activity(crate::focus::FocusPreset::Work));
+        world.insert_resource(state);
+        world.run_system_once(stabilize_cloud_pose).unwrap();
+        assert_eq!(*world.get::<Transform>(hips).unwrap(), typed);
+        assert_eq!(world.resource::<CloudSeatPose>().bones, vec![(hips, typed)]);
+    }
     #[test]
     fn both_rest_poses_ignore_all_body_clicks_and_headpat_but_drag_and_ride_still_work() {
         use crate::{cloud::RestPose, interaction::BodyPart};

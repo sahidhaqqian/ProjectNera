@@ -48,8 +48,13 @@ impl PetFxKind {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PetFxAnchor {
     Head,
+    /// Explicit side for semantic heart pulses; ordinary Head/headpat is unchanged.
+    HeadSide {
+        right: bool,
+    },
     Feet,
     Desktop(Vec2),
+    Bone(Entity),
 }
 #[derive(Message, Clone, Copy, Debug)]
 pub(crate) struct PetFx {
@@ -72,6 +77,10 @@ impl PetParticle {
     #[cfg(debug_assertions)]
     pub(crate) fn is_firefly(&self) -> bool {
         self.firefly_origin.is_some()
+    }
+    #[cfg(debug_assertions)]
+    pub(crate) fn heart_side(&self) -> Option<bool> {
+        self.heart_origin.map(|_| self.velocity.x > 0.0)
     }
     fn advance(&mut self, dt: f32) -> bool {
         self.remaining -= dt;
@@ -325,7 +334,12 @@ fn anchor_point(
         PetFxAnchor::Feet => environment
             .feet_anchor_logical
             .map(|point| origin + point * scale),
-        PetFxAnchor::Head => bones
+        PetFxAnchor::Bone(entity) => bones
+            .get(entity)
+            .ok()
+            .and_then(|(_, transform)| camera.world_to_viewport(view, transform.translation()).ok())
+            .map(|point| origin + point * scale),
+        PetFxAnchor::Head | PetFxAnchor::HeadSide { .. } => bones
             .iter()
             .find(|(bone, _)| bone.as_str() == "head")
             .and_then(|(_, transform)| {
@@ -442,7 +456,7 @@ pub(crate) fn update_particles(
                 right_next,
             });
         } else {
-            bursts.push((request, admitted, 0));
+            bursts.push((request, admitted, heart_side(request.anchor)));
             count += admitted;
         }
     }
@@ -535,6 +549,12 @@ pub(crate) fn update_particles(
                 NotShadowReceiver,
             ));
         }
+    }
+}
+fn heart_side(anchor: PetFxAnchor) -> u8 {
+    match anchor {
+        PetFxAnchor::HeadSide { right } => u8::from(right),
+        _ => 0,
     }
 }
 pub(super) fn clear(world: &mut World) {
@@ -640,6 +660,12 @@ mod tests {
         assert!(!particle.advance(0.2));
     }
     use super::*;
+    #[test]
+    fn directed_hearts_use_the_requested_side_without_changing_regular_headpat() {
+        assert_eq!(heart_side(PetFxAnchor::HeadSide { right: false }), 0);
+        assert_eq!(heart_side(PetFxAnchor::HeadSide { right: true }), 1);
+        assert_eq!(heart_side(PetFxAnchor::Head), 0);
+    }
     #[test]
     fn hearts_alternate_one_at_a_time_across_the_whole_clip_without_catchup_bursts() {
         let mut sequence = HeartSequence {

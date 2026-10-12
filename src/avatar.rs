@@ -119,6 +119,8 @@ pub(crate) fn update_look_at_target(
     environment: Res<DesktopEnvironment>,
     pointer: Res<crate::pet_behavior::living::LivingPointer>,
     brain: Res<crate::pet_behavior::PetBehavior>,
+    animation: Res<NeraAnimationState>,
+    focus_props: Query<(&crate::focus::FocusProp, &GlobalTransform)>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     mut target_query: Query<&mut Transform, With<LookAtTarget>>,
     cameras: Query<&GlobalTransform, With<NeraMainCamera>>,
@@ -154,6 +156,15 @@ pub(crate) fn update_look_at_target(
             (Some(camera), Some(eye)) => viewer_gaze_target(camera.translation(), eye),
             _ => neutral,
         }
+    } else if animation.visual_state()
+        == crate::animation::VisualState::FocusActivity(crate::focus::FocusPreset::Study)
+    {
+        focus_props
+            .iter()
+            .find(|(prop, _)| prop.preset == crate::focus::FocusPreset::Study)
+            .map(|(_, book)| book.translation())
+            .filter(|point| point.is_finite())
+            .unwrap_or(neutral)
     } else if settings.follow_mouse
         && !presentation.is_screensaver()
         && cloud.mode() != Some(crate::cloud::CloudMode::Rest)
@@ -250,9 +261,11 @@ pub(crate) fn sync_look_at_for_animation(
     // Screensaver owns an eye-level viewer target; the authored head/spine pose
     // remains untouched and saved follow preferences stay intact.
     let screensaver = presentation.is_some_and(|state| state.is_screensaver());
-    let allow_look_at =
-        !resting && (screensaver || (settings.follow_eyes && !animation.suppresses_look_at()));
-    let allow_body_tracking = allow_look_at && settings.follow_head && !screensaver;
+    let studying = animation.visual_state()
+        == crate::animation::VisualState::FocusActivity(crate::focus::FocusPreset::Study);
+    let allow_look_at = !resting
+        && (screensaver || studying || (settings.follow_eyes && !animation.suppresses_look_at()));
+    let allow_body_tracking = allow_look_at && (settings.follow_head || studying) && !screensaver;
 
     if allow_look_at {
         if current_look_at.is_none() {
@@ -384,5 +397,56 @@ mod tests {
         app.update();
         assert!(app.world().get::<LookAt>(avatar).is_none());
         assert!(app.world().get::<BodyTracking>(avatar).is_none());
+    }
+    #[test]
+    fn study_uses_book_gaze_work_keeps_authored_gaze_and_preferences_survive() {
+        for enabled in [false, true] {
+            let mut app = App::new();
+            app.init_resource::<NeraAnimationState>()
+                .insert_resource(NeraSettings {
+                    follow_eyes: enabled,
+                    follow_head: enabled,
+                    ..default()
+                })
+                .add_systems(Update, sync_look_at_for_animation);
+            app.world_mut().spawn(LookAtTarget);
+            let avatar = app.world_mut().spawn(NeraAvatar).id();
+            assert!(
+                app.world_mut()
+                    .resource_mut::<NeraAnimationState>()
+                    .request_focus_activity(crate::focus::FocusPreset::Study)
+            );
+            app.update();
+            assert!(app.world().get::<LookAt>(avatar).is_some());
+            assert!(app.world().get::<BodyTracking>(avatar).is_some());
+            let visual = app.world_mut().spawn_empty().id();
+            app.insert_resource(crate::cloud::CloudRuntime::for_test(
+                crate::cloud::CloudMode::Rest,
+                avatar,
+                visual,
+            ));
+            app.update();
+            assert!(
+                app.world().get::<LookAt>(avatar).is_none(),
+                "Rest still suppresses all gaze"
+            );
+            app.world_mut()
+                .remove_resource::<crate::cloud::CloudRuntime>();
+            assert!(
+                app.world_mut()
+                    .resource_mut::<NeraAnimationState>()
+                    .request_focus_activity(crate::focus::FocusPreset::Work)
+            );
+            app.update();
+            assert!(app.world().get::<LookAt>(avatar).is_none());
+            assert!(app.world().get::<BodyTracking>(avatar).is_none());
+            app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .cancel_focus_activity();
+            app.update();
+            assert_eq!(app.world().get::<LookAt>(avatar).is_some(), enabled);
+            assert_eq!(app.world().resource::<NeraSettings>().follow_eyes, enabled);
+            assert_eq!(app.world().resource::<NeraSettings>().follow_head, enabled);
+        }
     }
 }

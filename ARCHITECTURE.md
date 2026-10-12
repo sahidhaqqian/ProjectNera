@@ -749,7 +749,7 @@ The editor does not own scheduler state.
 
 ### Alarm Settings
 
-`alarm_settings.rs` owns only the alarm-manager window, draft/edit state, quick-preset UI, and persistent `AlarmConfig` edits.
+`alarm_settings.rs` owns the alarm-manager window, draft/edit state, quick-preset UI, and persistent `AlarmConfig` edits. Alarms and Focus use separate tabs. Focus emits `FocusCommand`; `FocusSession` owns the independent Study/Work clock and activity intent. Its persistent `FocusActivity` requests use the existing animation owner below user reactions, and temporary props follow the resolved activity. Focus modifies `PetBehavior` eligibility and semantic PetSfx gain without rewriting roaming/audio preferences or touching real alarm deadlines. User interactions pause the activity; critical presentations end it safely. Only last mode/duration choices persist. Completion uses the existing animation/expression/feedback owners. See `FOCUS_ACTIVITIES_V2.md`.
 
 The radial Alarm action opens Alarm Settings directly. 5m/10m/15m/30m/45m/1h/2h presets now live in that utility window.
 
@@ -888,7 +888,7 @@ Chibi
 Screensaver
 ```
 
-Cloud has Rest/Ride/Dismiss/Back. Alarm opens Alarm Settings directly. Chibi toggles `AvatarBodyMode`; the native menu stores only presentation text, not its own mode state.
+Cloud has Rest/Ride/Dismiss/Treat/Back. Treat emits an interaction request, not a new `CloudMode`: `TreatRuntime` owns only its loading/cooldown/temporary prop lifecycle, while existing animation/expression/PetFx/PetSfx own the reaction. Props attach to a live humanoid hand with rest-derived grip geometry and inherit the evaluated rig (including Chibi). Cloud and seated support retain placement ownership. Alarm opens Alarm Settings directly. Chibi toggles `AvatarBodyMode`; the native menu stores only presentation text, not its own mode state.
 
 The menu emits typed `NeraActionMenuCommand` messages. Domain behavior belongs to the receiving subsystem.
 

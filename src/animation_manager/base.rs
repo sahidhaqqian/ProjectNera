@@ -11,6 +11,14 @@ pub(super) struct BaseAnimation {
 /// alarm clips and the radial-menu pose, but excludes unused legacy clips.
 pub(super) const BASE_ANIMATIONS: &[BaseAnimation] = &[
     BaseAnimation {
+        key: "animasi_basic/Typing.vrma",
+        label: "Focus Work: typing",
+    },
+    BaseAnimation {
+        key: "animasi_basic/Drinking.vrma",
+        label: "Treat: drinking / food gesture",
+    },
+    BaseAnimation {
         key: "animasi_basic/idle.vrma",
         label: "Base idle",
     },
@@ -252,7 +260,8 @@ mod tests {
 
     #[test]
     fn base_keys_are_unique() {
-        assert_eq!(BASE_ANIMATIONS.len(), 42);
+        assert_eq!(BASE_ANIMATIONS.len(), 44);
+        assert!(is_base_animation("animasi_basic/Typing.vrma"));
         for (index, entry) in BASE_ANIMATIONS.iter().enumerate() {
             assert_eq!(base_order(entry.key), Some(index));
             assert!(!entry.label.is_empty());

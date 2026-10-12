@@ -16,7 +16,11 @@ struct Smoke {
 }
 
 pub(crate) fn install(app: &mut App) {
-    if std::env::args().any(|arg| arg == "--living-smoke") {
+    if std::env::args().any(|arg| arg == "--focus-activity-smoke") {
+        crate::focus::smoke::install(app);
+    } else if std::env::args().any(|arg| arg == "--treat-focus-smoke") {
+        crate::treat::smoke::install(app);
+    } else if std::env::args().any(|arg| arg == "--living-smoke") {
         crate::pet_behavior::living::smoke::install(app);
     } else if std::env::args().any(|arg| arg == "--alarm-timer-smoke") {
         crate::alarm_settings::install_timer_smoke(app);

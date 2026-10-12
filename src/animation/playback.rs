@@ -27,7 +27,8 @@ pub(crate) fn grounding_policy(visual: VisualState, library_path: Option<&str>) 
     use GroundingPolicy::*;
     match visual {
         VisualState::Death => BodyContact,
-        VisualState::Screensaver(_) => Authored,
+        VisualState::Screensaver(_)
+        | VisualState::FocusActivity(crate::focus::FocusPreset::Work) => Authored,
         VisualState::Floating
         | VisualState::Falling
         | VisualState::Landing
@@ -83,6 +84,7 @@ pub(super) struct ClipSlot {
 
 #[derive(Resource, Default)]
 pub(crate) struct NeraAnimationClips {
+    pub(super) focus_typing: Option<ClipSlot>,
     pub(super) screensaver: [Option<ClipSlot>; 9],
     pub(super) library: Option<ClipSlot>,
     pub(super) idle: Option<ClipSlot>,
@@ -96,6 +98,7 @@ pub(crate) struct NeraAnimationClips {
     pub(super) hit_chest: Option<ClipSlot>,
     pub(super) dodge_while_sitting: Option<ClipSlot>,
     pub(super) head_stroke: Option<ClipSlot>,
+    pub(super) treat: Option<ClipSlot>,
     pub(super) praying: Option<ClipSlot>,
     pub(super) sitting_enter: Option<ClipSlot>,
     pub(super) sitting_loop: Option<ClipSlot>,
@@ -134,6 +137,24 @@ pub(crate) struct NeraAnimationClips {
 }
 
 impl NeraAnimationClips {
+    pub(crate) fn focus_activity_ready(&self, preset: crate::focus::FocusPreset) -> bool {
+        self.focus_activity(preset).is_some()
+    }
+    fn focus_activity(&self, preset: crate::focus::FocusPreset) -> Option<ClipSlot> {
+        match preset {
+            crate::focus::FocusPreset::Study => self.praying,
+            crate::focus::FocusPreset::Work => self.focus_typing,
+        }
+    }
+    pub(crate) fn treat_duration(&self) -> Option<Duration> {
+        self.treat
+            .filter(|clip| !clip.duration.is_zero())
+            .map(|clip| clip.duration)
+    }
+    pub(crate) fn treat_playing(&self, playback: &NeraAnimationPlayback) -> bool {
+        self.treat
+            .is_some_and(|clip| playback.current_clip == Some(clip.entity))
+    }
     fn touch_reaction(&self, clip: TouchReactionClip) -> Option<ClipSlot> {
         self.touch_reactions[clip.index()].filter(|slot| !slot.duration.is_zero())
     }
@@ -326,6 +347,7 @@ register_clip!(
 );
 register_clip!(register_death_animation, death, "Death01");
 register_clip!(register_alarm_wave_animation, alarm_wave, "Alarm/Wave");
+register_clip!(register_treat_animation, treat, "Treat/Drinking");
 register_clip!(register_alarm_jump_animation, alarm_jump, "Alarm/JumpHappy");
 register_clip!(register_hit_head_animation, hit_head, "HitHead");
 register_clip!(register_hit_chest_animation, hit_chest, "HitChest");
@@ -336,6 +358,11 @@ register_clip!(
 );
 register_clip!(register_head_stroke_animation, head_stroke, "ShakeHeadNo1");
 register_clip!(register_praying_animation, praying, "Praying");
+register_clip!(
+    register_focus_typing_animation,
+    focus_typing,
+    "Focus/Typing"
+);
 register_clip!(
     register_sitting_enter_animation,
     sitting_enter,
@@ -414,6 +441,7 @@ const IDLE_SITTING_RUBBING_ARM_VRMA_PATH: &str =
 /// the actual `VrmaHandle` is inserted only when a feature first requests it.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LazyNeraVrma {
+    FocusTyping,
     Screensaver(super::screensaver::ScreensaverClip),
     SleepingIdle,
     AlarmJump,
@@ -428,6 +456,7 @@ pub(crate) enum LazyNeraVrma {
 impl LazyNeraVrma {
     fn path(self) -> &'static str {
         match self {
+            Self::FocusTyping => "animations/animasi_basic/Typing.vrma",
             Self::Screensaver(clip) => clip.path(),
             Self::SleepingIdle => SLEEPING_IDLE_VRMA_PATH,
             Self::AlarmJump => ALARM_JUMP_VRMA_PATH,
@@ -522,6 +551,12 @@ pub(crate) fn spawn_animation_library(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands<'_>,
     asset_server: &AssetServer,
 ) {
+    parent
+        .spawn((
+            Name::new("Treat/Drinking"),
+            VrmaHandle(asset_server.load(crate::treat::DRINKING_PATH)),
+        ))
+        .observe(register_treat_animation);
     for clip in super::screensaver::ScreensaverClip::ALL {
         parent
             .spawn((
@@ -626,6 +661,13 @@ pub(crate) fn spawn_animation_library(
             LazyNeraVrma::Praying,
         ))
         .observe(register_praying_animation);
+
+    parent
+        .spawn((
+            Name::new("Nera Focus Typing (lazy)"),
+            LazyNeraVrma::FocusTyping,
+        ))
+        .observe(register_focus_typing_animation);
 
     parent
         .spawn((
@@ -756,6 +798,20 @@ pub(super) fn clip_for_visual(
             RepeatAnimation::Count(1),
             "Startup/Greeting",
         ),
+        VisualState::Treat => (clips.treat, RepeatAnimation::Count(1), "Treat/Drinking"),
+        VisualState::FocusCelebrate => (
+            clips.alarm_wave,
+            RepeatAnimation::Count(1),
+            "Focus/Complete",
+        ),
+        VisualState::FocusActivity(preset) => (
+            clips.focus_activity(preset),
+            RepeatAnimation::Forever,
+            match preset {
+                crate::focus::FocusPreset::Study => "Focus/Study",
+                crate::focus::FocusPreset::Work => "Focus/Work",
+            },
+        ),
         VisualState::SittingLoop => (clips.sitting_loop, RepeatAnimation::Forever, "SittingLoop"),
         VisualState::SittingEnter => (
             clips.sitting_enter,
@@ -863,7 +919,11 @@ fn base_fallback(state: &NeraAnimationState, clips: &NeraAnimationClips) -> Opti
 
 pub(super) fn transition_for_visual(visual: VisualState) -> Duration {
     match visual {
-        VisualState::LimbReaction(_) | VisualState::TouchReaction(_) => REACTION_BLEND,
+        VisualState::LimbReaction(_)
+        | VisualState::TouchReaction(_)
+        | VisualState::Treat
+        | VisualState::FocusCelebrate => REACTION_BLEND,
+        VisualState::FocusActivity(_) => IDLE_VARIATION_BLEND,
         VisualState::Screensaver(_) => IDLE_VARIATION_BLEND,
         VisualState::LibraryAnimation(_) => REACTION_BLEND,
         VisualState::HeadStroke => HEAD_STROKE_BLEND,

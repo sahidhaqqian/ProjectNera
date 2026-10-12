@@ -214,6 +214,8 @@ fn idle_candidates(
 
 #[derive(SystemParam)]
 pub(crate) struct BehaviorContext<'w, 's> {
+    focus: Option<Res<'w, crate::focus::FocusSession>>,
+    treat: Option<Res<'w, crate::treat::TreatRuntime>>,
     cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
     settings: Res<'w, NeraSettings>,
     interaction: Res<'w, DesktopPetInteraction>,
@@ -367,6 +369,23 @@ pub(crate) fn update_pet_behavior(
             && !platform::is_window_minimized(h)
             && !platform::is_window_cloaked(h)
     });
+    // Temporary modifiers never rewrite persistent preferences. On exit this
+    // scheduler resumes using the user's current settings, including edits
+    // made while focusing. User touch/drag/headpat keep their existing path.
+    if context.focus.as_ref().is_some_and(|focus| focus.active())
+        || context.treat.as_ref().is_some_and(|treat| treat.busy())
+    {
+        let brain_ref = &mut *brain;
+        brain_ref.dance.tick(
+            false,
+            &crate::dance_pool::DancePool::default(),
+            &mut animation,
+            &mut dance_context.library,
+            &mut brain_ref.rng,
+        );
+        brain.interrupt(&mut walking, &mut animation);
+        return;
+    }
     let dance_allowed = context.available_for_dance()
         && native_visible
         && !environment.hidden_for_target_suspend

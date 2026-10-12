@@ -54,6 +54,9 @@ pub(crate) fn reset_for_character_change(world: &mut World) {
                     | TemporaryAction::Screensaver(_)
                     | TemporaryAction::TouchReaction(_)
                     | TemporaryAction::AutoDance(_)
+                    | TemporaryAction::Treat
+                    | TemporaryAction::FocusCelebrate
+                    | TemporaryAction::FocusActivity(_)
             )
         });
     if let Some(mut brain) = world.get_resource_mut::<crate::pet_behavior::PetBehavior>() {
