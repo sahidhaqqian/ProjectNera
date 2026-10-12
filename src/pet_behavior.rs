@@ -214,6 +214,7 @@ fn idle_candidates(
 
 #[derive(SystemParam)]
 pub(crate) struct BehaviorContext<'w, 's> {
+    library_motion: Option<Res<'w, crate::animation::LibraryMotion>>,
     focus: Option<Res<'w, crate::focus::FocusSession>>,
     treat: Option<Res<'w, crate::treat::TreatRuntime>>,
     cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
@@ -244,6 +245,13 @@ impl BehaviorContext<'_, '_> {
     }
 
     fn available_with_pointer(&self, pointer_available: bool) -> bool {
+        if self
+            .library_motion
+            .as_ref()
+            .is_some_and(|motion| motion.owns_placement())
+        {
+            return false;
+        }
         if self
             .cloud
             .as_ref()
@@ -374,6 +382,10 @@ pub(crate) fn update_pet_behavior(
     // made while focusing. User touch/drag/headpat keep their existing path.
     if context.focus.as_ref().is_some_and(|focus| focus.active())
         || context.treat.as_ref().is_some_and(|treat| treat.busy())
+        || context
+            .library_motion
+            .as_ref()
+            .is_some_and(|motion| motion.owns_placement())
     {
         let brain_ref = &mut *brain;
         brain_ref.dance.tick(

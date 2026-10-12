@@ -56,11 +56,12 @@ pub(crate) fn migrate_vrm0(bytes: Vec<u8>) -> Result<MigratedVrm, String> {
         })?;
 
     let mesh_to_node = mesh_to_node_map(&document);
+    let material_name_to_index = material_name_to_index_map(&document);
     let mut vrm1 = json!({
         "specVersion": "1.0",
         "meta": migrate_meta(&vrm0, &document),
         "humanoid": { "humanBones": migrate_humanoid(&vrm0)? },
-        "expressions": migrate_expressions(&vrm0, &mesh_to_node),
+        "expressions": migrate_expressions(&vrm0, &mesh_to_node, &material_name_to_index),
         "firstPerson": { "meshAnnotations": migrate_first_person(&vrm0, &mesh_to_node) },
         "lookAt": migrate_look_at(&vrm0),
     });
@@ -68,6 +69,7 @@ pub(crate) fn migrate_vrm0(bytes: Vec<u8>) -> Result<MigratedVrm, String> {
 
     let spring = migrate_spring_bones(&vrm0, &mut document)?;
     rotate_scene_roots(&mut document)?;
+    let had_mtoon = migrate_materials(&vrm0, &mut document)?;
 
     let extensions = document
         .get_mut("extensions")
@@ -82,6 +84,11 @@ pub(crate) fn migrate_vrm0(bytes: Vec<u8>) -> Result<MigratedVrm, String> {
     replace_extension_name(&mut document, "extensionsRequired", "VRM", "VRMC_vrm");
     if document.pointer("/extensions/VRMC_springBone").is_some() {
         add_extension_name(&mut document, "extensionsUsed", "VRMC_springBone");
+    }
+    if had_mtoon {
+        add_extension_name(&mut document, "extensionsUsed", "VRMC_materials_mtoon");
+        add_extension_name(&mut document, "extensionsUsed", "KHR_materials_unlit");
+        add_extension_name(&mut document, "extensionsUsed", "KHR_texture_transform");
     }
     mark_vrm0_migration(&mut document);
     repair_named_expressions(&mut document);
@@ -161,7 +168,9 @@ fn looks_like_unmarked_vrm0_migration(document: &Value) -> bool {
                 && values[3].abs() < 0.001
         })
     });
-    kept_legacy_unlit && !has_mtoon && has_migration_rotation
+    // Only the original, pre-MToon migrator lacked a marker. MToon and a
+    // rotated root are both legal in native VRM1 and are not provenance.
+    has_migration_rotation && kept_legacy_unlit && !has_mtoon
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
@@ -312,7 +321,28 @@ fn mesh_to_node_map(document: &Value) -> HashMap<u64, u64> {
         .collect()
 }
 
-fn migrate_expressions(vrm0: &Value, mesh_to_node: &HashMap<u64, u64>) -> Value {
+fn material_name_to_index_map(document: &Value) -> HashMap<String, usize> {
+    let mut by_name = HashMap::new();
+    for (index, material) in document
+        .get("materials")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(name) = material.get("name").and_then(Value::as_str) {
+            // VRM0 expression bindings use names; UniVRM chooses the first match.
+            by_name.entry(name.to_owned()).or_insert(index);
+        }
+    }
+    by_name
+}
+
+fn migrate_expressions(
+    vrm0: &Value,
+    mesh_to_node: &HashMap<u64, u64>,
+    material_name_to_index: &HashMap<String, usize>,
+) -> Value {
     let presets = HashMap::from([
         ("joy", "happy"),
         ("happy", "happy"),
@@ -370,6 +400,59 @@ fn migrate_expressions(vrm0: &Value, mesh_to_node: &HashMap<u64, u64>) -> Value 
                 }))
             })
             .collect();
+        let material_binds: Vec<_> = group
+            .get("materialValues")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|mat_val| {
+                let mat_name = mat_val.get("materialName")?.as_str()?;
+                let mat_idx = material_name_to_index.get(mat_name).copied()?;
+                let prop = mat_val.get("propertyName")?.as_str()?;
+                let bind_type = match prop {
+                    "_Color" => "color",
+                    "_EmissionColor" => "emissionColor",
+                    "_ShadeColor" => "shadeColor",
+                    "_RimColor" => "rimColor",
+                    "_OutlineColor" => "outlineColor",
+                    _ => return None,
+                };
+                let target_value = mat_val.get("targetValue")?.as_array()?;
+                Some(json!({
+                    "material": mat_idx,
+                    "type": bind_type,
+                    "targetValue": target_value,
+                }))
+            })
+            .collect();
+        // Preserve texture-expression data even though bevy_vrm1 0.9.2 only
+        // evaluates morph bindings. Do not invent a parallel expression owner.
+        let mut texture_materials = HashSet::new();
+        let texture_binds: Vec<_> = group
+            .get("materialValues")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|bind| {
+                let material = *material_name_to_index.get(bind.get("materialName")?.as_str()?)?;
+                let target = bind.get("targetValue")?.as_array()?;
+                if target.len() != 4 {
+                    return None;
+                }
+                let value = |i: usize| target[i].as_f64();
+                let (scale, offset) = match bind.get("propertyName")?.as_str()? {
+                    "_MainTex_ST" => ([value(0)?, value(1)?], [value(2)?, value(3)?]),
+                    "_MainTex_ST_S" => ([value(0)?, 1.0], [value(2)?, 0.0]),
+                    "_MainTex_ST_T" => ([1.0, value(1)?], [0.0, value(3)?]),
+                    _ => return None,
+                };
+                if !texture_materials.insert(material) {
+                    return None;
+                }
+                Some(json!({"material":material, "scale":scale,
+                    "offset":[offset[0], 1.0 - offset[1] - scale[1]]}))
+            })
+            .collect();
         let mut expression = json!({
             "isBinary": group.get("isBinary").and_then(Value::as_bool).unwrap_or(false),
             "overrideBlink": "none",
@@ -378,6 +461,12 @@ fn migrate_expressions(vrm0: &Value, mesh_to_node: &HashMap<u64, u64>) -> Value 
         });
         if !binds.is_empty() {
             expression["morphTargetBinds"] = Value::Array(binds);
+        }
+        if !material_binds.is_empty() {
+            expression["materialColorBinds"] = Value::Array(material_binds);
+        }
+        if !texture_binds.is_empty() {
+            expression["textureTransformBinds"] = Value::Array(texture_binds);
         }
         if let Some(key) = key {
             preset.insert(key.into(), expression);
@@ -554,11 +643,17 @@ fn migrate_look_at(vrm0: &Value) -> Value {
             "outputScale": source.get("yRange").and_then(Value::as_f64).unwrap_or(10.0),
         })
     };
+    let x = offset.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let y = offset.get("y").and_then(Value::as_f64).unwrap_or(0.06);
+    let z = offset.get("z").and_then(Value::as_f64).unwrap_or(0.0);
     json!({
+        // Child-local frames remain VRM0 glTF frames (Unity Z reflection).
+        // The root's Y rotation supplies the other reflection globally; do
+        // not also invert local X as a full geometry-rewriting migrator does.
         "offsetFromHeadBone": [
-            offset.get("x").and_then(Value::as_f64).unwrap_or(0.0),
-            offset.get("y").and_then(Value::as_f64).unwrap_or(0.06),
-            offset.get("z").and_then(Value::as_f64).unwrap_or(0.0),
+            x,
+            y,
+            if z == 0.0 { 0.0 } else { -z },
         ],
         "type": if first.get("lookAtTypeName").and_then(Value::as_str) == Some("Bone") { "bone" } else { "expression" },
         "rangeMapHorizontalInner": range("lookAtHorizontalInner"),
@@ -765,7 +860,9 @@ fn migrate_spring_bones(vrm0: &Value, document: &mut Value) -> Result<Option<Val
             .flatten()
         {
             indices.push(colliders.len());
-            let offset = vec3(collider.get("offset"), [0.0, 0.0, 0.0]);
+            let [x, y, z] = vec3(collider.get("offset"), [0.0, 0.0, 0.0]);
+            // Like lookAt, collider offsets live in the unchanged local frame.
+            let offset = [x, y, -z];
             colliders.push(json!({
                 "node": node,
                 "shape": { "sphere": {
@@ -838,6 +935,12 @@ fn migrate_spring_bones(vrm0: &Value, document: &mut Value) -> Result<Option<Val
                     .ok_or_else(|| "Legacy character has no skeleton nodes.".to_owned())?;
                 append_tail(nodes, &source_nodes, leaf, &mut tail_by_leaf)?
             };
+            let gravity_dir = {
+                let dir = vec3(group.get("gravityDir"), [0.0, -1.0, 0.0]);
+                let gx = if dir[0] == 0.0 { 0.0 } else { -dir[0] };
+                // Gravity is world-space, unlike head/collider offsets.
+                [gx, dir[1], dir[2]]
+            };
             let mut joints: Vec<_> = path
                 .iter()
                 .map(|node| {
@@ -845,7 +948,7 @@ fn migrate_spring_bones(vrm0: &Value, document: &mut Value) -> Result<Option<Val
                         "node": node,
                         "stiffness": number(group, "stiffiness", 1.0),
                         "gravityPower": number(group, "gravityPower", 0.0),
-                        "gravityDir": vec3(group.get("gravityDir"), [0.0, -1.0, 0.0]),
+                        "gravityDir": gravity_dir,
                         "dragForce": number(group, "dragForce", 0.4),
                         "hitRadius": number(group, "hitRadius", 0.02),
                     })
@@ -905,8 +1008,215 @@ fn rotate_scene_roots(document: &mut Value) -> Result<(), String> {
             .unwrap_or([0.0, 0.0, 0.0, 1.0]);
         let [x, y, z, w] = current;
         node.insert("rotation".into(), json!([-z, w, x, -y]));
+        if let Some(translation) = node.get_mut("translation").and_then(Value::as_array_mut) {
+            if translation.len() >= 3 {
+                let tx = translation[0].as_f64().unwrap_or(0.0);
+                let tz = translation[2].as_f64().unwrap_or(0.0);
+                translation[0] = json!(if tx == 0.0 { 0.0 } else { -tx });
+                translation[2] = json!(if tz == 0.0 { 0.0 } else { -tz });
+            }
+        }
     }
     Ok(())
+}
+
+fn migrate_materials(vrm0: &Value, document: &mut Value) -> Result<bool, String> {
+    let Some(props) = vrm0
+        .pointer("/materialProperties")
+        .and_then(Value::as_array)
+    else {
+        return Ok(false);
+    };
+    let Some(materials) = document.get_mut("materials").and_then(Value::as_array_mut) else {
+        return Ok(false);
+    };
+
+    let mut had_mtoon = false;
+    // VRM0 materialProperties correspond to glTF materials by index, not name.
+    for (prop_idx, prop) in props.iter().enumerate() {
+        let Some(material) = materials.get_mut(prop_idx).and_then(Value::as_object_mut) else {
+            continue;
+        };
+
+        let shader = prop.get("shader").and_then(Value::as_str).unwrap_or("");
+        if shader != "VRM/MToon" {
+            continue;
+        }
+
+        let floats = prop.get("floatProperties").unwrap_or(&Value::Null);
+        let vectors = prop.get("vectorProperties").unwrap_or(&Value::Null);
+        let textures = prop.get("textureProperties").unwrap_or(&Value::Null);
+
+        let shade_color =
+            vec3_field(vectors.get("_ShadeColor"), [0.97, 0.81, 0.86]).map(srgb_to_linear);
+        let outline_color =
+            vec3_field(vectors.get("_OutlineColor"), [0.0, 0.0, 0.0]).map(srgb_to_linear);
+        let rim_color = vec3_field(vectors.get("_RimColor"), [0.0, 0.0, 0.0]).map(srgb_to_linear);
+
+        let outline_mode_num = number(floats, "_OutlineWidthMode", 0.0);
+        let (outline_width_mode, width_unit) = match outline_mode_num {
+            1.0 => ("worldCoordinates", 0.01),
+            2.0 => ("screenCoordinates", 0.005),
+            _ => ("none", 0.0),
+        };
+        let outline_width_factor = number(floats, "_OutlineWidth", 0.0) * width_unit;
+        // Unity's texture origin is vertically flipped relative to glTF.
+        let uv = vectors.get("_MainTex").and_then(Value::as_array);
+        let component = |i: usize, default: f64| {
+            uv.and_then(|v| v.get(i))
+                .and_then(Value::as_f64)
+                .unwrap_or(default)
+        };
+        let uv_transform = json!({
+            "offset": [component(0, 0.0), 1.0 - component(1, 0.0) - component(3, 1.0)],
+            "scale": [component(2, 1.0), component(3, 1.0)],
+        });
+        let texture = |index: Option<u64>| {
+            index.map(|index| {
+                json!({
+                    "index": index,
+                    "extensions": { "KHR_texture_transform": uv_transform.clone() }
+                })
+            })
+        };
+        let main_texture = texture_ref(textures.get("_MainTex"));
+        let shade_multiply_texture =
+            texture(texture_ref(textures.get("_ShadeTexture")).or(main_texture));
+        let matcap_texture =
+            texture_ref(textures.get("_SphereAdd")).map(|index| json!({"index":index}));
+        let rim_multiply_texture = texture(texture_ref(textures.get("_RimTexture")));
+        let outline_width_multiply_texture =
+            texture(texture_ref(textures.get("_OutlineWidthTexture")));
+        let uv_animation_mask_texture = texture(texture_ref(textures.get("_UvAnimMaskTexture")));
+        // MToon0's shading grade texture is not MToon1's signed shift texture.
+        // UniVRM does not carry it across as if those semantics were identical.
+        let blend_mode = number(floats, "_BlendMode", 0.0);
+        let transparent_with_z_write = blend_mode == 3.0;
+        material.insert(
+            "alphaMode".into(),
+            json!(match blend_mode {
+                1.0 => "MASK",
+                2.0 | 3.0 => "BLEND",
+                _ => "OPAQUE",
+            }),
+        );
+        material.insert(
+            "alphaCutoff".into(),
+            json!(if blend_mode == 1.0 {
+                number(floats, "_Cutoff", 0.5)
+            } else {
+                0.5
+            }),
+        );
+        material.insert(
+            "doubleSided".into(),
+            json!(number(floats, "_CullMode", 2.0) != 2.0),
+        );
+        // Convert legacy sRGB colors once. Emission is already linear.
+        let mut color = vectors
+            .get("_Color")
+            .and_then(Value::as_array)
+            .filter(|v| v.len() == 4)
+            .cloned()
+            .unwrap_or_else(|| vec![json!(1.0); 4]);
+        for component in &mut color[..3] {
+            *component = json!(srgb_to_linear(component.as_f64().unwrap_or(1.0)));
+        }
+        let pbr = material
+            .entry("pbrMetallicRoughness")
+            .or_insert_with(|| json!({}));
+        if let Some(pbr) = pbr.as_object_mut() {
+            pbr.insert("baseColorFactor".into(), json!(color));
+            pbr.insert("metallicFactor".into(), json!(0.0));
+            pbr.insert("roughnessFactor".into(), json!(0.9));
+            if let Some(main) = texture(main_texture) {
+                pbr.insert("baseColorTexture".into(), main);
+            }
+        }
+        if let Some(mut normal) = texture(texture_ref(textures.get("_BumpMap"))) {
+            normal["scale"] = json!(number(floats, "_BumpScale", 1.0));
+            material.insert("normalTexture".into(), normal);
+        }
+        if let Some(emission) = texture(texture_ref(textures.get("_EmissionMap"))) {
+            material.insert("emissiveTexture".into(), emission);
+        }
+        material.insert(
+            "emissiveFactor".into(),
+            json!(vec3_field(vectors.get("_EmissionColor"), [0.0; 3])),
+        );
+        // UniVRM MToon10Migrator: convert the old shade transition interval.
+        let range_min = number(floats, "_ShadeShift", 0.0);
+        let range_max =
+            1.0 + (range_min - 1.0) * number(floats, "_ShadeToony", 0.9).clamp(0.0, 1.0);
+
+        let mtoon = json!({
+            "specVersion": "1.0",
+            "matcapFactor": if matcap_texture.is_some() { [1.0; 3] } else { [0.0; 3] },
+            "matcapTexture": matcap_texture,
+            "parametricRimFresnelPowerFactor": number(floats, "_RimFresnelPower", 5.0),
+            "rimMultiplyTexture": rim_multiply_texture,
+            "outlineColorFactor": outline_color,
+            "outlineLightingMixFactor": if number(floats, "_OutlineColorMode", 0.0) == 1.0 { number(floats, "_OutlineLightingMix", 1.0) } else { 0.0 },
+            "outlineWidthFactor": outline_width_factor,
+            "outlineWidthMultiplyTexture": outline_width_multiply_texture,
+            "outlineWidthMode": outline_width_mode,
+            "parametricRimColorFactor": rim_color,
+            "parametricRimLiftFactor": number(floats, "_RimLift", 0.0),
+            "rimLightingMixFactor": 1.0,
+            "shadeColorFactor": shade_color,
+            "shadeMultiplyTexture": shade_multiply_texture,
+            "renderQueueOffsetNumber": 0.0,
+            "shadingShiftFactor": (-(range_max + range_min) * 0.5).clamp(-1.0, 1.0),
+            "shadingShiftTexture": null,
+            "shadingToonyFactor": ((2.0 - (range_max - range_min)) * 0.5).clamp(0.0, 1.0),
+            "transparentWithZWrite": transparent_with_z_write,
+            "uvAnimationMaskTexture": uv_animation_mask_texture,
+            "uvAnimationRotationSpeedFactor": number(floats, "_UvAnimRotation", 0.0) * std::f64::consts::TAU,
+            "uvAnimationScrollXSpeedFactor": number(floats, "_UvAnimScrollX", 0.0),
+            "uvAnimationScrollYSpeedFactor": -number(floats, "_UvAnimScrollY", 0.0),
+            "giEqualizationFactor": (1.0 - number(floats, "_IndirectLightIntensity", 0.1)).clamp(0.0, 1.0),
+        });
+
+        let mat_exts = material
+            .entry("extensions")
+            .or_insert_with(|| json!({}))
+            .as_object_mut();
+        if let Some(mat_exts) = mat_exts {
+            mat_exts
+                .entry("KHR_materials_unlit")
+                .or_insert_with(|| json!({}));
+            mat_exts.insert("VRMC_materials_mtoon".into(), mtoon);
+            had_mtoon = true;
+        }
+    }
+
+    Ok(had_mtoon)
+}
+
+fn srgb_to_linear(value: f64) -> f64 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn texture_ref(value: Option<&Value>) -> Option<u64> {
+    value
+        .and_then(Value::as_i64)
+        .filter(|&idx| idx >= 0)
+        .map(|idx| idx as u64)
+}
+
+fn vec3_field(value: Option<&Value>, fallback: [f64; 3]) -> [f64; 3] {
+    let Some(arr) = value.and_then(Value::as_array) else {
+        return fallback;
+    };
+    [
+        arr.first().and_then(Value::as_f64).unwrap_or(fallback[0]),
+        arr.get(1).and_then(Value::as_f64).unwrap_or(fallback[1]),
+        arr.get(2).and_then(Value::as_f64).unwrap_or(fallback[2]),
+    ]
 }
 
 fn replace_extension_name(document: &mut Value, field: &str, old: &str, new: &str) {
@@ -989,7 +1299,7 @@ mod tests {
     #[test]
     fn unnamed_legacy_presets_and_semantic_custom_groups_are_supported() {
         let old = json!({"blendShapeMaster":{"blendShapeGroups":[{"name":"Angry","binds":[{"mesh":0,"index":2,"weight":90}]}]}});
-        let migrated = migrate_expressions(&old, &HashMap::from([(0, 5)]));
+        let migrated = migrate_expressions(&old, &HashMap::from([(0, 5)]), &HashMap::new());
         assert_eq!(
             migrated["preset"]["angry"]["morphTargetBinds"][0],
             json!({"node":5,"index":2,"weight":0.9})
@@ -1031,6 +1341,32 @@ mod tests {
             assert_eq!(range["outputScale"], json!(10.0));
         }
         serde_json::from_value::<VrmExtensions>(document["extensions"].clone()).unwrap();
+
+        // Verify standard MToon material migration conforms to bevy_vrm1's exact parser
+        let first_mat = &document["materials"][0];
+        let mtoon = &first_mat["extensions"]["VRMC_materials_mtoon"];
+        assert_eq!(mtoon["specVersion"], json!("1.0"));
+        assert!(first_mat["extensions"].get("KHR_materials_unlit").is_some());
+        let mtoon_struct: bevy_vrm1::prelude::VrmcMaterialsExtensitions =
+            serde_json::from_value(mtoon.clone())
+                .expect("Migrated MToon must deserialize cleanly into bevy_vrm1");
+        assert_eq!(mtoon_struct.spec_version, "1.0");
+
+        // Verify LookAt offsetFromHeadBone inverted X/Z for 180° Y root frame
+        let look_at = &document["extensions"]["VRMC_vrm"]["lookAt"];
+        let offset = look_at["offsetFromHeadBone"].as_array().unwrap();
+        assert_eq!(offset, &vec![json!(0.0), json!(0.0), json!(0.0)]);
+
+        // Verify scene roots have Y 180-deg rotation quaternion applied
+        let scene_root = document["scenes"][0]["nodes"][0].as_u64().unwrap() as usize;
+        let root_node = &document["nodes"][scene_root];
+        assert_eq!(root_node["rotation"], json!([-0.0, 1.0, 0.0, -0.0]));
+
+        // Verify SpringBone specVersion if present
+        if let Some(spring_bone) = document.pointer("/extensions/VRMC_springBone") {
+            assert_eq!(spring_bone["specVersion"], json!("1.0"));
+        }
+
         assert_eq!(
             &original[20 + old_json_length..],
             &migrated.bytes[20 + new_json_length..]
@@ -1081,6 +1417,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("neraMigratedFromVrm0");
+        // Reproduce the actual pre-MToon writer, not an unmarked modern VRM1.
+        for material in document["materials"].as_array_mut().unwrap() {
+            material["extensions"]
+                .as_object_mut()
+                .unwrap()
+                .remove("VRMC_materials_mtoon");
+        }
         let unmarked = rebuild_glb(&migrated.bytes, json_length, &document).unwrap();
 
         let recognized = migrate_vrm0(unmarked).unwrap();
@@ -1091,5 +1434,207 @@ mod tests {
             recognized_document.pointer("/asset/extras/neraMigratedFromVrm0"),
             Some(&json!(true))
         );
+    }
+    fn migrated_material(floats: Value, vectors: Value, textures: Value) -> Value {
+        let mut document = json!({"materials":[{"name":"skin"}]});
+        assert!(
+            migrate_materials(
+                &json!({"materialProperties":[{
+                    "name":"skin", "shader":"VRM/MToon", "floatProperties":floats,
+                    "vectorProperties":vectors, "textureProperties":textures
+                }]}),
+                &mut document
+            )
+            .unwrap()
+        );
+        document["materials"][0].clone()
+    }
+
+    fn close(actual: &Value, expected: f64) {
+        assert!(
+            (actual.as_f64().unwrap() - expected).abs() < 1e-8,
+            "{actual} != {expected}"
+        );
+    }
+
+    #[test]
+    fn mtoon_converts_shading_gi_and_color_space() {
+        let material = migrated_material(
+            json!({"_ShadeToony":0.9,"_ShadeShift":0.0,
+            "_IndirectLightIntensity":0.1}),
+            json!({"_ShadeColor":[0.5,0.5,0.5,1.0],
+            "_Color":[0.5,0.5,0.5,0.7],"_EmissionColor":[0.5,0.5,0.5,1.0]}),
+            json!({}),
+        );
+        let m = &material["extensions"]["VRMC_materials_mtoon"];
+        close(&m["shadingToonyFactor"], 0.95);
+        close(&m["shadingShiftFactor"], -0.05);
+        close(&m["giEqualizationFactor"], 0.9);
+        close(&m["shadeColorFactor"][0], 0.21404114048223255);
+        close(
+            &material["pbrMetallicRoughness"]["baseColorFactor"][0],
+            0.21404114048223255,
+        );
+        close(&material["pbrMetallicRoughness"]["baseColorFactor"][3], 0.7);
+        close(&material["emissiveFactor"][0], 0.5);
+        serde_json::from_value::<bevy_vrm1::prelude::VrmcMaterialsExtensitions>(m.clone()).unwrap();
+    }
+
+    #[test]
+    fn mtoon_float_enums_alpha_and_outline_units() {
+        for (mode, name, width) in [
+            (0.0, "none", 0.0),
+            (1.0, "worldCoordinates", 0.02),
+            (2.0, "screenCoordinates", 0.01),
+        ] {
+            let material = migrated_material(
+                json!({"_OutlineWidthMode":mode,"_OutlineWidth":2.0}),
+                json!({}),
+                json!({}),
+            );
+            let m = &material["extensions"]["VRMC_materials_mtoon"];
+            assert_eq!(m["outlineWidthMode"], name);
+            close(&m["outlineWidthFactor"], width);
+        }
+        for (mode, alpha, zwrite) in [
+            (0.0, "OPAQUE", false),
+            (1.0, "MASK", false),
+            (2.0, "BLEND", false),
+            (3.0, "BLEND", true),
+        ] {
+            let material = migrated_material(
+                json!({"_BlendMode":mode,"_ZWrite":1.0,"_Cutoff":0.25}),
+                json!({}),
+                json!({}),
+            );
+            assert_eq!(material["alphaMode"], alpha);
+            assert_eq!(
+                material["extensions"]["VRMC_materials_mtoon"]["transparentWithZWrite"],
+                zwrite
+            );
+            close(
+                &material["alphaCutoff"],
+                if mode == 1.0 { 0.25 } else { 0.5 },
+            );
+        }
+    }
+
+    #[test]
+    fn mtoon_retains_texture_scale_and_converts_uv_origin_and_speed() {
+        let material = migrated_material(
+            json!({"_UvAnimRotation":0.5,"_UvAnimScrollY":0.2}),
+            json!({"_MainTex":[0.25,0.1,2.0,3.0]}),
+            json!({"_MainTex":0,"_ShadeTexture":1,"_RimTexture":2}),
+        );
+        let m = &material["extensions"]["VRMC_materials_mtoon"];
+        for texture in [
+            &m["shadeMultiplyTexture"],
+            &m["rimMultiplyTexture"],
+            &material["pbrMetallicRoughness"]["baseColorTexture"],
+        ] {
+            let uv = &texture["extensions"]["KHR_texture_transform"];
+            assert_eq!(uv["scale"], json!([2.0, 3.0]));
+            close(&uv["offset"][0], 0.25);
+            close(&uv["offset"][1], -2.1);
+        }
+        close(&m["uvAnimationRotationSpeedFactor"], std::f64::consts::PI);
+        close(&m["uvAnimationScrollYSpeedFactor"], -0.2);
+        let fallback = migrated_material(json!({}), json!({}), json!({"_MainTex":3}));
+        assert_eq!(
+            fallback["extensions"]["VRMC_materials_mtoon"]["shadeMultiplyTexture"]["index"],
+            3
+        );
+    }
+
+    #[test]
+    fn duplicate_material_names_do_not_collapse_material_slots() {
+        let mut document = json!({"materials":[{"name":"same"},{"name":"same"}]});
+        let props = json!({"materialProperties":[
+            {"name":"same","shader":"VRM/MToon","floatProperties":{"_ShadeToony":0.0}},
+            {"name":"same","shader":"VRM/MToon","floatProperties":{"_ShadeToony":1.0}}
+        ]});
+        migrate_materials(&props, &mut document).unwrap();
+        close(
+            &document["materials"][0]["extensions"]["VRMC_materials_mtoon"]["shadingToonyFactor"],
+            0.5,
+        );
+        close(
+            &document["materials"][1]["extensions"]["VRMC_materials_mtoon"]["shadingToonyFactor"],
+            1.0,
+        );
+        assert_eq!(material_name_to_index_map(&document)["same"], 0);
+    }
+
+    #[test]
+    fn native_vrm1_rotated_helper_does_not_enable_legacy_gaze() {
+        let original = include_bytes!("../assets/vrm/nera_256.vrm").to_vec();
+        let (length, mut document) = parse_document(&original).unwrap();
+        let nodes = document["nodes"].as_array_mut().unwrap();
+        let helper = nodes.len();
+        nodes.push(json!({"name":"unrelated helper","rotation":[0.0,1.0,0.0,0.0]}));
+        document["scenes"][0]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(helper));
+        assert!(!looks_like_unmarked_vrm0_migration(&document));
+        let result = migrate_vrm0(rebuild_glb(&original, length, &document).unwrap()).unwrap();
+        assert!(!result.converted && !result.migrated_from_vrm0);
+    }
+
+    #[test]
+    fn local_offsets_and_world_gravity_use_distinct_coordinate_frames() {
+        use bevy::math::{Mat4, Quat, Vec3};
+        let offset = Vec3::new(0.2, 0.3, 0.4);
+        let old = json!({"firstPerson":{"firstPersonBoneOffset":{"x":0.2,"y":0.3,"z":0.4}},
+            "secondaryAnimation":{"colliderGroups":[{"node":0,"colliders":[{"offset":{"x":0.2,"y":0.3,"z":0.4}}]}],
+            "boneGroups":[{"bones":[0],"gravityDir":{"x":0.6,"y":0.0,"z":0.8}}]}});
+        let gaze = migrate_look_at(&old);
+        let mut document = json!({"nodes":[{"children":[1]}, {"translation":[0.0,0.2,0.0]}]});
+        let spring = migrate_spring_bones(&old, &mut document).unwrap().unwrap();
+        assert_eq!(
+            spring["springs"][0]["joints"][0]["gravityDir"],
+            json!([-0.6, 0.0, 0.8])
+        );
+        // Independent reference: Unity local -> world -> VRM1 reflection X.
+        // Nera preserves VRM0 child frames (Z reflection), rotating only roots.
+        let unity = Mat4::from_rotation_translation(
+            Quat::from_rotation_y(0.47) * Quat::from_rotation_x(0.2),
+            Vec3::new(0.1, 1.0, 0.3),
+        );
+        let flip_z = Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0));
+        let flip_x = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+        let preserved_node = flip_z * unity * flip_z;
+        let root = Mat4::from_rotation_y(std::f32::consts::PI);
+        let expected = (flip_x * unity).transform_point3(offset);
+        for local in [
+            &gaze["offsetFromHeadBone"],
+            &spring["colliders"][0]["shape"]["sphere"]["offset"],
+        ] {
+            let local = Vec3::new(
+                local[0].as_f64().unwrap() as f32,
+                local[1].as_f64().unwrap() as f32,
+                local[2].as_f64().unwrap() as f32,
+            );
+            assert!(((root * preserved_node).transform_point3(local) - expected).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn expressions_preserve_material_and_texture_binds_without_treating_textures_as_colors() {
+        let old = json!({"blendShapeMaster":{"blendShapeGroups":[{"presetName":"joy","materialValues":[
+            {"materialName":"skin","propertyName":"_ShadeColor","targetValue":[0.2,0.3,0.4,1.0]},
+            {"materialName":"skin","propertyName":"_MainTex_ST","targetValue":[2.0,3.0,0.25,0.1]},
+            {"materialName":"skin","propertyName":"_SphereAdd","targetValue":[1.0,1.0,1.0,1.0]}
+        ]}]}});
+        let expressions =
+            migrate_expressions(&old, &HashMap::new(), &HashMap::from([("skin".into(), 0)]));
+        let happy = &expressions["preset"]["happy"];
+        assert_eq!(happy["materialColorBinds"].as_array().unwrap().len(), 1);
+        assert_eq!(happy["materialColorBinds"][0]["type"], "shadeColor");
+        assert_eq!(
+            happy["textureTransformBinds"][0]["scale"],
+            json!([2.0, 3.0])
+        );
+        close(&happy["textureTransformBinds"][0]["offset"][1], -2.1);
     }
 }

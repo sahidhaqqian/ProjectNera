@@ -71,7 +71,7 @@ fn death_fallback_floor_y_logical(environment: &DesktopEnvironment) -> Option<f3
     Some(rect.height().max(1) as f32 / scale * DEATH_FALLBACK_FLOOR_RATIO)
 }
 
-fn standing_support_offset(settings: &NeraSettings, body_scale: f32) -> f32 {
+pub(crate) fn standing_support_offset(settings: &NeraSettings, body_scale: f32) -> f32 {
     FOOT_SOLE_OFFSET_LOGICAL * settings.character_scale() * body_scale
         + settings.ground_offset_logical()
 }
@@ -123,7 +123,7 @@ impl StandingAnchorSampling {
 /// Solve the required root movement at the actual contact depth. A screen-space
 /// pixel/world ratio at the avatar origin is inaccurate for forward-moving VRMA
 /// hips and feet in a perspective camera.
-fn contact_y_correction(
+pub(crate) fn contact_y_correction(
     camera: &Camera,
     view: &GlobalTransform,
     contact: Vec3,
@@ -203,6 +203,13 @@ pub(crate) fn preserve_grounded_pose(
     >,
     bones: Query<(&VrmBone, &GlobalTransform), With<crate::interaction::NeraLiveBone>>,
 ) {
+    if owners
+        .motion
+        .as_ref()
+        .is_some_and(|motion| motion.owns_placement())
+    {
+        return;
+    }
     use crate::animation::{GroundingPolicy, grounding_policy};
     let Ok((entity, mut root, hips, preparing_character)) = avatars.single_mut() else {
         *grounding = AvatarVisualGrounding::default();
@@ -407,6 +414,7 @@ pub(crate) fn preserve_seated_hips(
 #[cfg(target_os = "windows")]
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct AnchorOwners<'w> {
+    motion: Option<Res<'w, crate::animation::LibraryMotion>>,
     library: Option<Res<'w, crate::animation::LibraryPlayback>>,
     cloud: Option<Res<'w, crate::cloud::CloudRuntime>>,
     clips: Option<Res<'w, crate::animation::NeraAnimationClips>>,
@@ -446,6 +454,13 @@ pub(crate) fn update_avatar_anchors(
     children_query: Query<&Children>,
     bone_query: Query<(&VrmBone, &GlobalTransform)>,
 ) {
+    if owners
+        .motion
+        .as_ref()
+        .is_some_and(|motion| motion.owns_placement())
+    {
+        return;
+    }
     let cloud = owners.cloud;
     let standing_sample_ready =
         standing_sample.ready(animation.visual_state(), walking.active(), time.delta());

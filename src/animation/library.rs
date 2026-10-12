@@ -1,7 +1,7 @@
 //! Load a gallery selection on the desktop rig, then use the normal controller.
 use std::{collections::HashMap, time::Duration};
 
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use bevy_vrm1::prelude::*;
 
 use super::{NeraAnimationClips, NeraAnimationState, TemporaryAction, playback::ClipSlot};
@@ -36,6 +36,11 @@ struct CachedClip {
     entity: Entity,
     source_bytes: u64,
     last_used: u64,
+}
+
+#[derive(Component)]
+pub(super) struct LibrarySource {
+    pub asset: Handle<VrmaAsset>,
 }
 
 #[derive(Resource, Default)]
@@ -229,6 +234,24 @@ fn validate_clip_durations(
     Ok(())
 }
 
+#[derive(SystemParam)]
+pub(super) struct LibraryAdmission<'w> {
+    interaction: Option<Res<'w, crate::interaction::DesktopPetInteraction>>,
+    presentation: Option<Res<'w, crate::presentation::PresentationState>>,
+    loading: Option<Res<'w, crate::character::CharacterImportStatus>>,
+}
+impl LibraryAdmission<'_> {
+    fn blocked(&self) -> bool {
+        self.interaction.as_ref().is_some_and(|i| {
+            i.state == crate::interaction::InteractionState::Dragging || i.drag_offset.is_some()
+        }) || self
+            .presentation
+            .as_ref()
+            .is_some_and(|p| !p.is_desktop_pet())
+            || self.loading.as_ref().is_some_and(|s| s.loading)
+    }
+}
+
 pub(super) fn sync_library_animation(
     mut requests: MessageReader<PlayLibraryAnimation>,
     avatar: Query<Entity, (With<NeraAvatar>, With<Initialized>)>,
@@ -243,12 +266,21 @@ pub(super) fn sync_library_animation(
     mut clips: ResMut<NeraAnimationClips>,
     mut state: ResMut<NeraAnimationState>,
     mut commands: Commands,
+    admission: LibraryAdmission,
 ) {
     // Last click wins, including when the previous selection is still loading.
     if let Some(request) = requests.read().last() {
         runtime.requested = Some(request.path.clone());
         runtime.requested_auto = false;
         state.cancel_auto_dance();
+    }
+    if runtime.manual_pending() && admission.blocked() {
+        let path = runtime.requested.take().unwrap();
+        runtime.reject(
+            path,
+            "Another interaction or presentation currently owns Nera.".into(),
+            &mut errors,
+        );
     }
     for (_, mut loaded) in &mut ready {
         loaded.warmup = loaded.warmup.saturating_sub(1);
@@ -304,6 +336,9 @@ pub(super) fn sync_library_animation(
                         .spawn((
                             Name::new(format!("Nera Library: {}", loading.path)),
                             VrmaHandle(loading.handle.clone()),
+                            LibrarySource {
+                                asset: loading.handle.clone(),
+                            },
                             ChildOf(root),
                         ))
                         .observe(loaded)

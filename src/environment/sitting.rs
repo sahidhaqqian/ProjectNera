@@ -737,7 +737,14 @@ pub(super) fn follow_sitting_attachment(
     mut timer: ResMut<SittingTimer>,
     mut environment: ResMut<DesktopEnvironment>,
     mut window_query: Query<&mut Window, With<PrimaryWindow>>,
+    motion: Option<Res<crate::animation::LibraryMotion>>,
 ) {
+    if motion
+        .as_ref()
+        .is_some_and(|motion| motion.owns_placement())
+    {
+        return;
+    }
     let refresh_z_order = if !timer.z_order_initialized {
         timer.z_order_initialized = true;
         true

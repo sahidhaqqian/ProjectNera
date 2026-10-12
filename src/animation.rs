@@ -16,6 +16,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 mod library;
+mod library_motion;
 mod limbs;
 mod playback;
 pub(crate) mod screensaver;
@@ -25,6 +26,9 @@ pub(crate) mod touch;
 mod walking_loop;
 
 pub(crate) use library::{LibraryAnimationError, LibraryPlayback, PlayLibraryAnimation};
+pub(crate) use library_motion::LibraryMotion;
+#[cfg(debug_assertions)]
+pub(crate) use library_motion::smoke::install as install_library_motion_smoke;
 pub(crate) use playback::*;
 pub(crate) use state::*;
 pub(crate) use systems::*;
@@ -35,6 +39,7 @@ pub(crate) struct NeraAnimationPlugin;
 /// Clip entities and their graph indices belong to one rig. Keep the current
 /// seated/standing behavior, but discard every reference to the replaced rig.
 pub(crate) fn reset_for_character_change(world: &mut World) {
+    library_motion::clear(world);
     world.insert_resource(NeraAnimationClips::default());
     world.insert_resource(NeraAnimationPlayback::default());
     world.insert_resource(library::LibraryPlayback::default());
@@ -143,6 +148,7 @@ pub(crate) fn install_library_test_systems(app: &mut App) {
 
 impl Plugin for NeraAnimationPlugin {
     fn build(&self, app: &mut App) {
+        library_motion::install(app);
         limbs::install(app);
         touch::seated::install(app);
         app.init_resource::<NeraAnimationState>()

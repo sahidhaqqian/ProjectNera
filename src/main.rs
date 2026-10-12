@@ -150,6 +150,7 @@ fn main() {
                     | "--living-smoke"
                     | "--treat-focus-smoke"
                     | "--focus-activity-smoke"
+                    | "--library-motion-smoke"
             )
         });
     #[cfg(not(debug_assertions))]

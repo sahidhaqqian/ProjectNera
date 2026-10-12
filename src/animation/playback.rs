@@ -1013,7 +1013,9 @@ pub(crate) fn apply_animation_state(
     // Walking's horizontal hips motion is constrained after animation. Once
     // another pose takes over, do not blend its unconstrained source motion
     // into that pose: even a short fade could move Nera out of her window.
-    let transition_duration = if leaving_walk {
+    let transition_duration = if leaving_walk
+        || (matches!(visual, VisualState::LibraryAnimation(_)) && !state.auto_dance_active())
+    {
         Duration::ZERO
     } else {
         transition_for_visual(visual)

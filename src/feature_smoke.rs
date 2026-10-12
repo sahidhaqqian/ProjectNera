@@ -16,7 +16,9 @@ struct Smoke {
 }
 
 pub(crate) fn install(app: &mut App) {
-    if std::env::args().any(|arg| arg == "--focus-activity-smoke") {
+    if std::env::args().any(|arg| arg == "--library-motion-smoke") {
+        crate::animation::install_library_motion_smoke(app);
+    } else if std::env::args().any(|arg| arg == "--focus-activity-smoke") {
         crate::focus::smoke::install(app);
     } else if std::env::args().any(|arg| arg == "--treat-focus-smoke") {
         crate::treat::smoke::install(app);

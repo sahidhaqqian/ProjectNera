@@ -374,7 +374,15 @@ pub(crate) fn update_desktop_physics(
     mut animation: ResMut<NeraAnimationState>,
     mut physics: ResMut<DesktopPhysicsState>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    library_motion: Option<Res<crate::animation::LibraryMotion>>,
 ) {
+    if library_motion
+        .as_ref()
+        .is_some_and(|motion| motion.owns_placement())
+    {
+        throws.clear();
+        return;
+    }
     let launch = throws.read().last().and_then(|throw| {
         throw_launch_velocity(
             throw.velocity,

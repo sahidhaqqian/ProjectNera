@@ -5,11 +5,11 @@ pub(crate) mod body_mode;
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
 pub(crate) use anchors::assert_smoke_ground_contact;
-pub(crate) use anchors::seat_contact_world;
 pub(crate) use anchors::{
     AvatarVisualGrounding, preserve_grounded_pose, preserve_seated_hips, restore_visual_grounding,
     update_avatar_anchors,
 };
+pub(crate) use anchors::{contact_y_correction, seat_contact_world, standing_support_offset};
 
 use crate::{
     animation::{NeraAnimationState, spawn_animation_library},

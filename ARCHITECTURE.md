@@ -452,6 +452,10 @@ One-shot lifetime should come from loaded VRMA duration, not duplicated guessed 
 
 `animation/library.rs` turns gallery selection into a normal desktop animation request. The manager is not a second desktop playback owner.
 
+For manually selected clips, `animation/library_motion.rs` holds a temporary placement lease and a checkpoint of the native position, support and attachment. Its reversible hips translation overlay samples the original VRMA at the existing player's playback time, transfers horizontal displacement to the native window once, and preserves authored vertical motion. Translation retargeting uses rest hips-to-feet distances rather than absolute scene Y, so desktop root placement cannot collapse the motion. Cached clips remain unchanged for AutoDance and other uses. Grounded poses use evaluated humanoid contact; clips with an authored rise retain their airborne trajectory.
+
+Physics, sitting followers, anchor recalibration, autonomous behavior and position persistence yield during this lease. Normal completion eases back to the original checkpoint, following its supporting window if it moved. Drag, Cloud, presentation, loading/replacement or an external relocation discard the checkpoint instead of pulling Nera away from the new owner. AutoDance remains on its existing placement path. This layer reads the current animation graph; it does not control another player or alter the Chibi proportion overlay.
+
 ### Walking animation
 
 `animation/walking_loop.rs` loops the steady gait portion of the walking VRMA instead of repeatedly replaying authored lead-in/slowdown frames.
@@ -810,6 +814,8 @@ A failed import leaves the previous character intact.
 Imported user models are copied into Nera-owned application data. Original source files are not modified/deleted by normal library operations.
 
 `vrm0_migration.rs` performs in-memory VRM 0.x -> 1.0 migration and routes the result through the ordinary compatible import path.
+
+The migrator preserves mesh/bind-pose binary data and child-local frames, rotating scene roots instead of rewriting geometry. Head/collider offsets therefore use the preserved local Z-reflected frame; spring gravity uses the VRM1 world X-reflected frame. MToon migration converts shading intervals, color spaces, outline units, and UV transforms rather than copying legacy shader parameters. An explicit migration marker owns legacy gaze compatibility; the unmarked-file fallback is restricted to the original pre-MToon output. Material/texture expression bindings are retained in the imported JSON, but bevy_vrm1 0.9.2 currently evaluates only morph bindings. Previously converted private copies whose source parameters were discarded require reimporting the original VRM0 to receive corrected material conversion.
 
 ### Character-swap invariant
 
