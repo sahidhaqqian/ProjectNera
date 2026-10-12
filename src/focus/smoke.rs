@@ -10,10 +10,75 @@ struct Smoke {
     stage: u8,
     at: f32,
     passed: Vec<String>,
+    notices: Vec<String>,
+    drag_seat: Option<IVec2>,
+    drag_window: Option<crate::platform::PhysicalRect>,
 }
 pub(crate) fn install(app: &mut App) {
     let _ = std::fs::remove_file("target/focus-v2-native/report.json");
-    app.init_resource::<Smoke>().add_systems(Last, run);
+    app.init_resource::<Smoke>()
+        .add_systems(Last, (notice, run).chain());
+}
+fn notice(mut smoke: ResMut<Smoke>, mut notices: MessageReader<crate::tray::TrayNotification>) {
+    smoke
+        .notices
+        .extend(notices.read().map(|notice| notice.title.clone()));
+}
+
+fn book_gaze(world: &mut World) {
+    let book = world
+        .query::<(&FocusProp, &GlobalTransform)>()
+        .iter(world)
+        .find(|(prop, _)| prop.preset == FocusPreset::Study)
+        .unwrap()
+        .1
+        .translation();
+    let target = world
+        .query_filtered::<&Transform, With<crate::avatar::LookAtTarget>>()
+        .single(world)
+        .unwrap()
+        .translation;
+    assert!(
+        target.distance(book) < 0.08,
+        "seated Study gaze follows the book"
+    );
+    assert_eq!(
+        world.resource::<NeraAnimationState>().base_pose(),
+        crate::animation::BasePose::Sitting
+    );
+}
+
+fn drag_to_taskbar(world: &mut World) {
+    // Move only this test HWND; the real OS cursor is never sampled or moved.
+    let environment = world.resource::<crate::environment::DesktopEnvironment>();
+    let monitor = environment.monitor.unwrap();
+    let seat = environment.seat_probe_global().unwrap();
+    let rect = environment.nera_rect.unwrap();
+    let hwnd = environment.nera_hwnd.unwrap();
+    let target = IVec2::new(
+        (monitor.bounds.left + monitor.bounds.right) / 2,
+        monitor.work_area.bottom + 5,
+    );
+    crate::platform::move_window(
+        hwnd,
+        crate::platform::PhysicalPoint::new(
+            rect.left + target.x - seat.x,
+            rect.top + target.y - seat.y,
+        ),
+    )
+    .unwrap();
+    let actual = crate::platform::window_rect(hwnd).unwrap();
+    assert_eq!(
+        actual.top,
+        rect.top + target.y - seat.y,
+        "native drag reaches requested taskbar position"
+    );
+    world
+        .resource_mut::<crate::environment::DesktopEnvironment>()
+        .nera_rect = Some(actual);
+    world.resource_mut::<Smoke>().drag_window = Some(actual);
+    world.resource_mut::<Smoke>().drag_seat = Some(target);
+    world.resource_mut::<DesktopPetInteraction>().state = InteractionState::Dragging;
 }
 fn next(world: &mut World, stage: u8) {
     let at = world.resource::<Time<Real>>().elapsed_secs();
@@ -61,7 +126,7 @@ fn run(world: &mut World) {
     let time = world.resource::<Time<Real>>().elapsed_secs();
     let stage = world.resource::<Smoke>().stage;
     let dt = time - world.resource::<Smoke>().at;
-    assert!(time < 150.0, "Focus V2 timeout stage {stage}");
+    assert!(time < 180.0, "Focus V2 timeout stage {stage}");
     match stage {
         0 if time > 8.0
             && !world
@@ -207,7 +272,10 @@ fn run(world: &mut World) {
                 "Chibi recalibrates workstation from evaluated humanoid dimensions",
             );
             world.write_message(crate::avatar::body_mode::ToggleBodyMode);
-            world.resource_mut::<DesktopPetInteraction>().state = InteractionState::Dragging;
+            next(world, 31);
+        }
+        31 if dt > 1.0 => {
+            drag_to_taskbar(world);
             next(world, 9);
         }
         9 if dt > 0.5 => {
@@ -221,9 +289,23 @@ fn run(world: &mut World) {
                     .unwrap()
                     .paused
             );
+            let seat = world
+                .resource::<crate::environment::DesktopEnvironment>()
+                .seat_probe_global()
+                .unwrap();
+            let actual = world
+                .resource::<crate::environment::DesktopEnvironment>()
+                .nera_rect
+                .unwrap();
+            let target = world.resource::<Smoke>().drag_window.unwrap();
+            assert!(
+                (actual.top - target.top).abs() <= 1 && (actual.left - target.left).abs() <= 1,
+                "Ride/Work must not move the dragged HWND: actual={actual:?}, requested={target:?}"
+            );
+            world.resource_mut::<Smoke>().drag_seat = Some(IVec2::new(seat.x, seat.y));
             pass(
                 world,
-                "Dragging pauses activity/timer without stealing placement",
+                "Work drag pauses activity/timer and crosses taskbar without a competing native correction",
             );
             world
                 .resource_mut::<DesktopPetInteraction>()
@@ -235,6 +317,15 @@ fn run(world: &mut World) {
                 == VisualState::FocusActivity(FocusPreset::Work) =>
         {
             props(world, 1);
+            let seat = world
+                .resource::<crate::environment::DesktopEnvironment>()
+                .seat_probe_global()
+                .unwrap();
+            let target = world.resource::<Smoke>().drag_seat.unwrap();
+            assert!(
+                (seat.y - target.y).abs() <= 2,
+                "Work release must not jump above taskbar: actual={seat:?}, expected={target:?}"
+            );
             crate::alarm_settings::smoke_focus_control(world, FocusCommand::Stop);
             next(world, 20);
         }
@@ -297,10 +388,11 @@ fn run(world: &mut World) {
                 world.resource::<NeraAnimationState>().visual_state(),
                 VisualState::FocusCelebrate
             );
+            assert_eq!(world.resource::<Smoke>().notices, ["Study finished"]);
             capture(world, false, "focus-completed");
             pass(
                 world,
-                "Completion cleans activity/prop and plays existing Waving/Happy/Heart reaction",
+                "Completion emits one Study notification and cleans activity/prop with Waving/Happy/Heart",
             );
             next(world, 15);
         }
@@ -323,6 +415,31 @@ fn run(world: &mut World) {
                 settle_frames: 1,
             };
             environment.set_attached_anchor(crate::environment::AvatarAnchor::Seat);
+            start(world, FocusPreset::Study, FocusLength::Endless);
+            next(world, 26);
+        }
+        26 if dt > 3.0
+            && world.resource::<NeraAnimationState>().visual_state()
+                == VisualState::FocusActivity(FocusPreset::Study) =>
+        {
+            props(world, 1);
+            book_gaze(world);
+            assert!(matches!(
+                world
+                    .resource::<crate::environment::DesktopEnvironment>()
+                    .placement,
+                crate::environment::PlacementState::Taskbar(_)
+            ));
+            capture(world, false, "study-taskbar");
+            pass(
+                world,
+                "Study starts during taskbar settling, preserves seated legs and looks at the book",
+            );
+            crate::alarm_settings::smoke_focus_control(world, FocusCommand::Stop);
+            next(world, 27);
+        }
+        27 if dt > 0.6 => {
+            props(world, 0);
             start(world, FocusPreset::Work, FocusLength::Endless);
             next(world, 16);
         }
@@ -419,7 +536,71 @@ fn run(world: &mut World) {
                 world.resource::<NeraAnimationState>().visual_state(),
                 VisualState::FocusActivity(_) | VisualState::FocusCelebrate
             ));
-            let report = serde_json::json!({"passed":world.resource::<Smoke>().passed,"not_performed":["physical mouse input","waiting 25/50 wall-clock minutes","listening to audio (native profile muted)"]});
+            assert_eq!(
+                world.resource::<Smoke>().notices,
+                ["Study finished", "Work finished"]
+            );
+            start(world, FocusPreset::Study, FocusLength::Endless);
+            next(world, 28);
+        }
+        28 if dt > 2.0
+            && world.resource::<NeraAnimationState>().visual_state()
+                == VisualState::FocusActivity(FocusPreset::Study) =>
+        {
+            props(world, 1);
+            book_gaze(world);
+            assert!(world.resource::<crate::cloud::CloudRuntime>().is_riding());
+            capture(world, false, "study-ride");
+            pass(
+                world,
+                "Study reads seated on an existing Ride, follows book and preserves Cloud ownership",
+            );
+            crate::alarm_settings::smoke_focus_control(world, FocusCommand::Stop);
+            drag_to_taskbar(world);
+            next(world, 29);
+        }
+        29 if dt > 0.6 => {
+            props(world, 0);
+            assert!(!world.resource::<FocusSession>().active());
+            let seat = world
+                .resource::<crate::environment::DesktopEnvironment>()
+                .seat_probe_global()
+                .unwrap();
+            let rect = world
+                .resource::<crate::environment::DesktopEnvironment>()
+                .nera_rect
+                .unwrap();
+            let target = world.resource::<Smoke>().drag_window.unwrap();
+            assert!(
+                (rect.top - target.top).abs() <= 1,
+                "plain Ride must not move the dragged HWND"
+            );
+            world.resource_mut::<Smoke>().drag_seat = Some(IVec2::new(seat.x, seat.y));
+            world
+                .resource_mut::<DesktopPetInteraction>()
+                .reset_gesture_state();
+            next(world, 30);
+        }
+        30 if dt > 2.0 => {
+            let seat = world
+                .resource::<crate::environment::DesktopEnvironment>()
+                .seat_probe_global()
+                .unwrap();
+            let target = world.resource::<Smoke>().drag_seat.unwrap();
+            assert!(
+                (seat.y - target.y).abs() <= 2,
+                "Ride release remains stable at taskbar"
+            );
+            pass(
+                world,
+                "Plain Ride drag/release remains stable across the taskbar edge",
+            );
+            assert_eq!(
+                world.resource::<Smoke>().notices.len(),
+                2,
+                "stopped/endless sessions do not notify"
+            );
+            let report = serde_json::json!({"passed":world.resource::<Smoke>().passed,"notifications":world.resource::<Smoke>().notices,"not_performed":["physical mouse input","waiting 25/50 wall-clock minutes","listening to audio (native profile muted)","OS notification visibility under Do Not Disturb"]});
             std::fs::write(
                 "target/focus-v2-native/report.json",
                 serde_json::to_vec_pretty(&report).unwrap(),

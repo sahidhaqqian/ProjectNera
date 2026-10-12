@@ -338,6 +338,48 @@ mod tests {
         }
     }
     #[test]
+    fn study_preserves_the_calibrated_seat_but_keeps_authored_reading_upper_body() {
+        let (mut app, hips, knee, head) = fixture();
+        let seated_hips = *app.world().get::<Transform>(hips).unwrap();
+        let seated_knee = *app.world().get::<Transform>(knee).unwrap();
+        assert!(
+            app.world_mut()
+                .resource_mut::<NeraAnimationState>()
+                .request_focus_activity(crate::focus::FocusPreset::Study)
+        );
+        for i in 0..30 {
+            app.world_mut().run_system_once(restore_raw_pose).unwrap();
+            let reading_head = Transform::from_rotation(Quat::from_rotation_x(i as f32 * 0.01));
+            *app.world_mut().get_mut::<Transform>(head).unwrap() = reading_head;
+            app.world_mut()
+                .get_mut::<Transform>(hips)
+                .unwrap()
+                .translation
+                .y = 1.2;
+            app.world_mut().get_mut::<Transform>(knee).unwrap().rotation = Quat::IDENTITY;
+            app.world_mut()
+                .run_system_once(preserve_touch_seat)
+                .unwrap();
+            assert_eq!(*app.world().get::<Transform>(hips).unwrap(), seated_hips);
+            assert_eq!(*app.world().get::<Transform>(knee).unwrap(), seated_knee);
+            assert_eq!(*app.world().get::<Transform>(head).unwrap(), reading_head);
+        }
+        app.world_mut().run_system_once(restore_raw_pose).unwrap();
+        assert_eq!(
+            app.world().get::<Transform>(hips).unwrap().translation.y,
+            1.2
+        );
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .cancel_focus_activity();
+        app.world_mut()
+            .resource_mut::<DesktopEnvironment>()
+            .placement = PlacementState::Free;
+        app.update();
+        assert!(!app.world().resource::<TouchSeatPose>().is_ready());
+    }
+
+    #[test]
     fn work_typing_keeps_authored_seated_body_instead_of_the_previous_sit_variant() {
         let (mut app, hips, knee, _) = fixture();
         assert!(

@@ -41,10 +41,45 @@ pub struct TrayPlugin;
 
 impl Plugin for TrayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, start_system_tray).add_systems(
-            Update,
-            process_tray_commands.before(crate::startup_entrance::prepare_startup_entrance),
-        );
+        app.add_message::<TrayNotification>()
+            .add_systems(Update, show_notifications)
+            .add_systems(Startup, start_system_tray)
+            .add_systems(
+                Update,
+                process_tray_commands.before(crate::startup_entrance::prepare_startup_entrance),
+            );
+    }
+}
+
+/// One-shot user feedback through the existing Windows notification-area icon.
+/// It does not arm, cancel or borrow the real alarm runtime.
+#[derive(Message)]
+pub(crate) struct TrayNotification {
+    pub(crate) title: String,
+    pub(crate) body: String,
+}
+
+fn show_notifications(
+    runtime: Option<Res<TrayRuntime>>,
+    mut notifications: MessageReader<TrayNotification>,
+) {
+    for notification in notifications.read() {
+        let raw = runtime
+            .as_ref()
+            .map_or(0, |runtime| runtime.hidden_hwnd_raw());
+        if raw == 0 {
+            warn!("Nera notification unavailable: tray is not ready");
+            continue;
+        }
+        if let Err(error) = native::show_notification(raw, &notification.title, &notification.body)
+        {
+            warn!("Nera notification failed: {error}");
+        } else {
+            info!(
+                "Nera notification submitted to Windows | {}",
+                notification.title
+            );
+        }
     }
 }
 

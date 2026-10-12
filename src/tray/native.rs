@@ -14,8 +14,8 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Shell::{
-                NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
-                Shell_NotifyIconW,
+                NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+                NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -113,6 +113,24 @@ unsafe fn remove_tray_icon(hwnd: HWND) {
     };
 
     let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+}
+
+pub(super) fn show_notification(raw: isize, title: &str, body: &str) -> Result<()> {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(raw as *mut std::ffi::c_void),
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO,
+        ..Default::default()
+    };
+    write_utf16(&mut data.szInfoTitle, title);
+    write_utf16(&mut data.szInfo, body);
+    if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
+        Ok(())
+    } else {
+        Err(last_win32_error())
+    }
 }
 
 // =============================================================================

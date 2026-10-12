@@ -28,8 +28,12 @@ struct Smoke {
 }
 pub(crate) fn install(app: &mut App) {
     let _ = std::fs::remove_file(output().join("report.json"));
-    app.init_resource::<Smoke>()
-        .add_systems(Last, (feedback, run).chain());
+    app.init_resource::<Smoke>().add_systems(
+        Last,
+        (feedback, run)
+            .chain()
+            .after(crate::pet_feedback::update_particles),
+    );
 }
 fn output() -> std::path::PathBuf {
     "target/treat-focus-native".into()
@@ -247,6 +251,7 @@ fn run(world: &mut World) {
         }
         6 if dt > 4.0 => {
             attachment(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, true);
             let index = world.resource::<Smoke>().food;
             capture(
                 world,
@@ -254,13 +259,20 @@ fn run(world: &mut World) {
                 &format!("normal-{}.png", FOODS[index].name.to_lowercase()),
             );
             if index == 0 {
+                passed(
+                    world,
+                    "Treat opens the standard VRM vowel and rendered mouth at the bite",
+                );
                 next(world, 7);
             } else {
                 world.resource_mut::<NeraAnimationState>().cancel_treat();
                 next(world, 8);
             }
         }
-        7 if dt > 0.85 => {
+        7 if dt > 0.85
+            && world.resource::<Smoke>().treat_sides.contains(&true)
+            && world.resource::<Smoke>().treat_sides.contains(&false) =>
+        {
             assert!(
                 world
                     .resource::<TreatRuntime>()
@@ -310,6 +322,7 @@ fn run(world: &mut World) {
         }
         8 if !world.resource::<TreatRuntime>().busy() && dt > 0.6 => {
             empty(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, false);
             let index = world.resource::<Smoke>().food;
             if index == 0 {
                 let smoke = world.resource::<Smoke>();
@@ -349,11 +362,13 @@ fn run(world: &mut World) {
         }
         10 if dt > 4.0 => {
             attachment(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, true);
             capture(world, None, "chibi-apple.png");
             next(world, 11);
         }
         11 if dt > 7.0 => {
             empty(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, false);
             passed(
                 world,
                 "Chibi Apple: inherited hand scale, animation completion and cleanup",
@@ -395,11 +410,13 @@ fn run(world: &mut World) {
         }
         14 if dt > 4.0 => {
             attachment(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, true);
             capture(world, None, "alicia-chibi-cookie.png");
             next(world, 15);
         }
         15 if dt > 7.0 => {
             empty(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, false);
             passed(
                 world,
                 "Alicia Chibi: finger-derived grip, VRMA playback/consumption/cleanup",
@@ -428,6 +445,7 @@ fn run(world: &mut World) {
         }
         19 if dt > 4.0 => {
             attachment(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, true);
             assert_eq!(
                 world.resource::<CloudRuntime>().mode(),
                 Some(CloudMode::Ride)
@@ -439,6 +457,7 @@ fn run(world: &mut World) {
         }
         20 if dt > 0.3 => {
             empty(world);
+            crate::expression::face::assert_treat_mouth_smoke(world, false);
             passed(world, "Dragging interrupts Treat and removes prop");
             world
                 .resource_mut::<DesktopPetInteraction>()

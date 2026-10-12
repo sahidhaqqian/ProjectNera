@@ -18,6 +18,10 @@ Cloud's submenu contains Treat alongside Rest/Ride/Dismiss. Treat is not a
 Cloud mode. `TreatRuntime` owns only pending/active interaction and prop
 lifetime. The existing animation state and clip registry own Drinking playback;
 the expression system applies gentle Joy with natural blink during the clip.
+The same expression owner eases a standard VRM `aa`/`a` mouth vowel open during
+the bite approach/contact and closes it after consumption. Named Nera morphs
+use `Fcl_MTH_A` while reducing the conflicting closed smile. Manual face previews
+retain priority; interruption/end releases the mouth along with Treat.
 The corrected supplied
 8.83-second `Drinking (1).vrma` is bundled under the stable `Drinking.vrma`
 filename and uses the left hand. The user approved it for food as well because
@@ -56,3 +60,11 @@ It never controls the physical mouse. Diagnostics/screenshots are saved under
 completion and states skipped checks. Finite Focus completion advances only
 its session timer; real alarm deadlines retain real time. The custom-model
 fixture is the existing Alicia Solid import.
+
+The mouth follow-up passed `cargo fmt`, `cargo check`, and the full Rust suite
+(590 passed, 0 failed, 11 ignored). Native Treat validation completed 19 checks,
+including standard-vowel/rendered-mouth opening, release after completion or
+cancellation, Normal/Chibi Nera and Alicia Solid, existing bite/Heart timing,
+all seven prop models, replacement cleanup, and Rest/Ride/drag priorities.
+It used semantic commands and GPU screenshots without OS mouse/keyboard control.
+Native audio was muted; no listening test was performed.

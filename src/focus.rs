@@ -78,6 +78,7 @@ pub(crate) struct FocusSession {
     session: Option<Session>,
     completed: bool,
     completion_pending: bool,
+    completion_notice: Option<FocusPreset>,
     stop_reason: Option<&'static str>,
     release_ride: bool,
 }
@@ -90,6 +91,7 @@ impl Default for FocusSession {
             session: None,
             completed: false,
             completion_pending: false,
+            completion_notice: None,
             stop_reason: None,
             release_ride: false,
         }
@@ -185,6 +187,7 @@ impl FocusSession {
                 });
                 self.completed = false;
                 self.completion_pending = false;
+                self.completion_notice = None;
                 self.stop_reason = None;
                 info!("Focus started | {:?} {:?}", self.preset, self.length);
             }
@@ -195,6 +198,7 @@ impl FocusSession {
                     .is_some_and(|session| session.ride_requested);
                 self.completion_pending = false;
                 self.completed = false;
+                self.completion_notice = None;
                 self.stop_reason = None;
                 info!("Focus stopped; normal behavior resumed");
             }
@@ -211,10 +215,10 @@ impl FocusSession {
         {
             timer.tick(dt);
             if timer.just_finished() {
-                self.release_ride |= self
-                    .session
-                    .take()
-                    .is_some_and(|session| session.ride_requested);
+                if let Some(session) = self.session.take() {
+                    self.release_ride |= session.ride_requested;
+                    self.completion_notice = Some(session.preset);
+                }
                 self.completed = true;
                 self.completion_pending = true;
                 info!("Focus completed; normal behavior resumed");
@@ -296,6 +300,28 @@ pub(crate) struct FocusContext<'w> {
     alarm: Option<Res<'w, crate::alarm::AlarmState>>,
 }
 
+impl FocusContext<'_> {
+    fn seat_ready(&self, preset: FocusPreset, animation: &NeraAnimationState) -> bool {
+        use crate::environment::PlacementState;
+        if self.cloud.is_riding() {
+            return self.cloud_seat.is_ready_for(&self.cloud);
+        }
+        match self.environment.placement {
+            PlacementState::Taskbar(_) | PlacementState::Window(_)
+                if preset == FocusPreset::Study
+                    || matches!(self.environment.placement, PlacementState::Taskbar(_)) =>
+            {
+                self.desktop_seat.is_ready_for(
+                    self.environment.placement,
+                    animation.selected_sitting_pose(),
+                )
+            }
+            PlacementState::Free => preset == FocusPreset::Study,
+            _ => false,
+        }
+    }
+}
+
 pub(crate) fn update_focus(
     time: Res<Time<Real>>,
     mut requests: MessageReader<FocusCommand>,
@@ -313,6 +339,7 @@ pub(crate) fn update_focus(
     mut fx: MessageWriter<PetFx>,
     mut sfx: MessageWriter<PetSfx>,
     mut cloud_commands: MessageWriter<crate::cloud::CloudCommand>,
+    #[cfg(target_os = "windows")] mut notifications: MessageWriter<crate::tray::TrayNotification>,
 ) {
     // Account for the whole real frame even after a stall; rendering's capped
     // virtual step must not stretch a 25-minute focus session.
@@ -338,9 +365,6 @@ pub(crate) fn update_focus(
             .as_ref()
             .is_some_and(|status| status.loading)
         || matches!(context.cloud.mode(), Some(crate::cloud::CloudMode::Rest))
-        || (context.cloud.is_riding()
-            && focus.running_preset() == Some(FocusPreset::Study)
-            && !focus.release_ride)
         || matches!(
             animation.visual_state(),
             VisualState::AlarmJump | VisualState::AlarmWave | VisualState::Death
@@ -391,13 +415,10 @@ pub(crate) fn update_focus(
                 &loaders,
             );
         }
-        let seat_ready = preset != FocusPreset::Work
-            || (context.cloud.is_riding() && context.cloud_seat.is_ready_for(&context.cloud))
-            || (on_taskbar
-                && context.desktop_seat.is_ready_for(
-                    context.environment.placement,
-                    animation.selected_sitting_pose(),
-                ));
+        // Standing-authored reading preserves the existing seated lower body.
+        // Wait for that owner's evaluated pose instead of caching the reading
+        // pose as the seat when Start arrives during a sitting transition.
+        let seat_ready = context.seat_ready(preset, &animation);
         let playing = safe && ready && seat_ready && animation.request_focus_activity(preset);
         if let Some(session) = focus.session.as_mut() {
             session.paused = !playing;
@@ -406,6 +427,13 @@ pub(crate) fn update_focus(
             animation.cancel_focus_activity();
         }
         focus.advance(time.delta());
+    }
+    if let Some(preset) = focus.completion_notice.take() {
+        #[cfg(target_os = "windows")]
+        notifications.write(crate::tray::TrayNotification {
+            title: format!("{} finished", preset.label()),
+            body: "Your Focus session is complete. Time for a short break!".into(),
+        });
     }
     if !focus.active() {
         animation.cancel_focus_activity();
@@ -443,6 +471,28 @@ pub(crate) fn update_focus(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completion_notice_is_once_per_finished_session_and_never_on_stop_or_endless() {
+        let mut focus = FocusSession::default();
+        for preset in [FocusPreset::Study, FocusPreset::Work] {
+            focus.apply(FocusCommand::Preset(preset));
+            focus.apply(FocusCommand::Start);
+            focus.advance(Duration::from_secs(1499));
+            assert!(focus.completion_notice.is_none());
+            focus.advance(Duration::from_secs(1));
+            assert_eq!(focus.completion_notice.take(), Some(preset));
+            focus.advance(Duration::from_secs(60));
+            assert!(focus.completion_notice.is_none());
+            focus.apply(FocusCommand::Start);
+            focus.apply(FocusCommand::Stop);
+            assert!(focus.completion_notice.is_none());
+            focus.apply(FocusCommand::Length(FocusLength::Endless));
+            focus.apply(FocusCommand::Start);
+            focus.advance(Duration::from_secs(86400));
+            assert!(focus.completion_notice.is_none());
+            focus.apply(FocusCommand::Length(FocusLength::Minutes25));
+        }
+    }
     #[test]
     fn work_reuses_typing_and_releases_only_the_ride_it_requested() {
         assert_eq!(

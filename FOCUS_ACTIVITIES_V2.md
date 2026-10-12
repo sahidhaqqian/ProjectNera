@@ -2,6 +2,9 @@
 
 Alarms and Focus are separate tabs in the existing Alarm Settings window.
 Study uses Praying with a torso-attached CC0 open book in front of the hands and gentle Joy.
+Reading works standing, seated on a taskbar/window, and on an existing Ride Cloud.
+Seated Study waits for the support owner's calibrated lower-body pose, preserves
+that pose through Praying, and keeps book gaze active. Rest still ends Focus.
 Work uses the existing Typing VRMA with the supplied laptop workstation
 and a neutral face. Typing was moved from Mixamo-VRMA to protected
 animasi_basic/Typing.vrma and uses the same lazy loader/playback controller.
@@ -34,11 +37,18 @@ Headpat, authored touches, dragging and support transitions temporarily pause
 the activity clock and remove its prop. Focus resumes after the compatible
 base pose returns. Alarms, Screensaver, character loading/replacement and Rest Cloud
 end the session safely and release its intent/props; they keep their placement
-and presentation ownership. Ride keeps placement ownership during Work. Focus
+and presentation ownership. Ride keeps placement ownership during Study or Work. Focus
 dismisses only a Ride it introduced on stop/completion; an existing user's seat
 is preserved. Completion plays the existing Waving/Happy/Heart
-reaction; manual Stop does not award completion. Closing the editor keeps the
+reaction and immediately submits one Windows tray notification for the completed
+Study/Work session. Windows controls notification visibility/chime (including
+Do Not Disturb). No real alarm is armed or replaced. Manual Stop does not award completion. Closing the editor keeps the
 session running.
+
+Ride/Work drag follows the pointer across the taskbar without Cloud issuing a
+second native movement. After release, the monitor's actual bounds keep the
+head/sides and seat accessible; animated feet/cloud can overlap the taskbar
+without pushing the mount up and down.
 
 Temporary behavior/audio modifiers never change saved roaming or audio values.
 Only last Focus mode, duration choice and custom duration are persisted; no
@@ -68,9 +78,9 @@ advances only Focus time; real alarm clocks remain untouched.
 ## Validation on Windows, 2026-10-12
 
 - `cargo fmt` and `cargo check`: passed.
-- Full `cargo test` passed before the final gaze/ride-completion adjustments (584 passed, 11 ignored).
-- Final application suite `cargo test --bin nera`: **585 passed, 0 failed, 11 ignored**. Existing regression assertions remain intact; base counts were extended for Typing.
-- Native default-Nera run: **13 passed, 0 failed**, using semantic UI/interaction commands and GPU screenshots without moving the OS pointer or sending keyboard input. Includes Study book/gaze/countdown, headpat/resume, Study/Work stop, standing Work via Ride, taskbar Work without Cloud, Chibi recalibration, drag pause/resume, real alarm priority, completion, Screensaver priority, repeated sessions/preferences, and completion on a pre-existing Ride.
-- Native report and screenshots: `target/focus-v2-native/report.json`, `study-book.png`, `work-laptop.png`, `work-taskbar.png`, `work-chibi.png`, and Focus tab screenshots.
+- Full `cargo test`: **590 passed, 0 failed, 11 ignored**. Additional regressions cover seated Study, one-shot completion notices, stable Ride bounds, and reversible bite mouth expressions.
+- Native default-Nera run: **16 passed, 0 failed**, using semantic UI/interaction commands and GPU screenshots without moving the OS pointer or sending keyboard input. Includes Study book/gaze/countdown, headpat/resume, Study/Work stop, standing Work via Ride, taskbar Work without Cloud, Chibi recalibration, drag pause/resume, real alarm priority, completion, Screensaver priority, repeated sessions/preferences, completion on a pre-existing Ride, seated Study on taskbar/Ride, and taskbar-edge drag/release stability.
+- Windows accepted exactly one `Study finished` and one `Work finished` notification through `Shell_NotifyIconW`; stopped/Endless sessions emitted none. Notification display under Do Not Disturb was not tested.
+- Native report and screenshots: `target/focus-v2-native/report.json`, `study-book.png`, `study-taskbar.png`, `study-ride.png`, `work-laptop.png`, `work-taskbar.png`, `work-chibi.png`, and Focus tab screenshots.
 - Not performed: physical pointer/keyboard gestures, waiting 25/50 wall-clock minutes, listening to muted native audio, and custom-VRM visual validation. Unit tests cover countdown/completion, degenerate rig geometry and safe restoration.
 - Validated executable copied to `target/debug/nera.exe`; the user's ordinary application was not started by the validation script.

@@ -411,12 +411,14 @@ fn run(world: &mut World) {
                             &visuals,
                         )
                         .unwrap();
-                        let work = environment.monitor.unwrap().work_area;
+                        let screen = environment.monitor.unwrap().bounds;
                         assert!(
-                            visible.max.y <= work.bottom as f32 + 1.0,
-                            "ride below work area: {visible:?}"
+                            a.seat.y <= screen.bottom as f32 + 1.0,
+                            "ride seat below monitor: {a:?}"
                         );
-                        assert!(visible.min.y >= work.top as f32 - 1.0);
+                        assert!(visible.min.y >= screen.top as f32 - 1.0);
+                        assert!(visible.min.x >= screen.left as f32 - 1.0);
+                        assert!(visible.max.x <= screen.right as f32 + 1.0);
                     },
                 )
                 .unwrap();

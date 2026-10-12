@@ -307,7 +307,7 @@ fn seated_fidget_or_dodge(visual: VisualState) -> bool {
     match visual {
         VisualState::DodgeWhileSitting
         | VisualState::TouchReaction(_)
-        | VisualState::FocusActivity(crate::focus::FocusPreset::Work) => true,
+        | VisualState::FocusActivity(_) => true,
         VisualState::IdleMicro(action) => action.base_pose() == BasePose::Sitting,
         _ => false,
     }

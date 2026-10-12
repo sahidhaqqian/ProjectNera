@@ -433,7 +433,9 @@ pub(crate) fn align_cloud_seat(
     let Some(mut attachment) = cloud.attachment() else {
         return;
     };
-    if interaction.state == InteractionState::Dragging && attachment.mode == CloudMode::Ride {
+    let dragging =
+        interaction.state == InteractionState::Dragging && attachment.mode == CloudMode::Ride;
+    if dragging {
         if let Some(seat) = environment.seat_probe_global() {
             attachment.seat = Vec2::new(seat.x as f32, seat.y as f32);
         }
@@ -450,9 +452,12 @@ pub(crate) fn align_cloud_seat(
         .seat_probe_global()
         .map(|p| Vec2::new(p.x as f32, p.y as f32))
         .unwrap_or(attachment.seat);
-    // Keep the complete mounted silhouette inside the native work area. Mesh
-    // bounds include shoes/hair/cloud lobes; an anchor alone cannot do that.
-    if attachment.mode == CloudMode::Ride
+    // During a drag the pointer owns HWND movement. A second correction here
+    // fights it every frame. On release keep the head/sides and logical seat
+    // on the monitor, allowing feet/cloud to overlap the taskbar. Animated
+    // shoes are not a moving bottom barrier that can push the mount upward.
+    if !dragging
+        && attachment.mode == CloudMode::Ride
         && let (Some(monitor), Ok((camera, view))) = (environment.monitor, camera.single())
         && let Some(visible) = bounds::project_mounted_bounds(
             attachment.avatar,
@@ -470,7 +475,7 @@ pub(crate) fn align_cloud_seat(
         // Avatar bounds were sampled at the current pose/window, so translate
         // them to the cloud's intended logical placement before clamping.
         let visible = visible.translated(attachment.seat - current_seat);
-        attachment.seat += bounds::work_area_correction(visible, monitor.work_area);
+        attachment.seat += bounds::ride_correction(visible, attachment.seat, monitor.bounds);
     }
     match &mut cloud.state {
         CloudState::Appearing {

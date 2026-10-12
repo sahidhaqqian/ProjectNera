@@ -14,6 +14,10 @@ pub(crate) struct FacePose(pub(crate) Option<(NeraExpressionPreset, f32)>);
 #[derive(Component, Default)]
 pub(crate) struct AutomaticAngry(pub(crate) f32);
 
+/// Derived by the expression owner, with the same priority as AutomaticFace.
+#[derive(Component, Default)]
+pub(crate) struct AutomaticMouth(pub(crate) f32);
+
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct AutomaticFace {
     pub(crate) previous: Option<(NeraExpressionPreset, f32)>,
@@ -405,11 +409,16 @@ fn record_face_smoke(
 }
 
 fn apply_facial_morphs(
-    poses: Query<(&FacePose, Option<&AutomaticAngry>, Option<&AutomaticFace>)>,
+    poses: Query<(
+        &FacePose,
+        Option<&AutomaticAngry>,
+        Option<&AutomaticFace>,
+        Option<&AutomaticMouth>,
+    )>,
     mut morphs: Query<(&mut MorphWeights, &mut FacialMorphs)>,
 ) {
     for (mut weights, mut face) in &mut morphs {
-        let Ok((pose, automatic, facial)) = poses.get(face.root) else {
+        let Ok((pose, automatic, facial, mouth)) = poses.get(face.root) else {
             continue;
         };
         let manual = pose.0.is_some();
@@ -475,6 +484,15 @@ fn apply_facial_morphs(
                 *values.entry(name).or_default() += value * intensity;
             }
         }
+        if !manual && let Some(mouth) = mouth.filter(|mouth| mouth.0 > 0.0) {
+            // Do not stack a closed smile against the bite vowel on named rigs.
+            for (name, value) in &mut values {
+                if name.starts_with("Fcl_MTH_") {
+                    *value *= 1.0 - mouth.0;
+                }
+            }
+            values.insert("Fcl_MTH_A", mouth.0);
+        }
         for (name, value) in values {
             if let Some((_, index)) = targets.iter().find(|(target, _)| target == name)
                 && let Some(slot) = weights.weights_mut().get_mut(*index)
@@ -495,9 +513,102 @@ fn apply_facial_morphs(
     }
 }
 
+#[cfg(debug_assertions)]
+pub(crate) fn assert_treat_mouth_smoke(world: &mut World, open: bool) {
+    use bevy_vrm1::prelude::{ExpressionEntityMap, ExpressionOverride};
+    let (avatar, mouth) = world
+        .query_filtered::<(Entity, &AutomaticMouth), With<crate::avatar::NeraAvatar>>()
+        .single(world)
+        .unwrap();
+    let minimum = if open { 0.45 } else { 0.0 };
+    if open {
+        assert!(
+            mouth.0 >= minimum,
+            "Treat derives an open mouth at the bite"
+        );
+    } else {
+        assert_eq!(mouth.0, 0.0, "Treat interruption/end releases mouth intent");
+    }
+    if let Some(map) = world.get::<ExpressionEntityMap>(avatar)
+        && let Some((_, entity)) = map.0.iter().find(|(name, _)| {
+            ["aa", "a"]
+                .iter()
+                .any(|vowel| name.0.eq_ignore_ascii_case(vowel))
+        })
+    {
+        let weight = world
+            .get::<ExpressionOverride>(*entity)
+            .map_or(0.0, |weight| weight.0);
+        if open {
+            assert!(weight >= minimum, "standard VRM vowel reaches the rig");
+        } else {
+            assert_eq!(weight, 0.0, "standard vowel is released");
+        }
+    }
+    for (weights, face) in world.query::<(&MorphWeights, &FacialMorphs)>().iter(world) {
+        if face.root == avatar
+            && let Some((_, index)) = face.targets.iter().find(|(name, _)| name == "Fcl_MTH_A")
+        {
+            let weight = weights.weights()[*index];
+            if open {
+                assert!(weight >= minimum, "bite reaches the rendered mouth morph");
+            } else {
+                assert_eq!(weight, 0.0, "rendered bite mouth clears after Treat");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_bite_mouth_reaches_morphs_respects_preview_and_clears_afterward() {
+        let mut app = App::new();
+        app.add_systems(Update, (reset_facial_morphs, apply_facial_morphs).chain());
+        let root = app
+            .world_mut()
+            .spawn((
+                FacePose(None),
+                AutomaticFace::settled(Some((NeraExpressionPreset::Joy, 0.12))),
+                AutomaticMouth(0.55),
+            ))
+            .id();
+        let mesh = app
+            .world_mut()
+            .spawn((
+                MorphWeights::new(vec![0.0; 3], None).unwrap(),
+                FacialMorphs {
+                    root,
+                    targets: vec![
+                        ("Fcl_MTH_A".into(), 0),
+                        ("Fcl_MTH_Joy".into(), 1),
+                        ("Fcl_EYE_Close".into(), 2),
+                    ],
+                    applied: vec![],
+                },
+            ))
+            .id();
+        app.update();
+        let weights = app.world().get::<MorphWeights>(mesh).unwrap().weights();
+        assert_eq!(weights[0], 0.55);
+        assert!(weights[1] < 0.7 * 0.12);
+        assert_eq!(weights[2], 0.0, "bite must not close the eyes");
+        app.world_mut().get_mut::<FacePose>(root).unwrap().0 =
+            Some((NeraExpressionPreset::Default, 1.0));
+        app.update();
+        assert_eq!(
+            app.world().get::<MorphWeights>(mesh).unwrap().weights(),
+            &[0.0; 3]
+        );
+        app.world_mut().get_mut::<FacePose>(root).unwrap().0 = None;
+        app.world_mut().get_mut::<AutomaticMouth>(root).unwrap().0 = 0.0;
+        app.update();
+        assert_eq!(
+            app.world().get::<MorphWeights>(mesh).unwrap().weights()[0],
+            0.0
+        );
+    }
     #[test]
     fn headpat_eyes_ease_in_and_out_without_stacking_full_blink_and_joy() {
         let selection = Some((NeraExpressionPreset::Timid, 1.0));

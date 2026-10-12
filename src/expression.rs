@@ -383,6 +383,7 @@ fn drive_nera_expressions(
     animation: Res<NeraAnimationState>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
     clips: Option<Res<crate::animation::NeraAnimationClips>>,
+    playback: Option<Res<crate::animation::NeraAnimationPlayback>>,
     library: Option<Res<crate::animation::LibraryPlayback>>,
     mut automatic: Local<face::AutomaticFace>,
     mut state: ResMut<NeraExpressionState>,
@@ -456,7 +457,17 @@ fn drive_nera_expressions(
         state.last_pushed = None;
     }
 
-    let weights: Vec<(String, f32)> = match preview.selection {
+    let mouth = if preview.selection.is_none() {
+        clips
+            .as_ref()
+            .zip(playback.as_ref())
+            .map_or(0.0, |(clips, playback)| {
+                crate::treat::mouth_weight(&animation, clips, playback)
+            })
+    } else {
+        0.0
+    };
+    let mut weights: Vec<(String, f32)> = match preview.selection {
         Some((preset, intensity)) => {
             preset_weights(preset, intensity, map.0.keys().map(|name| name.0.as_str()))
         }
@@ -474,6 +485,15 @@ fn drive_nera_expressions(
             })
             .collect(),
     };
+    if mouth > MIN_VISIBLE_WEIGHT {
+        // Standard VRM vowels cover imported rigs without Nera's named morphs.
+        if let Some(name) = ["aa", "a"]
+            .into_iter()
+            .find_map(|vowel| map.0.keys().find(|name| name.0.eq_ignore_ascii_case(vowel)))
+        {
+            weights.push((name.0.clone(), quantize(mouth)));
+        }
+    }
 
     let angry = state
         .weights()
@@ -484,6 +504,7 @@ fn drive_nera_expressions(
         face::FacePose(preview.selection),
         *automatic,
         face::AutomaticAngry(angry),
+        face::AutomaticMouth(mouth),
     ));
 
     if state.last_pushed.as_ref() == Some(&weights) {

@@ -26,6 +26,29 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 // Corrected Drinking.vrma: keep the item through the approach and wrist turn;
 // consume at the completed sip/bite pose at the mouth, before hand recovery.
 const CONSUME_AT: Duration = Duration::from_millis(4200);
+/// Facial intent uses the same authored clip clock as prop consumption.
+fn mouth_open_at(elapsed: Duration) -> f32 {
+    let ease = |t: f32| {
+        let t = t.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let seconds = elapsed.as_secs_f32();
+    0.55 * ease((seconds - 2.8) / 0.45) * ease((CONSUME_AT.as_secs_f32() + 0.5 - seconds) / 0.5)
+}
+
+pub(crate) fn mouth_weight(
+    animation: &NeraAnimationState,
+    clips: &NeraAnimationClips,
+    playback: &NeraAnimationPlayback,
+) -> f32 {
+    if animation.visual_state() != VisualState::Treat || !clips.treat_playing(playback) {
+        return 0.0;
+    }
+    match (clips.treat_duration(), animation.treat_remaining()) {
+        (Some(duration), Some(remaining)) => mouth_open_at(duration.saturating_sub(remaining)),
+        _ => 0.0,
+    }
+}
 // Stay above PetFx's existing 250ms admission cooldown.
 const LOVE_INTERVAL: Duration = Duration::from_millis(350);
 
@@ -456,6 +479,17 @@ fn update_treat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bite_mouth_opens_for_contact_then_closes_without_changing_consumption() {
+        for seconds in [0.0, 2.0, 2.8, 4.7, 8.0] {
+            assert!(mouth_open_at(Duration::from_secs_f32(seconds)) < 0.00001);
+        }
+        assert!((mouth_open_at(CONSUME_AT) - 0.55).abs() < 0.00001);
+        let ramp = mouth_open_at(Duration::from_secs_f32(3.0));
+        assert!(ramp > 0.0 && ramp < 0.55);
+        assert!(mouth_open_at(Duration::from_secs_f32(4.5)) < 0.55);
+    }
 
     #[test]
     fn actual_food_bounds_stay_outside_the_palm_for_all_rig_axes_and_body_scales() {

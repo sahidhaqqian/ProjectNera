@@ -54,6 +54,19 @@ pub(super) fn work_area_correction(bounds: VisibleBounds, work: PhysicalRect) ->
     .round()
 }
 
+pub(super) fn ride_correction(bounds: VisibleBounds, seat: Vec2, screen: PhysicalRect) -> Vec2 {
+    if !seat.is_finite() || !bounds.max.is_finite() {
+        return Vec2::ZERO;
+    }
+    work_area_correction(
+        VisibleBounds {
+            min: bounds.min,
+            max: Vec2::new(bounds.max.x, seat.y.max(bounds.min.y)),
+        },
+        screen,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn project_mounted_bounds(
     avatar: Entity,
@@ -122,6 +135,37 @@ pub(super) fn project_mounted_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ride_can_cross_taskbar_and_animated_feet_never_raise_the_seat() {
+        for origin in [Vec2::ZERO, Vec2::new(-1920.0, -1080.0)] {
+            for dpi in [1.0, 1.25, 1.5, 2.0] {
+                let screen = PhysicalRect {
+                    left: origin.x as i32,
+                    top: origin.y as i32,
+                    right: origin.x as i32 + 1920,
+                    bottom: origin.y as i32 + 1080,
+                };
+                let seat = origin + Vec2::new(960.0, 1050.0);
+                for foot_depth in [40.0, 100.0, 200.0] {
+                    let bounds = VisibleBounds {
+                        min: seat - Vec2::new(130.0, 280.0) * dpi,
+                        max: seat + Vec2::new(130.0, foot_depth) * dpi,
+                    };
+                    assert_eq!(ride_correction(bounds, seat, screen), Vec2::ZERO);
+                    let outside = Vec2::new(1500.0, 300.0);
+                    let moved = bounds.translated(outside);
+                    let correction = ride_correction(moved, seat + outside, screen);
+                    let corrected = moved.translated(correction);
+                    assert!(corrected.max.x <= screen.right as f32 + 0.5);
+                    assert!((seat + outside + correction).y <= screen.bottom as f32 + 0.5);
+                    assert_eq!(
+                        ride_correction(corrected, seat + outside + correction, screen),
+                        Vec2::ZERO
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn whole_mount_stays_inside_each_taskbar_edge_at_multiple_dpi_sizes() {
         for work in [

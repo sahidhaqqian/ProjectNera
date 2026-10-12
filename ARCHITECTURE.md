@@ -592,7 +592,8 @@ Ride is a floating seat/mount:
 - avatar + cloud move together;
 - release remains floating;
 - throw/gravity/native support snap are suspended while Ride owns placement;
-- desktop work-area/taskbar constraints keep the visible avatar/cloud usable.
+- while dragging, native movement follows the pointer without a competing Cloud correction;
+- on release, monitor bounds constrain the head/sides and logical seat. Feet/cloud may overlap the taskbar, so animated feet do not become a moving bottom barrier.
 
 ### Ordering
 
@@ -749,7 +750,7 @@ The editor does not own scheduler state.
 
 ### Alarm Settings
 
-`alarm_settings.rs` owns the alarm-manager window, draft/edit state, quick-preset UI, and persistent `AlarmConfig` edits. Alarms and Focus use separate tabs. Focus emits `FocusCommand`; `FocusSession` owns the independent Study/Work clock and activity intent. Its persistent `FocusActivity` requests use the existing animation owner below user reactions, and temporary props follow the resolved activity. Focus modifies `PetBehavior` eligibility and semantic PetSfx gain without rewriting roaming/audio preferences or touching real alarm deadlines. User interactions pause the activity; critical presentations end it safely. Only last mode/duration choices persist. Completion uses the existing animation/expression/feedback owners. See `FOCUS_ACTIVITIES_V2.md`.
+`alarm_settings.rs` owns the alarm-manager window, draft/edit state, quick-preset UI, and persistent `AlarmConfig` edits. Alarms and Focus use separate tabs. Focus emits `FocusCommand`; `FocusSession` owns the independent Study/Work clock and activity intent. Its persistent `FocusActivity` requests use the existing animation owner below user reactions, and temporary props follow the resolved activity. Focus modifies `PetBehavior` eligibility and semantic PetSfx gain without rewriting roaming/audio preferences or touching real alarm deadlines. User interactions pause the activity; critical presentations end it safely. Only last mode/duration choices persist. Completion uses the existing animation/expression/feedback owners and submits a one-shot Windows notification through the existing tray icon, independently of real alarm scheduling. See `FOCUS_ACTIVITIES_V2.md`.
 
 The radial Alarm action opens Alarm Settings directly. 5m/10m/15m/30m/45m/1h/2h presets now live in that utility window.
 
