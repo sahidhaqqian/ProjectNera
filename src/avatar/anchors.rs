@@ -47,6 +47,13 @@ pub(crate) struct AvatarVisualGrounding {
     support_geometry: Option<(Entity, f32, f32)>,
 }
 
+#[cfg(debug_assertions)]
+impl AvatarVisualGrounding {
+    pub(crate) fn raw_root_y_for_validation(&self) -> Option<f32> {
+        self.raw_root_y.map(|(_, y)| y)
+    }
+}
+
 /// Restore before pose evaluation and character replacement. Otherwise the next
 /// sample (or replacement rig) would inherit yesterday's visual correction.
 pub(crate) fn restore_visual_grounding(
@@ -151,6 +158,7 @@ pub(crate) fn assert_smoke_ground_contact(world: &mut World) {
             |physics: Res<desktop_physics::DesktopPhysicsState>,
              environment: Res<DesktopEnvironment>,
              settings: Res<NeraSettings>,
+             motion: Option<Res<crate::animation::LibraryMotion>>,
              proportions: Option<Res<BodyProportions>>,
              camera: Query<(&Camera, &GlobalTransform), With<super::NeraMainCamera>>,
              bones: Query<(&VrmBone, &GlobalTransform), With<crate::interaction::NeraLiveBone>>| {
@@ -167,11 +175,14 @@ pub(crate) fn assert_smoke_ground_contact(world: &mut World) {
                     .support_anchor_logical()
                     .or(environment.feet_anchor_logical)
                     .unwrap();
-                let target = anchor.y
-                    - standing_support_offset(
+                let margin = standing_support_offset(
                         &settings,
                         proportions.as_ref().map_or(1.0, |body| body.body_scale()),
                     );
+                // The checkpoint owner can move the HWND after physics sampled
+                // its local anchor. Compare in the current window coordinate frame.
+                let target = motion.as_ref().and_then(|motion| motion.smoke_contact_target(&environment, margin))
+                    .unwrap_or(anchor.y - margin);
                 assert!(
                     (foot_y - target).abs() < 2.0,
                     "rendered grounded foot escaped support: foot={foot_y} target={target}"
@@ -223,9 +234,10 @@ pub(crate) fn preserve_grounded_pose(
     }
     let visual = animation.visual_state();
     let path = match visual {
-        VisualState::LibraryAnimation(clip) => {
-            owners.library.as_ref().and_then(|l| l.path_for(clip))
-        }
+        VisualState::LibraryAnimation(clip) => owners
+            .library
+            .as_ref()
+            .and_then(|l| l.grounding_path_for(clip)),
         _ => None,
     };
     let policy = grounding_policy(visual, path);
@@ -751,6 +763,39 @@ mod tests {
             assert!((camera.world_to_viewport(&view, corrected).unwrap().y - target).abs() < 0.001);
             assert_eq!(grounded.rotation, raw.rotation);
             assert_eq!(grounded.scale, raw.scale);
+            world.run_system_once(restore_visual_grounding).unwrap();
+            assert_eq!(*world.get::<Transform>(avatar).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn death_body_grounding_is_downward_only_bounded_and_reversible() {
+        for height in [-1.0, 0.35, 20.0].into_iter().cycle().take(60) {
+            let (mut world, avatar, _, contact, camera, view, raw) = grounding_world();
+            world
+                .resource_mut::<NeraAnimationState>()
+                .request_action_for_test(
+                    crate::animation::TemporaryAction::Death,
+                    Duration::from_secs(2),
+                );
+            let point = Vec3::new(0.0, height, 0.4);
+            *world.get_mut::<GlobalTransform>(contact).unwrap() =
+                GlobalTransform::from_translation(point);
+            let floor = world
+                .resource::<DesktopEnvironment>()
+                .feet_anchor_logical
+                .unwrap()
+                .y;
+            let expected =
+                contact_y_correction(&camera, &view, point, floor - DEATH_CONTACT_MARGIN_LOGICAL)
+                    .unwrap()
+                    .clamp(-DEATH_MAX_ROOT_DROP_WORLD, 0.0);
+            world.run_system_once(preserve_grounded_pose).unwrap();
+            let pose = *world.get::<Transform>(avatar).unwrap();
+            assert!((pose.translation.y - raw.translation.y - expected).abs() < 0.00001);
+            assert!(pose.translation.y <= raw.translation.y);
+            assert_eq!(pose.rotation, raw.rotation);
+            assert_eq!(pose.scale, raw.scale);
             world.run_system_once(restore_visual_grounding).unwrap();
             assert_eq!(*world.get::<Transform>(avatar).unwrap(), raw);
         }

@@ -20,6 +20,7 @@ Desktop.ini
 # Logs
 *.log
 tools/fbx2vrma-converter/
+tools/__pycache__/
 
 # Local Mixamo VRMA library
 assets/animations/Mixamo-VRMA/

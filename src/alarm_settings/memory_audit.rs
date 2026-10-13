@@ -183,7 +183,7 @@ fn advance(world: &mut World) {
                     // from a user's real alarm sound library.
                     let directory = std::env::temp_dir().join(format!("nera-alarm-sound-audit-{}", std::process::id()));
                     std::fs::create_dir_all(&directory).unwrap();
-                    let original = crate::nera_asset_file("sound/digital.wav");
+                    let original = crate::nera_asset_file("sound/clock_beeps.wav");
                     let renamed = directory.join("alarm-copy.wav");
                     std::fs::copy(&original, &renamed).unwrap();
                     let mut library = AlarmSoundLibrary::load(directory.join("library"));

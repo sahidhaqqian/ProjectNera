@@ -533,7 +533,7 @@ mod tests {
         });
         let mut selected = Vec::new();
         for path in [
-            "sound/alarm.mp3",
+            "sound/classic.wav",
             "sound/chime.ogg",
             "sound/clock_beeps.wav",
         ] {

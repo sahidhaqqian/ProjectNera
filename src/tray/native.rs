@@ -19,12 +19,12 @@ use windows::{
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, IDI_APPLICATION,
-                LoadIconW, MF_SEPARATOR, MF_STRING, MSG, PostMessageW, PostQuitMessage,
-                RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow, TPM_BOTTOMALIGN,
-                TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-                WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSEXW,
-                WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+                DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, MF_SEPARATOR,
+                MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+                RegisterWindowMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_CLOSE,
+                WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+                WS_OVERLAPPED,
             },
         },
     },
@@ -67,7 +67,7 @@ fn last_win32_error() -> Error {
 // =============================================================================
 
 unsafe fn add_tray_icon(hwnd: HWND) -> Result<()> {
-    let icon = unsafe { LoadIconW(None, IDI_APPLICATION)? };
+    let icon = crate::application_icon::shared_icon(16)?;
 
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -339,6 +339,13 @@ unsafe extern "system" fn tray_window_proc(
 // =============================================================================
 
 pub(super) fn run_tray_thread(hidden_hwnd: Arc<AtomicIsize>) -> Result<()> {
+    run_with_initial_registration(hidden_hwnd, |hwnd| unsafe { add_tray_icon(hwnd) })
+}
+
+fn run_with_initial_registration(
+    hidden_hwnd: Arc<AtomicIsize>,
+    register: impl FnOnce(HWND) -> Result<()>,
+) -> Result<()> {
     let module = unsafe { GetModuleHandleW(None)? };
 
     let instance = HINSTANCE(module.0);
@@ -391,24 +398,18 @@ pub(super) fn run_tray_thread(hidden_hwnd: Arc<AtomicIsize>) -> Result<()> {
     hidden_hwnd.store(hwnd.0 as isize, Ordering::Release);
 
     // =========================================================================
-    // Register tray icon
-    // =========================================================================
-
-    if let Err(error) = unsafe { add_tray_icon(hwnd) } {
-        hidden_hwnd.store(0, Ordering::Release);
-
-        let _ = unsafe { DestroyWindow(hwnd) };
-
-        return Err(error);
-    }
-
-    // =========================================================================
-    // Explorer restart support
+    // Register shell recovery before attempting the icon. Explorer can still
+    // be starting when Windows launches a Start Hidden instance.
     // =========================================================================
 
     let taskbar_msg = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
-
     TASKBAR_CREATED_MSG.store(taskbar_msg, Ordering::Relaxed);
+
+    if let Err(error) = register(hwnd) {
+        warn!(
+            "Initial tray registration failed: {error}; keeping callback alive for Explorer recovery"
+        );
+    }
 
     // =========================================================================
     // Win32 message loop
@@ -452,6 +453,42 @@ pub(super) fn run_tray_thread(hidden_hwnd: Arc<AtomicIsize>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::write_utf16;
+
+    #[test]
+    fn initial_shell_failure_keeps_native_callback_alive_and_closes_cleanly() {
+        use super::*;
+        use std::time::{Duration, Instant};
+        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+        let handle = Arc::new(AtomicIsize::new(0));
+        let shared = handle.clone();
+        let thread = std::thread::spawn(move || {
+            run_with_initial_registration(shared, |_| {
+                Err(Error::from_hresult(HRESULT(0x80004005_u32 as i32)))
+            })
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while handle.load(Ordering::Acquire) == 0
+            && !thread.is_finished()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Give the injected registration failure time to reach the real pump.
+        std::thread::sleep(Duration::from_millis(50));
+        let raw = handle.load(Ordering::Acquire);
+        let alive = raw != 0 && unsafe { IsWindow(Some(HWND(raw as *mut _))) }.as_bool();
+        if raw != 0 {
+            unsafe { PostMessageW(Some(HWND(raw as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                .unwrap();
+        }
+        let result = thread.join().unwrap();
+        assert!(
+            alive,
+            "initial shell failure must not destroy its recovery callback"
+        );
+        result.unwrap();
+        assert_eq!(handle.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn utf16_buffer_is_truncated_and_null_terminated() {

@@ -36,7 +36,7 @@ use crate::{
 #[cfg(target_os = "windows")]
 use crate::platform::{LocalDateTime, local_datetime};
 
-const ALARM_SOUND_PATH: &str = "sound/alarm.mp3";
+const ALARM_SOUND_PATH: &str = "sound/classic.wav";
 /// If the alarm asked for Attention but presentation never leaves DesktopPet,
 /// something failed before the dismiss UI could be created. Never leave a
 /// looping alarm with no reachable dismissal path.

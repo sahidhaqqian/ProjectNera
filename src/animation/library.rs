@@ -36,6 +36,7 @@ struct CachedClip {
     entity: Entity,
     source_bytes: u64,
     last_used: u64,
+    body_contact: bool,
 }
 
 #[derive(Component)]
@@ -79,6 +80,18 @@ impl LibraryPlayback {
             .find(|(_, clip)| clip.entity == entity)
             .map(|(path, _)| path.as_str())
     }
+    pub(crate) fn grounding_path_for(&self, entity: Entity) -> Option<&str> {
+        self.clips
+            .iter()
+            .find(|(_, clip)| clip.entity == entity)
+            .map(|(path, clip)| {
+                if clip.body_contact {
+                    super::playback::DEATH_VRMA_PATH
+                } else {
+                    path.as_str()
+                }
+            })
+    }
     fn validate_source_size(source_bytes: u64) -> Result<(), &'static str> {
         if source_bytes > MAX_CLIP_SOURCE_BYTES {
             return Err("Animation exceeds the 16 MiB desktop playback limit.");
@@ -86,7 +99,15 @@ impl LibraryPlayback {
         Ok(())
     }
 
-    fn cache_clip(&mut self, path: String, entity: Entity, source_bytes: u64) {
+    pub(super) fn cache_clip(&mut self, path: String, entity: Entity, source_bytes: u64) {
+        // Library/bookmark copies can have a different path from the protected
+        // base clip. Preserve its contact semantics by identity, never by name.
+        // Read once on admission; no filesystem work occurs in pose evaluation.
+        let body_contact = path == super::playback::DEATH_VRMA_PATH
+            || same_clip_contents(
+                &crate::nera_asset_directory().join(&path),
+                &crate::nera_asset_directory().join(super::playback::DEATH_VRMA_PATH),
+            );
         self.access_clock = self.access_clock.wrapping_add(1);
         self.source_bytes = self.source_bytes.saturating_add(source_bytes);
         self.clips.insert(
@@ -95,6 +116,7 @@ impl LibraryPlayback {
                 entity,
                 source_bytes,
                 last_used: self.access_clock,
+                body_contact,
             },
         );
     }
@@ -142,6 +164,33 @@ impl LibraryPlayback {
             self.requested = None;
         }
         errors.write(LibraryAnimationError { path, reason });
+    }
+}
+
+fn same_clip_contents(source: &std::path::Path, reference: &std::path::Path) -> bool {
+    let (Ok(source_info), Ok(reference_info)) = (source.metadata(), reference.metadata()) else {
+        return false;
+    };
+    if source_info.len() == 0 || source_info.len() != reference_info.len() {
+        return false;
+    }
+    fn fingerprint(path: &std::path::Path) -> Option<blake3::Hash> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let bytes = file.read(&mut buffer).ok()?;
+            if bytes == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes]);
+        }
+        Some(hasher.finalize())
+    }
+    match (fingerprint(source), fingerprint(reference)) {
+        (Some(source), Some(reference)) => source == reference,
+        _ => false,
     }
 }
 
@@ -380,6 +429,13 @@ pub(super) fn sync_library_animation(
                 );
             }
         } else {
+            info!(
+                "Library playback | path={path} grounding={:?}",
+                super::grounding_policy(
+                    super::VisualState::LibraryAnimation(entity),
+                    runtime.grounding_path_for(entity)
+                )
+            );
             state.request_one_shot(TemporaryAction::LibraryAnimation(entity), loaded.duration);
         }
         return;
@@ -428,6 +484,91 @@ pub(super) fn sync_library_animation(
 mod tests {
     use super::*;
     use crate::animation::{BasePose, VisualState, playback::clip_for_visual};
+
+    #[test]
+    fn body_contact_aliases_require_identical_contents_not_a_filename() {
+        let directory =
+            std::env::temp_dir().join(format!("nera-contact-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let reference = directory.join("base.vrma");
+        let renamed = directory.join("renamed-bookmark.vrma");
+        std::fs::write(&reference, b"known clip contents").unwrap();
+        std::fs::write(&renamed, b"known clip contents").unwrap();
+        assert!(same_clip_contents(&renamed, &reference));
+        // Equal length but different content must not inherit Death semantics.
+        std::fs::write(&renamed, b"other clip contents").unwrap();
+        assert!(!same_clip_contents(&renamed, &reference));
+        assert!(!same_clip_contents(
+            &directory.join("missing.vrma"),
+            &reference
+        ));
+        std::fs::remove_file(reference).unwrap();
+        std::fs::remove_file(renamed).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn library_contact_alias_retains_its_real_path_and_protected_contact_policy() {
+        let mut library = LibraryPlayback::default();
+        let entity = Entity::from_raw_u32(123).unwrap();
+        let path = "animations/Bookmarks/RenamedReaction.vrma";
+        library.clips.insert(
+            path.into(),
+            CachedClip {
+                entity,
+                source_bytes: 100,
+                last_used: 0,
+                body_contact: true,
+            },
+        );
+        assert_eq!(library.path_for(entity), Some(path));
+        assert_eq!(
+            library.grounding_path_for(entity),
+            Some(super::super::playback::DEATH_VRMA_PATH)
+        );
+        assert_eq!(
+            crate::animation::grounding_policy(
+                VisualState::LibraryAnimation(entity),
+                library.grounding_path_for(entity)
+            ),
+            crate::animation::GroundingPolicy::BodyContact
+        );
+        assert!(!super::super::library_motion::uses_checkpoint_motion(
+            VisualState::LibraryAnimation(entity),
+            library.grounding_path_for(entity)
+        ));
+        library.clips.get_mut(path).unwrap().body_contact = false;
+        assert_eq!(library.grounding_path_for(entity), Some(path));
+        assert_eq!(
+            crate::animation::grounding_policy(
+                VisualState::LibraryAnimation(entity),
+                library.grounding_path_for(entity)
+            ),
+            crate::animation::GroundingPolicy::Authored
+        );
+    }
+
+    #[test]
+    fn renamed_protected_death_is_recognized_when_admitted_to_the_library_cache() {
+        let source = crate::nera_asset_file(super::super::playback::DEATH_VRMA_PATH);
+        let copy =
+            std::env::temp_dir().join(format!("nera-renamed-contact-{}.vrma", std::process::id()));
+        std::fs::copy(source, &copy).unwrap();
+        let path = copy.to_string_lossy().into_owned();
+        let entity = Entity::from_raw_u32(124).unwrap();
+        let mut library = LibraryPlayback::default();
+        library.cache_clip(path.clone(), entity, copy.metadata().unwrap().len());
+        assert_eq!(library.path_for(entity), Some(path.as_str()));
+        assert_eq!(
+            library.grounding_path_for(entity),
+            Some(super::super::playback::DEATH_VRMA_PATH)
+        );
+        assert!(!super::super::library_motion::uses_checkpoint_motion(
+            VisualState::LibraryAnimation(entity),
+            library.grounding_path_for(entity)
+        ));
+        std::fs::remove_file(copy).unwrap();
+    }
 
     #[test]
     fn auto_dance_uses_cached_library_duration_and_manual_playback_wins() {

@@ -86,6 +86,16 @@ impl Plugin for NeraShadowPlugin {
                     apply_light_settings,
                 )
                     .after(crate::cloud::update_cloud),
+            )
+            .add_systems(
+                Last,
+                (apply_simple_shadow, apply_character_shadow_receiver)
+                    .after(crate::avatar::update_avatar_anchors)
+                    .run_if(|motion: Option<Res<crate::animation::LibraryMotion>>| {
+                        motion
+                            .as_ref()
+                            .is_some_and(|m| m.needs_pose_shadow_contact())
+                    }),
             );
     }
 }
@@ -202,10 +212,22 @@ fn apply_simple_shadow(
     entrance: Option<Res<StartupEntrance>>,
     presentation: Option<Res<PresentationState>>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    motion: Option<Res<crate::animation::LibraryMotion>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut layers: Query<(&SimpleShadowLayer, &mut Transform, &mut Visibility)>,
+    mut layers: Query<
+        (
+            &SimpleShadowLayer,
+            &mut Transform,
+            &mut GlobalTransform,
+            &mut Visibility,
+        ),
+        (
+            Without<NeraLiveBone>,
+            Without<crate::avatar::NeraMainCamera>,
+        ),
+    >,
 ) {
     let should_show = shadow_is_grounded(
         &settings,
@@ -221,11 +243,25 @@ fn apply_simple_shadow(
     let softness = settings.shadow_softness.clamp(25, 100) as f32 / 100.0;
     let character_scale = settings.character_scale();
     let ground = should_show
-        .then(|| desktop_shadow_ground(&settings, &environment, &bones, &camera_query))
+        .then(|| {
+            if motion
+                .as_ref()
+                .is_some_and(|m| m.needs_pose_shadow_contact())
+            {
+                shadow_ground_with_user_offset(
+                    &settings,
+                    &bones,
+                    &camera_query,
+                    motion.as_ref().is_some_and(|m| m.uses_body_contact()),
+                )
+            } else {
+                desktop_shadow_ground(&settings, &environment, &bones, &camera_query)
+            }
+        })
         .flatten();
     let visible = should_show && ground.is_some();
 
-    for (layer, mut transform, mut visibility) in &mut layers {
+    for (layer, mut transform, mut global, mut visibility) in &mut layers {
         *visibility = if visible {
             Visibility::Visible
         } else {
@@ -247,6 +283,9 @@ fn apply_simple_shadow(
             transform.translation.x = ground.x + 0.04 * character_scale;
             transform.translation.y = ground.y - 0.01;
         }
+        // These are unparented render roots. Last runs after ordinary transform
+        // propagation, so publish the matching world pose for this render frame.
+        *global = GlobalTransform::from(*transform);
 
         if let Some(mut material) = materials.get_mut(&layer.material) {
             material.base_color = Color::srgba(
@@ -312,7 +351,7 @@ fn desktop_shadow_ground(
             return Some(point);
         }
     }
-    shadow_ground_with_user_offset(settings, bones, cameras)
+    shadow_ground_with_user_offset(settings, bones, cameras, false)
 }
 
 /// Apply the user-facing Ground Offset to the shadow support plane in render
@@ -327,8 +366,18 @@ fn shadow_ground_with_user_offset(
     settings: &NeraSettings,
     bones: &Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: &Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
+    body_contact: bool,
 ) -> Option<Vec3> {
-    let mut ground = character_shadow_ground(bones)?;
+    let mut ground = if body_contact {
+        bones
+            .iter()
+            .map(|(_, p)| p.translation())
+            .filter(|p| p.is_finite())
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .map(|p| p - Vec3::Y * CHARACTER_RECEIVER_GROUND_EPSILON)?
+    } else {
+        character_shadow_ground(bones)?
+    };
     let offset_pixels = settings.ground_offset_logical();
 
     if offset_pixels.abs() <= f32::EPSILON {
@@ -373,10 +422,22 @@ fn apply_character_shadow_receiver(
     entrance: Option<Res<StartupEntrance>>,
     presentation: Option<Res<PresentationState>>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    motion: Option<Res<crate::animation::LibraryMotion>>,
     bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::avatar::NeraMainCamera>>,
     mut materials: ResMut<Assets<ShadowOnlyMaterial>>,
-    mut receivers: Query<(&CharacterShadowReceiver, &mut Transform, &mut Visibility)>,
+    mut receivers: Query<
+        (
+            &CharacterShadowReceiver,
+            &mut Transform,
+            &mut GlobalTransform,
+            &mut Visibility,
+        ),
+        (
+            Without<NeraLiveBone>,
+            Without<crate::avatar::NeraMainCamera>,
+        ),
+    >,
 ) {
     let should_show = shadow_is_grounded(
         &settings,
@@ -389,14 +450,26 @@ fn apply_character_shadow_receiver(
         && !cloud.as_ref().is_some_and(|cloud| cloud.owns_placement());
 
     let ground = if should_show {
-        desktop_shadow_ground(&settings, &environment, &bones, &camera_query)
+        if motion
+            .as_ref()
+            .is_some_and(|m| m.needs_pose_shadow_contact())
+        {
+            shadow_ground_with_user_offset(
+                &settings,
+                &bones,
+                &camera_query,
+                motion.as_ref().is_some_and(|m| m.uses_body_contact()),
+            )
+        } else {
+            desktop_shadow_ground(&settings, &environment, &bones, &camera_query)
+        }
     } else {
         None
     };
 
     let opacity = settings.shadow_opacity.clamp(0, 100) as f32 / 100.0;
 
-    for (receiver, mut transform, mut visibility) in &mut receivers {
+    for (receiver, mut transform, mut global, mut visibility) in &mut receivers {
         let Some(ground) = ground else {
             *visibility = Visibility::Hidden;
             continue;
@@ -405,6 +478,7 @@ fn apply_character_shadow_receiver(
         transform.translation = ground;
         transform.rotation = Quat::IDENTITY;
         transform.scale = Vec3::ONE;
+        *global = GlobalTransform::from(*transform);
         *visibility = Visibility::Visible;
 
         if let Some(mut material) = materials.get_mut(&receiver.material) {
@@ -473,6 +547,31 @@ pub(crate) fn assert_smoke_presentation_shadow_hidden(world: &mut World) {
 
 #[cfg(debug_assertions)]
 pub(crate) fn assert_smoke_shadow_ground(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    let pose_ground =
+        world
+            .run_system_once(
+                |motion: Option<Res<crate::animation::LibraryMotion>>,
+                 settings: Res<NeraSettings>,
+                 bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+                 cameras: Query<
+                    (&Camera, &GlobalTransform),
+                    With<crate::avatar::NeraMainCamera>,
+                >| {
+                    motion
+                        .as_ref()
+                        .filter(|m| m.needs_pose_shadow_contact())
+                        .and_then(|m| {
+                            shadow_ground_with_user_offset(
+                                &settings,
+                                &bones,
+                                &cameras,
+                                m.uses_body_contact(),
+                            )
+                        })
+                },
+            )
+            .unwrap();
     let anchor = world
         .resource::<DesktopEnvironment>()
         .feet_anchor_logical
@@ -488,6 +587,13 @@ pub(crate) fn assert_smoke_shadow_ground(world: &mut World) {
         .unwrap();
     assert_eq!(points.len(), 3);
     for point in points {
+        if let Some(ground) = pose_ground {
+            assert!(
+                (point.y - (ground.y - 0.01)).abs() < 0.0001,
+                "authored-pose shadow detached from its evaluated ground: {point:?} vs {ground:?}"
+            );
+            continue;
+        }
         let viewport = camera.world_to_viewport(transform, point).unwrap();
         assert!(
             (viewport.y - anchor.y).abs() < 18.0,
@@ -501,6 +607,41 @@ pub(crate) fn assert_smoke_shadow_ground(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lying_shadow_uses_body_contact_while_standing_shadow_uses_feet() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<NeraSettings>();
+        for (name, point) in [
+            ("hips", Vec3::new(0.0, -0.8, -0.3)),
+            ("leftFoot", Vec3::new(0.1, -0.5, 0.6)),
+            ("rightFoot", Vec3::new(-0.1, -0.4, 0.7)),
+        ] {
+            world.spawn((
+                NeraLiveBone,
+                VrmBone::from(name),
+                GlobalTransform::from_translation(point),
+            ));
+        }
+        let (lying, standing) = world
+            .run_system_once(
+                |settings: Res<NeraSettings>,
+                 bones: Query<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>,
+                 cameras: Query<
+                    (&Camera, &GlobalTransform),
+                    With<crate::avatar::NeraMainCamera>,
+                >| {
+                    (
+                        shadow_ground_with_user_offset(&settings, &bones, &cameras, true).unwrap(),
+                        shadow_ground_with_user_offset(&settings, &bones, &cameras, false).unwrap(),
+                    )
+                },
+            )
+            .unwrap();
+        assert!((lying.y - (-0.8 - CHARACTER_RECEIVER_GROUND_EPSILON)).abs() < 1e-6);
+        assert!((standing.y - (-0.5 - CHARACTER_RECEIVER_GROUND_EPSILON)).abs() < 1e-6);
+    }
 
     #[test]
     fn presentation_hides_both_shadow_modes_and_restores_desktop_preference() {

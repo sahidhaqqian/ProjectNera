@@ -1238,13 +1238,19 @@ mod tests {
 
     #[test]
     fn dance_tab_actions_filter_pool_and_keep_existing_preview_play_requests() {
-        let mut state = ManagerState::for_test();
-        state.registry.entries.push(registry::AnimationEntry {
-            key: "Imported/user-choice.vrma".into(),
-            display_name: "User choice".into(),
-            source: "Imported".into(),
-            emotion: "Neutral",
-        });
+        // Selection requires a real, contained source after path safety checks.
+        let root =
+            std::env::temp_dir().join(format!("nera-manager-dance-actions-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets/Imported")).unwrap();
+        std::fs::write(
+            root.join("assets/Imported/user-choice.vrma"),
+            b"selection fixture",
+        )
+        .unwrap();
+        let state = ManagerState::with_registry(AnimationRegistry::new(
+            root.join("assets"),
+            root.join("bookmarks.txt"),
+        ));
         let mut app = App::new();
         app.insert_resource(state)
             .init_resource::<preview::PreviewRuntime>()
@@ -1294,6 +1300,12 @@ mod tests {
             ManagerAction::ToggleDance("Imported/user-choice.vrma".into()),
         );
         assert!(app.world().resource::<ManagerState>().filtered().is_empty());
+        drop(app);
+        std::fs::remove_file(root.join("assets/Imported/user-choice.vrma")).unwrap();
+        std::fs::remove_file(root.join("dance_pool.json")).unwrap();
+        std::fs::remove_dir(root.join("assets/Imported")).unwrap();
+        std::fs::remove_dir(root.join("assets")).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

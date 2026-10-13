@@ -403,6 +403,11 @@ pub(crate) fn run_worker() {
     crate::character::register_asset_source(&mut app);
     app.add_plugins(
         DefaultPlugins
+            .set(bevy::log::LogPlugin {
+                filter: "warn,nera=info".into(),
+                custom_layer: crate::diagnostics::layer,
+                ..default()
+            })
             .set(AssetPlugin {
                 file_path: crate::nera_asset_path(),
                 ..default()
@@ -417,6 +422,7 @@ pub(crate) fn run_worker() {
                 ..default()
             }),
     );
+    app.add_plugins(crate::application_icon::ApplicationIconPlugin);
     let character_path = std::env::var("NERA_GALLERY_CHARACTER")
         .unwrap_or_else(|_| crate::character::DEFAULT_CHARACTER.to_owned());
     app.add_plugins((

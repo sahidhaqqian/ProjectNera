@@ -408,7 +408,7 @@ register_clip!(
 const IDLE_VRMA_PATH: &str = "animations/animasi_basic/idle.vrma";
 const WALKING_VRMA_PATH: &str = "animations/animasi_basic/Walking.vrma";
 const FLOATING_VRMA_PATH: &str = "animations/animasi_basic/Floating.vrma";
-const DEATH_VRMA_PATH: &str = "animations/animasi_basic/Death01.vrma";
+pub(super) const DEATH_VRMA_PATH: &str = "animations/animasi_basic/Death01.vrma";
 const FALLING_TO_LANDING_VRMA_PATH: &str = "animations/animasi_basic/Falling_To_Landing.vrma";
 const ALARM_JUMP_VRMA_PATH: &str = "animations/animasi_basic/jump_happy.vrma";
 const ALARM_WAVE_VRMA_PATH: &str = "animations/animasi_basic/161_Waving.vrma";
@@ -952,6 +952,7 @@ pub(crate) fn apply_animation_state(
     state: Res<NeraAnimationState>,
     clips: Res<NeraAnimationClips>,
     cloud: Option<Res<crate::cloud::CloudRuntime>>,
+    library: Option<Res<super::LibraryPlayback>>,
     mut playback: ResMut<NeraAnimationPlayback>,
 ) {
     let anchor = match state.base_pose() {
@@ -1013,9 +1014,22 @@ pub(crate) fn apply_animation_state(
     // Walking's horizontal hips motion is constrained after animation. Once
     // another pose takes over, do not blend its unconstrained source motion
     // into that pose: even a short fade could move Nera out of her window.
+    #[cfg(debug_assertions)]
+    let manual_motion = !super::library_motion::smoke::legacy_playback();
+    #[cfg(not(debug_assertions))]
+    let manual_motion = true;
     let transition_duration = if leaving_walk
-        || (matches!(visual, VisualState::LibraryAnimation(_)) && !state.auto_dance_active())
-    {
+        || (manual_motion
+            && !state.auto_dance_active()
+            && super::library_motion::uses_checkpoint_motion(
+                visual,
+                match visual {
+                    VisualState::LibraryAnimation(clip) => {
+                        library.as_ref().and_then(|l| l.grounding_path_for(clip))
+                    }
+                    _ => None,
+                },
+            )) {
         Duration::ZERO
     } else {
         transition_for_visual(visual)

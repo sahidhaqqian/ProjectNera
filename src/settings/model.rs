@@ -385,8 +385,8 @@ impl Default for NeraSettings {
             pause_roaming_fullscreen: true,
             follow_mouse: true,
             follow_eyes: true,
-            follow_head: false,
-            follow_intensity: 75,
+            follow_head: true,
+            follow_intensity: 25,
             shadow_enabled: true,
             shadow_type: 0,
             shadow_opacity: 40,
@@ -1055,5 +1055,20 @@ mod body_mode_settings_tests {
         settings.apply(&saved);
         assert_eq!(settings.body_mode, "chibi");
         assert_eq!(settings.character_size, 125);
+    }
+}
+
+#[cfg(test)]
+mod gaze_settings_tests {
+    use super::*;
+
+    #[test]
+    fn default_gaze_settings_enable_head_follow_with_quarter_intensity() {
+        let settings = NeraSettings::default();
+        assert!(settings.follow_mouse);
+        assert!(settings.follow_eyes);
+        assert!(settings.follow_head);
+        assert_eq!(settings.follow_intensity, 25);
+        assert_eq!(settings.follow_intensity_label(), "25%");
     }
 }

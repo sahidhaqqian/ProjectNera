@@ -2420,6 +2420,11 @@ mod walking_checkbox_tests {
             .world_mut()
             .spawn((Text::new(""), FollowMouseValue))
             .id();
+        let follow_head = app.world_mut().spawn((Text::new(""), FollowHeadValue)).id();
+        let follow_intensity = app
+            .world_mut()
+            .spawn((Text::new(""), FollowIntensityValue))
+            .id();
 
         app.update();
         assert_eq!(app.world().get::<Text>(value).unwrap().0, "No");
@@ -2428,16 +2433,24 @@ mod walking_checkbox_tests {
             Display::None
         );
         assert_eq!(app.world().get::<Text>(follow).unwrap().0, "ON");
+        assert_eq!(app.world().get::<Text>(follow_head).unwrap().0, "ON");
+        assert_eq!(app.world().get::<Text>(follow_intensity).unwrap().0, "25%");
 
         app.world_mut()
             .resource_mut::<NeraSettings>()
             .walking_enabled = true;
+        app.world_mut().resource_mut::<NeraSettings>().follow_head = false;
+        app.world_mut()
+            .resource_mut::<NeraSettings>()
+            .follow_intensity = 75;
         app.update();
         assert_eq!(app.world().get::<Text>(value).unwrap().0, "Yes");
         assert_eq!(
             app.world().get::<Node>(checkmark).unwrap().display,
             Display::Flex
         );
+        assert_eq!(app.world().get::<Text>(follow_head).unwrap().0, "OFF");
+        assert_eq!(app.world().get::<Text>(follow_intensity).unwrap().0, "75%");
 
         *app.world_mut().resource_mut::<NeraSettings>() = NeraSettings::default();
         app.update();
@@ -2446,5 +2459,7 @@ mod walking_checkbox_tests {
             app.world().get::<Node>(checkmark).unwrap().display,
             Display::None
         );
+        assert_eq!(app.world().get::<Text>(follow_head).unwrap().0, "ON");
+        assert_eq!(app.world().get::<Text>(follow_intensity).unwrap().0, "25%");
     }
 }

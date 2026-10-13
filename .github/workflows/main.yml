@@ -1,102 +1,54 @@
-name: Build Nera Windows
+name: Validate and package Nera Windows
 
 on:
   push:
-    branches:
-      - main
-      - codex/animation-manager-redesign
-
+    branches: [main, codex/animation-manager-redesign]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
-
     env:
-      RUSTC_WRAPPER: ""
+      RUSTC_WRAPPER: ''
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           lfs: true
-
-      - name: Show Rust version
-        run: |
-          rustc --version
-          cargo --version
-
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          shared-key: ${{ github.ref_name }}
-
-      - name: Build debug
-        if: github.ref != 'refs/heads/main'
-        run: cargo build
-
-      - name: Build release
-        if: github.ref == 'refs/heads/main'
-        run: cargo build --release
-
-      - name: Package executable and runtime assets
-        id: package
+      - name: Install tested Rust toolchain
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $buildProfile = if ($env:GITHUB_REF -eq 'refs/heads/main') { 'release' } else { 'debug' }
-          $packagePath = Join-Path $env:RUNNER_TEMP 'nera-package'
-          New-Item -ItemType Directory -Path $packagePath -Force | Out-Null
-          Copy-Item -LiteralPath "target/$buildProfile/nera.exe" -Destination (Join-Path $packagePath 'nera.exe')
-
-          # Copy repository assets only, preserving assets/... beside nera.exe.
-          # Local, gitignored animation collections are not part of the release.
-          $assetPaths = @(git -c core.quotepath=false ls-files -- assets)
-          if ($LASTEXITCODE -ne 0) { throw 'Could not list tracked runtime assets.' }
-          foreach ($assetPath in $assetPaths) {
-            $destination = Join-Path $packagePath $assetPath
-            New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
-            Copy-Item -LiteralPath $assetPath -Destination $destination
-          }
-
-          $requiredAssets = @('vrm/nera_256.vrm', 'sound/alarm.mp3', 'shaders/nera_shadow_only.wgsl')
-          foreach ($source in @('src/animation/playback.rs', 'src/alarm.rs')) {
-            foreach ($match in [regex]::Matches([IO.File]::ReadAllText($source), '"(animations/animasi_basic/[^"\r\n]+)"')) {
-              $requiredAssets += $match.Groups[1].Value
-            }
-          }
-          foreach ($asset in ($requiredAssets | Sort-Object -Unique)) {
-            $file = Join-Path $packagePath "assets/$asset"
-            if (!(Test-Path -LiteralPath $file -PathType Leaf) -or (Get-Item -LiteralPath $file).Length -eq 0) {
-              throw "Required runtime asset missing from package: $asset. Make sure it is committed to Git."
-            }
-          }
-
-          @'
-          Extract this entire ZIP before running Nera.
-          Keep nera.exe and the assets folder together in the same directory.
-          Run nera.exe from the extracted folder, not from inside the ZIP.
-          '@ | Set-Content -LiteralPath (Join-Path $packagePath 'START-HERE.txt') -Encoding utf8
-          "path=$packagePath" >> $env:GITHUB_OUTPUT
-
-      - name: Upload debug package
-        if: github.ref != 'refs/heads/main'
-        uses: actions/upload-artifact@v7
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt
+          rustup default 1.98.0
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
         with:
-          name: nera-windows-debug-${{ github.sha }}
-          path: ${{ steps.package.outputs.path }}
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 6
-
-      - name: Upload release package
-        if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v7
+          shared-key: windows-release-1.98
+      - run: cargo fmt --check
+      - run: cargo check --locked
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Refresh third-party dependency notices
+        shell: pwsh
+        run: |
+          cargo metadata --locked --format-version 1 | Set-Content -Encoding utf8 metadata.json
+          python tools/generate_dependency_notices.py metadata.json
+      - name: Verify GUI executable and package runtime
+        shell: pwsh
+        run: |
+          $pe = python tools/inspect_pe.py target/release/nera.exe | ConvertFrom-Json
+          if ($pe.subsystem -ne 2) { throw 'Release executable must use Windows GUI subsystem.' }
+          ./tools/package_windows.ps1 -OutputRoot target/distribution
+      - uses: actions/upload-artifact@v7
         with:
-          name: nera-windows-release-${{ github.sha }}
-          path: ${{ steps.package.outputs.path }}
+          name: nera-windows-x64-${{ github.sha }}
+          path: |
+            target/distribution/*.zip
+            target/distribution/*.sha256
           if-no-files-found: error
-          retention-days: 7
-          compression-level: 6
+          retention-days: 14
+          compression-level: 0

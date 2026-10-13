@@ -100,6 +100,22 @@ fn advance(world: &mut World, stage: u8) {
     );
 }
 
+fn authored_root_base(world: &mut World) -> Vec3 {
+    let entity = avatar(world);
+    let root = *world.get::<Transform>(entity).unwrap();
+    let mut translation = root.translation;
+    // Check the reversible proportion layer below the checkpoint contact
+    // correction. That correction legitimately changes with evaluated feet.
+    if let Some(y) = world
+        .resource::<crate::animation::LibraryMotion>()
+        .raw_root_y_for_validation(entity)
+    {
+        translation.y = y;
+    }
+    let offset = world.resource::<BodyProportions>().root_offset_y();
+    translation - root.rotation * (root.scale * Vec3::Y * offset)
+}
+
 fn capture(world: &mut World, state: &str) {
     let name = format!(
         "chibi-{}-{state}.png",
@@ -749,9 +765,8 @@ fn run(world: &mut World) {
         {
             assert_mode(world, AvatarBodyMode::Normal);
             assert_eq!(world.resource::<BodyProportions>().root_offset_y(), 0.0);
-            let entity = avatar(world);
-            world.resource_mut::<Smoke>().authored_root =
-                world.get::<Transform>(entity).map(|pose| pose.translation);
+            let root = authored_root_base(world);
+            world.resource_mut::<Smoke>().authored_root = Some(root);
             capture(world, "authored-sword-normal");
             world.write_message(ToggleBodyMode);
             advance(world, 33);
@@ -767,9 +782,8 @@ fn run(world: &mut World) {
                 offset.is_finite() && offset < 0.0,
                 "Chibi needs its measured neutral-root correction"
             );
-            let entity = avatar(world);
             let normal_root = world.resource::<Smoke>().authored_root.unwrap();
-            let base = world.get::<Transform>(entity).unwrap().translation - Vec3::Y * offset;
+            let base = authored_root_base(world);
             assert!(
                 base.abs_diff_eq(normal_root, 0.0001),
                 "authored VRMA must retain the same avatar-root base"
@@ -795,7 +809,8 @@ fn run(world: &mut World) {
         }
         12 if since > 1.0
             && !world.resource::<DesktopPhysicsState>().falling
-            && world.resource::<DesktopPhysicsState>().support.is_some() =>
+            && world.resource::<DesktopPhysicsState>().support.is_some()
+            && world.resource::<NeraAnimationState>().visual_state() == VisualState::Idle =>
         {
             assert_mode(world, AvatarBodyMode::Normal);
             crate::avatar::assert_smoke_ground_contact(world);
@@ -956,7 +971,12 @@ fn run(world: &mut World) {
             world.write_message(PresentationCommand::ExitAttention);
             advance(world, 27);
         }
-        27 if since > 1.0 && world.resource::<DesktopPhysicsState>().support.is_some() => {
+        // Native support can be acquired before the authored Landing clip
+        // finishes. Check settled standing, after its idle blend/calibration.
+        27 if since > 2.5
+            && world.resource::<DesktopPhysicsState>().support.is_some()
+            && world.resource::<NeraAnimationState>().visual_state() == VisualState::Idle =>
+        {
             assert!(world.resource::<PresentationState>().is_desktop_pet());
             assert_mode(world, AvatarBodyMode::Normal);
             crate::avatar::assert_smoke_ground_contact(world);

@@ -1,10 +1,14 @@
 mod alarm;
 mod animation;
+mod application_assets;
+#[cfg(target_os = "windows")]
+mod application_icon;
 mod avatar;
 mod benchmark;
 mod character;
 mod cloud;
 mod dance_pool;
+mod diagnostics;
 mod focus;
 mod memory;
 mod music;
@@ -89,19 +93,11 @@ use alarm_settings::AlarmSettingsPlugin;
 #[cfg(target_os = "windows")]
 use tray::TrayPlugin;
 
-/// Bevy 0.19 resolves file assets relative to the executable directory when
-/// BEVY_ASSET_ROOT / CARGO_MANIFEST_DIR are not present at runtime. `cargo run`
-/// therefore points at `target/debug/assets`, while Project Nera keeps assets
-/// in the repository root. Prefer the repository assets while developing, and
-/// fall back to a normal `assets` folder beside the executable for packaged builds.
+/// Packaged assets always take precedence; the repository fallback is debug-only.
 fn nera_asset_path() -> String {
-    let development_assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-
-    if development_assets.is_dir() {
-        development_assets.to_string_lossy().into_owned()
-    } else {
-        "assets".to_string()
-    }
+    application_assets::directory()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn nera_asset_directory() -> std::path::PathBuf {
@@ -135,26 +131,41 @@ fn main() {
     // benchmark flag so normal launches remain render-correct.
     let use_gpu_instance_buffer_builder = !memory_benchmark_d3;
     let mut app = App::new();
+    // Settings load before windows are created; install diagnostics first so
+    // malformed/missing configuration is reported instead of silently lost.
+    app.add_plugins(bevy::log::LogPlugin {
+        filter: "warn,nera=info,chibi_validation=info,touch_validation=info".into(),
+        custom_layer: diagnostics::layer,
+        ..default()
+    });
+    let missing = application_assets::missing_core(&nera_asset_directory());
+    if !missing.is_empty() {
+        diagnostics::startup_failure(&format!(
+            "Required runtime files are missing: {}. Extract the complete Nera ZIP and keep nera.exe beside its assets folder.",
+            missing.join(", ")
+        ));
+        std::process::exit(1);
+    }
     #[cfg(debug_assertions)]
     let feature_smoke = std::env::args().any(|arg| arg == "--feature-smoke");
     #[cfg(debug_assertions)]
     // Scripted harnesses inject semantic/window events; never capture the
     // user's physical pointer while they work in another application.
     let scripted_pointer = feature_smoke
-        && std::env::args().any(|arg| {
+        || std::env::args().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--touch-smoke"
-                    | "--presentation-smoke"
-                    | "--alarm-timer-smoke"
-                    | "--living-smoke"
-                    | "--treat-focus-smoke"
-                    | "--focus-activity-smoke"
-                    | "--library-motion-smoke"
+                "--settings-memory-audit" | "--alarm-memory-audit"
             )
-        });
+        })
+        || std::env::var_os("NERA_GALLERY_HOST_SMOKE_TEST").is_some();
     #[cfg(not(debug_assertions))]
     let scripted_pointer = false;
+    #[cfg(debug_assertions)]
+    let garment_gravity =
+        !feature_smoke || !std::env::args().any(|arg| arg == "--garment-spring-baseline");
+    #[cfg(not(debug_assertions))]
+    let garment_gravity = true;
 
     // Load persistent Nera settings before the native window is created.
     //
@@ -183,6 +194,8 @@ fn main() {
 
     app.add_plugins(
         DefaultPlugins
+            .build()
+            .disable::<bevy::log::LogPlugin>()
             .set(AssetPlugin {
                 file_path: nera_asset_path(),
                 ..default()
@@ -224,6 +237,9 @@ fn main() {
                 ..default()
             }),
     );
+
+    #[cfg(target_os = "windows")]
+    app.add_plugins(application_icon::ApplicationIconPlugin);
 
     app.add_plugins((
         VrmPlugin,
@@ -319,6 +335,12 @@ fn main() {
                 .after(VrmSystemSets::PropagateAfterConstraints)
                 .after(bevy::camera::CameraUpdateSystems)
                 .before(VrmSystemSets::GazeControl),
+        )
+        .add_systems(
+            PostUpdate,
+            avatar::apply_garment_spring_gravity
+                .run_if(move || garment_gravity)
+                .before(VrmSystemSets::SpringBone),
         )
         .add_systems(
             PostUpdate,

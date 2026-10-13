@@ -10,7 +10,7 @@ pub(crate) const RANDOM_SOUND: u16 = u16::MAX;
 pub(crate) const STOP_PREVIEW: u16 = u16::MAX - 1;
 
 pub(crate) const SOUNDS: [(&str, &str); 10] = [
-    ("Classic", "sound/alarm.mp3"),
+    ("Classic", "sound/classic.wav"),
     ("Gentle", "sound/gentle.ogg"),
     ("Chime", "sound/chime.ogg"),
     ("Clock Beeps", "sound/clock_beeps.wav"),

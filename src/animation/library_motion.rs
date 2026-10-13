@@ -27,6 +27,9 @@ struct Checkpoint {
     window: Option<(NativeWindowHandle, PhysicalRect)>,
 }
 impl Checkpoint {
+    fn contact_y_at(&self, destination: IVec2, surface_delta: IVec2, dpi: f32) -> f32 {
+        (self.position.y + surface_delta.y - destination.y) as f32 / dpi + self.contact.y
+    }
     fn capture(environment: &DesktopEnvironment, physics: &DesktopPhysicsState) -> Option<Self> {
         let rect = environment.nera_rect?;
         let contact = if environment.placement != PlacementState::Free {
@@ -82,6 +85,7 @@ struct Session {
     translation: Option<TranslationPose>,
     horizontal: Vec3,
     airborne: bool,
+    grounding: super::GroundingPolicy,
     initial_bias: Option<f32>,
     returning: Option<(IVec2, f32)>,
     expected: IVec2,
@@ -114,8 +118,43 @@ pub(crate) struct LibraryMotion {
     raw_root: Option<(Entity, f32)>,
 }
 impl LibraryMotion {
+    #[cfg(debug_assertions)]
+    pub(crate) fn raw_root_y_for_validation(&self, avatar: Entity) -> Option<f32> {
+        self.raw_root
+            .filter(|(owner, _)| *owner == avatar)
+            .map(|(_, y)| y)
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn smoke_contact_target(
+        &self,
+        environment: &DesktopEnvironment,
+        margin: f32,
+    ) -> Option<f32> {
+        let session = self.session.as_ref()?;
+        let rect = environment.nera_rect?;
+        Some(
+            session.checkpoint.contact_y_at(
+                IVec2::new(rect.left, rect.top),
+                session.checkpoint.surface_delta()?,
+                environment.nera_scale_factor.max(0.25) as f32,
+            ) - margin,
+        )
+    }
     pub(crate) fn owns_placement(&self) -> bool {
         self.session.is_some()
+    }
+
+    pub(crate) fn uses_body_contact(&self) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session.grounding == super::GroundingPolicy::BodyContact && session.returning.is_none()
+        })
+    }
+
+    pub(crate) fn needs_pose_shadow_contact(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| !session.airborne && session.returning.is_none())
     }
 }
 
@@ -161,6 +200,11 @@ fn manual_clip(world: &World) -> Option<Entity> {
         return None;
     };
     (!state.auto_dance_active()).then_some(clip)
+}
+
+pub(super) fn uses_checkpoint_motion(visual: VisualState, path: Option<&str>) -> bool {
+    matches!(visual, VisualState::LibraryAnimation(_))
+        && super::grounding_policy(visual, path) != super::GroundingPolicy::BodyContact
 }
 fn blocked(world: &World) -> bool {
     world
@@ -226,6 +270,10 @@ fn cancel_interrupted(world: &mut World) {
 }
 
 fn extract_motion(world: &mut World) {
+    #[cfg(debug_assertions)]
+    if smoke::legacy_playback() {
+        return;
+    }
     if blocked(world) {
         return;
     }
@@ -233,6 +281,17 @@ fn extract_motion(world: &mut World) {
     world.resource_scope(|world, mut motion: Mut<LibraryMotion>| {
         if let Some(clip) = selected {
             if world.resource::<NeraAnimationPlayback>().current_clip != Some(clip) {
+                return;
+            }
+            let visual = VisualState::LibraryAnimation(clip);
+            let path = world.get_resource::<super::LibraryPlayback>()
+                .and_then(|library| library.grounding_path_for(clip));
+            if !uses_checkpoint_motion(visual, path) {
+                // Death already has a reversible, bounded body-contact layer.
+                // Retargeting its hips again and applying standing contact can
+                // lift the lying pose and move its shadow away from the floor.
+                // Leave playback, physics and grounding on their original path.
+                motion.session = None;
                 return;
             }
             let revision = world.resource::<NeraAnimationState>().revision;
@@ -279,6 +338,10 @@ fn extract_motion(world: &mut World) {
                 } else {
                     allows_airborne(animation_clip, target, rest.translation)
                 };
+                let grounding = super::grounding_policy(
+                    VisualState::LibraryAnimation(clip),
+                    world.get_resource::<super::LibraryPlayback>().and_then(|library| library.path_for(clip)),
+                );
                 let environment = world.resource::<DesktopEnvironment>();
                 let Some(checkpoint) = motion
                     .session
@@ -306,6 +369,7 @@ fn extract_motion(world: &mut World) {
                     translation,
                     horizontal: Vec3::ZERO,
                     airborne,
+                    grounding,
                     initial_bias: None,
                     returning: None,
                     expected: position,
@@ -343,17 +407,17 @@ fn extract_motion(world: &mut World) {
         let corrected = if !returning {
             playing_clip(world, entity).and_then(|(_, time)| session.translation.as_ref()?.sample(world, time)).unwrap_or(raw)
         } else { raw };
-        // The bone keeps vertical motion and all authored rotation. Move its
-        // horizontal translation to the HWND once, never to both owners.
+        // Desktop X moves the HWND once. Depth is part of the 3D pose: replacing
+        // it with a screen Y offset changes the view/contact of a backward fall.
         let rest = world.get::<RestTransform>(entity).unwrap().0.translation;
         let Some(mut hips) = world.get_mut::<Transform>(entity) else {
             return;
         };
         hips.translation.x = rest.x;
         hips.translation.y = corrected.y;
-        hips.translation.z = rest.z;
+        hips.translation.z = corrected.z;
         if !returning {
-            session.horizontal = Vec3::new(corrected.x - first.x, 0.0, corrected.z - first.z);
+            session.horizontal = Vec3::new(corrected.x - first.x, 0.0, 0.0);
         }
         motion.raw_hips = Some((entity, raw));
     });
@@ -571,8 +635,7 @@ fn ground_pose(world: &mut World) {
             return;
         };
         session.frame_target = Some(target);
-        let floor = (session.checkpoint.position.y + surface_delta.y - target.y) as f32 / dpi
-            + session.checkpoint.contact.y;
+        let floor = session.checkpoint.contact_y_at(target, surface_delta, dpi);
         let Some((camera, view)) = camera_geometry(world) else {
             return;
         };
@@ -586,7 +649,7 @@ fn ground_pose(world: &mut World) {
             world
                 .query_filtered::<(&VrmBone, &GlobalTransform), With<NeraLiveBone>>()
                 .iter(world)
-                .filter(|(bone, _)| contact_bone(bone.as_str()))
+                .filter(|(bone, _)| ground_contact_bone(bone.as_str(), session.grounding))
                 .filter_map(|(_, pose)| {
                     camera
                         .world_to_viewport(&view, pose.translation())
@@ -646,6 +709,19 @@ fn contact_bone(name: &str) -> bool {
             | "leftLowerArm"
             | "rightLowerArm"
     )
+}
+
+fn ground_contact_bone(name: &str, policy: super::GroundingPolicy) -> bool {
+    // Grounded clips share desktop's ankle/sole convention. Selecting toes or
+    // hands instead changes the plane, especially with Chibi proportions.
+    if policy == super::GroundingPolicy::Grounded {
+        matches!(name, "leftFoot" | "rightFoot")
+    } else {
+        // Authored crouches/get-up poses still use their evaluated full-body
+        // footprint, so planting raised ankles cannot sink the body or trigger
+        // a monitor-bound clamp that lifts the whole canvas off its floor.
+        contact_bone(name)
+    }
 }
 
 fn move_canvas(world: &mut World) {
@@ -742,7 +818,16 @@ fn pose_destination(
     let moved = camera
         .world_to_viewport(&view, hips.translation() + displacement)
         .ok()?;
-    Some(session.clip_origin + surface_delta + ((moved - origin) * dpi).round().as_ivec2())
+    Some(session.clip_origin + surface_delta + desktop_motion_offset(moved - origin, dpi))
+}
+
+fn desktop_motion_offset(projected: Vec2, dpi: f32) -> IVec2 {
+    // A forward/backward displacement has a vertical perspective component,
+    // but the desktop support surface is 2D. Moving the HWND by that component
+    // lifts its frozen physics/shadow anchors until placement is released.
+    // Keep canvas Y on the checkpoint plane. Authored rises/jumps still live
+    // in hips Y and retain the existing airborne-pose handling.
+    IVec2::new((projected.x * dpi).round() as i32, 0)
 }
 
 fn camera_geometry(world: &mut World) -> Option<(Camera, GlobalTransform)> {
@@ -779,6 +864,45 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
+    const DEATH_PATH: &str = "animations/animasi_basic/Death01.vrma";
+
+    #[test]
+    fn grounded_manual_contact_preserves_desktop_feet_and_body_contact_remains_available() {
+        use super::super::GroundingPolicy::*;
+        for name in ["leftFoot", "rightFoot"] {
+            assert!(ground_contact_bone(name, Grounded));
+        }
+        for name in ["leftToes", "rightToes", "leftHand", "hips"] {
+            assert!(!ground_contact_bone(name, Grounded));
+            assert!(ground_contact_bone(name, BodyContact));
+            assert!(ground_contact_bone(name, Authored));
+        }
+    }
+
+    #[test]
+    fn checkpoint_contact_rebases_pixels_without_moving_its_support_surface() {
+        let checkpoint = Checkpoint {
+            position: IVec2::new(230, 152),
+            placement: PlacementState::Free,
+            anchor: AvatarAnchor::Feet,
+            contact: Vec2::new(300.0, 872.0),
+            monitor: PhysicalRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            window: None,
+        };
+        for dpi in [1.0, 1.25, 2.0] {
+            for y in [152, 168, -20] {
+                let delta = IVec2::new(0, 17);
+                let local = checkpoint.contact_y_at(IVec2::new(230, y), delta, dpi);
+                let global = local * dpi + y as f32;
+                assert!((global - (152.0 + 17.0 + 872.0 * dpi)).abs() < 0.001);
+            }
+        }
+    }
 
     fn curve(end: Vec3) -> (AnimationClip, bevy::animation::AnimationTargetId) {
         let target = bevy::animation::AnimationTargetId::from_name(&Name::new("hips"));
@@ -879,6 +1003,113 @@ mod tests {
         assert!(!allows_airborne(&crouch, target, Vec3::Y * 0.9));
     }
     #[test]
+    fn projected_depth_motion_does_not_lift_the_desktop_canvas() {
+        for dpi in [1.0, 1.25, 2.0] {
+            for projected_y in [-300.0, 0.0, 180.0] {
+                assert_eq!(
+                    desktop_motion_offset(Vec2::new(12.0, projected_y), dpi),
+                    IVec2::new((12.0 * dpi).round() as i32, 0),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn death_retains_original_retargeted_pose_and_does_not_take_checkpoint_ownership() {
+        let (mut world, root, hips, clip) = fixture();
+        let mut library = super::super::LibraryPlayback::default();
+        library.cache_clip(DEATH_PATH.into(), clip, 0);
+        world.insert_resource(library);
+        let pose = Transform::from_xyz(0.03, 0.82, -0.02)
+            .with_rotation(Quat::from_rotation_x(-1.3))
+            .with_scale(Vec3::splat(0.62));
+        *world.get_mut::<Transform>(hips).unwrap() = pose;
+        let root_pose = *world.get::<Transform>(root).unwrap();
+        world.run_system_once(extract_motion).unwrap();
+        assert!(!world.resource::<LibraryMotion>().owns_placement());
+        assert_eq!(*world.get::<Transform>(hips).unwrap(), pose);
+        assert_eq!(*world.get::<Transform>(root).unwrap(), root_pose);
+        assert!(world.resource::<LibraryMotion>().raw_hips.is_none());
+        assert!(world.resource::<LibraryMotion>().raw_root.is_none());
+        assert!(
+            !world
+                .resource::<LibraryMotion>()
+                .needs_pose_shadow_contact()
+        );
+    }
+
+    #[test]
+    fn selecting_death_releases_an_existing_motion_lease_to_body_grounding() {
+        let (mut world, _, hips, _) = fixture();
+        world.run_system_once(extract_motion).unwrap();
+        assert!(world.resource::<LibraryMotion>().owns_placement());
+        world.run_system_once(restore_pose).unwrap();
+        let death = world.spawn_empty().id();
+        let mut library = super::super::LibraryPlayback::default();
+        library.cache_clip(DEATH_PATH.into(), death, 0);
+        world.insert_resource(library);
+        world.resource_mut::<NeraAnimationPlayback>().current_clip = Some(death);
+        world.resource_mut::<NeraAnimationState>().request_one_shot(
+            TemporaryAction::LibraryAnimation(death),
+            Duration::from_secs(2),
+        );
+        let pose = Transform::from_xyz(0.03, 0.8, 0.02);
+        *world.get_mut::<Transform>(hips).unwrap() = pose;
+        world.run_system_once(extract_motion).unwrap();
+        assert!(!world.resource::<LibraryMotion>().owns_placement());
+        assert_eq!(*world.get::<Transform>(hips).unwrap(), pose);
+        assert!(!uses_checkpoint_motion(
+            VisualState::LibraryAnimation(death),
+            Some(DEATH_PATH)
+        ));
+        assert!(uses_checkpoint_motion(
+            VisualState::LibraryAnimation(death),
+            Some("animations/Mixamo-VRMA/Walking_10.vrma")
+        ));
+    }
+
+    #[test]
+    fn depth_is_preserved_in_the_rig_instead_of_transferred_to_window_y() {
+        let (mut world, _, hips, _) = fixture();
+        world.run_system_once(extract_motion).unwrap();
+        world.get_mut::<Transform>(hips).unwrap().translation = Vec3::new(0.2, 0.7, -0.5);
+        world.run_system_once(extract_motion).unwrap();
+        assert_eq!(
+            world.get::<Transform>(hips).unwrap().translation,
+            Vec3::new(0.0, 0.7, -0.5)
+        );
+        assert_eq!(
+            world
+                .resource::<LibraryMotion>()
+                .session
+                .as_ref()
+                .unwrap()
+                .horizontal,
+            Vec3::new(0.2, 0.0, 0.0)
+        );
+        assert!(
+            world
+                .resource::<LibraryMotion>()
+                .needs_pose_shadow_contact()
+        );
+        world
+            .resource_mut::<LibraryMotion>()
+            .session
+            .as_mut()
+            .unwrap()
+            .airborne = true;
+        assert!(
+            !world
+                .resource::<LibraryMotion>()
+                .needs_pose_shadow_contact()
+        );
+        clear(&mut world);
+        assert_eq!(
+            world.get::<Transform>(hips).unwrap().translation,
+            Vec3::new(0.2, 0.7, -0.5)
+        );
+    }
+    #[test]
     fn translation_overlay_uses_player_time_without_mutating_shared_clips() {
         let (mut world, root, hips, _) = fixture();
         let (handle, _) = playing_clip(&world, hips).unwrap();
@@ -948,7 +1179,7 @@ mod tests {
             *world.get_mut::<Transform>(hips).unwrap() = raw;
             world.run_system_once(extract_motion).unwrap();
             let pose = world.get::<Transform>(hips).unwrap();
-            assert_eq!(pose.translation, Vec3::new(0.0, 0.6, 0.0));
+            assert_eq!(pose.translation, Vec3::new(0.0, 0.6, -0.2));
             assert_eq!(pose.rotation, raw.rotation);
             assert_eq!(pose.scale, raw.scale);
             assert_eq!(
@@ -958,7 +1189,7 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .horizontal,
-                Vec3::new(0.7, 0.0, -0.2)
+                Vec3::new(0.7, 0.0, 0.0)
             );
             world.run_system_once(restore_pose).unwrap();
             assert_eq!(*world.get::<Transform>(hips).unwrap(), raw);

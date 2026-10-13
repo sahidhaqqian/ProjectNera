@@ -2,6 +2,9 @@
 //! Scheduling remains in main so cross-subsystem ordering stays explicit.
 mod anchors;
 pub(crate) mod body_mode;
+mod garment_springs;
+
+pub(crate) use garment_springs::apply_gravity as apply_garment_spring_gravity;
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
 pub(crate) use anchors::assert_smoke_ground_contact;

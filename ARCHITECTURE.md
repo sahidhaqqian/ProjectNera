@@ -87,7 +87,8 @@ Startup order:
 
 1. Detect special worker/process modes.
 2. Create the Bevy `App`.
-3. Load `NeraSettings` before primary-window creation.
+3. Install console plus bounded local diagnostics, validate core packaged assets,
+   then load `NeraSettings` before primary-window creation.
 4. Apply companion-instance settings identity if relevant.
 5. Resolve Start Hidden before creating the HWND.
 6. Register the private character asset source.
@@ -98,6 +99,21 @@ Startup order:
 11. Run the app.
 
 Primary-window defaults currently include transparent/undecorated rendering, `AlwaysOnTop`, taskbar skip, fixed size, and disabled native cursor hit-test until Nera's interaction pipeline enables it.
+
+Release assets resolve only beside the executable. Debug builds may fall back to
+the repository when no packaged assets directory exists. Missing core resources
+produce an actionable log and Windows error dialog before renderer startup.
+`diagnostics.rs` writes bounded per-process logs under
+`%LOCALAPPDATA%/ProjectNera/logs/`, including the existing panic hook. Settings
+errors therefore reach diagnostics before native windows exist. Worker stdout
+remains IPC; diagnostic files do not share its stream.
+
+`build.rs` embeds the official Windows icon and version metadata and selects the
+Windows GUI subsystem only for the release `nera` binary. Debug/executable
+validation examples retain console logging. Manager and companion creation
+continues to use the existing no-console flag. `application_icon.rs` applies the
+embedded shared icon to all Bevy windows and the tray; Windows owns its lifetime.
+The portable distribution and shortcut helper use the same executable resource.
 
 ---
 
@@ -452,9 +468,9 @@ One-shot lifetime should come from loaded VRMA duration, not duplicated guessed 
 
 `animation/library.rs` turns gallery selection into a normal desktop animation request. The manager is not a second desktop playback owner.
 
-For manually selected clips, `animation/library_motion.rs` holds a temporary placement lease and a checkpoint of the native position, support and attachment. Its reversible hips translation overlay samples the original VRMA at the existing player's playback time, transfers horizontal displacement to the native window once, and preserves authored vertical motion. Translation retargeting uses rest hips-to-feet distances rather than absolute scene Y, so desktop root placement cannot collapse the motion. Cached clips remain unchanged for AutoDance and other uses. Grounded poses use evaluated humanoid contact; clips with an authored rise retain their airborne trajectory.
+For manually selected clips, `animation/library_motion.rs` holds a temporary placement lease and a checkpoint of the native position, support and attachment. Its reversible hips translation overlay samples the original VRMA at the existing player's playback time, transfers X displacement to the native window once, and preserves authored Y/Z motion in the 3D rig. Native window Y stays on the checkpoint's desktop support plane; 3D depth must not be discarded or translated into native Y. Translation retargeting uses rest hips-to-feet distances rather than absolute scene Y, so desktop root placement cannot collapse the motion. Cached clips remain unchanged for AutoDance and other uses. Grounded poses use evaluated humanoid contact; clips with an authored rise retain their airborne trajectory. Shadow placement samples the completed rendered pose during this lease for grounded clips. Airborne clips keep the fixed support shadow plane. BodyContact clips (Death01) retain their original VRMA retargeting, blend, downward-only bounded visual grounding and desktop shadow plane; the checkpoint layer must not take their placement or apply standing contact to a lying pose.
 
-Physics, sitting followers, anchor recalibration, autonomous behavior and position persistence yield during this lease. Normal completion eases back to the original checkpoint, following its supporting window if it moved. Drag, Cloud, presentation, loading/replacement or an external relocation discard the checkpoint instead of pulling Nera away from the new owner. AutoDance remains on its existing placement path. This layer reads the current animation graph; it does not control another player or alter the Chibi proportion overlay.
+Physics, sitting followers, anchor recalibration, autonomous behavior and position persistence yield during this lease. Normal completion eases back to the original checkpoint, following its supporting window if it moved. Drag, Cloud, presentation, loading/replacement or an external relocation discard the checkpoint instead of pulling Nera away from the new owner. AutoDance remains on its existing placement path. This layer reads the current animation graph; it does not control another player or alter the Chibi proportion overlay. Library admission recognizes byte-identical copies of the protected Death01 by a streamed content fingerprint once, so gallery/bookmark paths retain BodyContact without guessing by filename. The original path remains available for diagnostics; pose evaluation performs no file reads.
 
 ### Walking animation
 
@@ -559,6 +575,8 @@ Chibi
 7. restore exactly on Normal or character replacement.
 
 Spring handling is isolated in `body_mode/springs.rs` because `bevy_vrm1` keeps solver runtime details private. Dependency-schema compatibility is regression-tested.
+
+`avatar/garment_springs.rs` supplies a compatibility gravity fallback to active-rig skirt joints whose authored gravity power is zero and direction is downward. It derives the force from their authored stiffness and lets the existing VRM spring solver/colliders evaluate the garment. It preserves nonzero authored gravity and hair/unknown chains, excludes VRMA source rigs, and does not modify source assets or the reversible Chibi spring geometry adapter. This is spring-bone garment motion, not a cloth simulation; meshes without identifiable skirt spring joints retain their authored behavior.
 
 Detailed Chibi proportions and native validation belong in `CHIBI_MODE_V1.md` / `CHIBI_PROPORTION_TUNING.md`.
 

@@ -1,5 +1,29 @@
 # Third-party notices
 
+## Binary dependency and asset notices
+
+`assets/licenses/COMPONENTS.json` records the resolved Cargo dependency versions,
+license expressions and source URLs. `assets/licenses/DEPENDENCY_LICENSES.txt`
+bundles their available license/notice texts, including the embedded font notice.
+It conservatively includes build, test and alternate-platform dependencies.
+These third-party licenses remain independent of Nera's proprietary code license.
+The embedded Fira Mono font has its separate SIL Open Font License in
+`assets/licenses/FiraMono-LICENSE.txt`, obtained from Bevy's matching 0.19.1
+source release (`assets/fonts/FiraMono-LICENSE`).
+
+Default avatar: `siroihakumai`, model `m2`, VRM 1.0 license metadata permitting
+redistribution and corporate commercial use; license URL
+https://vrm.dev/licenses/1.0/. The owner confirmed distribution authority for
+supplied avatar, Cloud/workstation models and animations on 2026-10-13.
+This confirmation does not grant rights to arbitrary user-imported content.
+
+Food props: Kenney Food Kit (CC0), Study book: Quaternius via Poly Pizza (CC0).
+Alarm and pet audio sources, modifications and licenses are recorded alongside
+the bundled assets in `assets/sound/CREDITS.md` and `assets/sound/pet/CREDITS.md`.
+Classic is now derived from the documented CC0 Clock Beeps; the prior unverified
+MP3 is excluded. The supplied branding is retained without an artwork redesign.
+Consult the individual `CREDITS.md` and `LICENSE-*.txt` files in each asset folder.
+
 ## VRM 0.x migration mapping
 
 Portions of the VRM 0.x to VRM 1.0 migration mapping in

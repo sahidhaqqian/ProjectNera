@@ -3,12 +3,13 @@
 Pet interaction/startup/cloud cues have their own source table and original
 licenses in [pet/CREDITS.md](pet/CREDITS.md).
 
-The nine alternatives to Classic are distributed under Creative Commons Zero (CC0 1.0).
+All ten built-in alarm sounds are distributed under Creative Commons Zero (CC0 1.0).
 They may be used and redistributed, including commercially, without attribution.
 Credits are retained here for provenance.
 
 | File | Source | Creator | License |
 | --- | --- | --- | --- |
+| `classic.wav` | Derived from the same CC0 electronic alarm below; slower/lower pitch, reduced gain and short fades via `tools/make_classic_alarm.py` | reecord2; variation for Project Nera | CC0 1.0 |
 | `gentle.ogg` | [Interface Sounds](https://kenney.nl/assets/interface-sounds), `confirmation_001.ogg` | Kenney | CC0 1.0 |
 | `chime.ogg` | [Interface Sounds](https://kenney.nl/assets/interface-sounds), `confirmation_004.ogg` | Kenney | CC0 1.0 |
 | `clock_beeps.wav` | [alarm beep electronic.wav](https://freesound.org/people/reecord2/sounds/96063/), public HQ MP3 preview | reecord2 | CC0 1.0 |
@@ -36,5 +37,6 @@ Download provenance:
 - https://opengameart.org/sites/default/files/ui_wav.zip
 - https://kenney.nl/media/pages/assets/music-jingles/f37e530b9e-1677590399/kenney_music-jingles.zip
 
-`alarm.mp3` is the pre-existing Classic sound. Its provenance was not established
-by this change; it is not represented as one of the newly verified CC0 assets.
+The former `alarm.mp3` had unverified provenance and is excluded from the release.
+Classic keeps sound ID 0, so saved alarms retain their selection. The replacement
+uses existing CC0 audio; no download or playback-system change is required.

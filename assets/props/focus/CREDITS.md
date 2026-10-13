@@ -9,8 +9,9 @@
 - Bundled unchanged as `study-book.glb`: 25,168 bytes, 464 triangles; no external textures.
 
 ## Work: supplied laptop workstation
-- User supplied `C:/Users/sahid/Downloads/Nera_Study_Desk_Laptop_Only_Lite.glb`.
+- User supplied `Nera_Study_Desk_Laptop_Only_Lite.glb`.
 - Bundled unchanged as `work-laptop.glb` (11,612,308 bytes; 267,920 triangles; three original 1024x1024 textures).
 - SHA-256: `5B0CF69654D9BF90F608B5ED55C4CC55A72DE588CCEADF2F55EBF20BF332E721`, matching the supplied file exactly. No compression, mesh simplification or texture resizing.
 - Source remains unchanged; no compression extension or runtime network dependency.
-- No third-party redistribution license is inferred for the user-supplied asset.
+- The owner confirmed ownership/redistribution permission for this supplied asset
+  during the final release audit on 2026-10-13. No public third-party license is inferred.

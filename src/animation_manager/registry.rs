@@ -58,7 +58,7 @@ impl AnimationRegistry {
         for key in registry.bookmarks.clone() {
             if !key.starts_with("Bookmarks/") {
                 if let Err(error) = registry.move_into_bookmarks(&key) {
-                    eprintln!("Could not migrate animation bookmark {key}: {error}");
+                    bevy::log::warn!("Could not migrate animation bookmark {key}: {error}");
                 }
             }
         }
@@ -129,10 +129,48 @@ impl AnimationRegistry {
     }
 
     pub fn path(&self, key: &str) -> Option<PathBuf> {
-        self.entries
-            .iter()
-            .any(|entry| entry.key == key)
-            .then(|| self.root.join(key))
+        if !valid_relative_key(key) || !self.entries.iter().any(|entry| entry.key == key) {
+            return None;
+        }
+        let path = self.root.join(key);
+        let root = self.root.canonicalize().ok()?;
+        let actual = path.canonicalize().ok()?;
+        let relative = actual
+            .strip_prefix(&root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_runtime_animation(&relative) && !is_runtime_animation(key) {
+            return None;
+        }
+        Some(path)
+    }
+
+    fn create_owned_directory(&self, directory: &Path) -> io::Result<()> {
+        let root = self.root.canonicalize()?;
+        let mut existing = directory;
+        while !existing.exists() {
+            existing = existing.parent().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Animation directory is outside the library",
+                )
+            })?;
+        }
+        if !existing.canonicalize()?.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Linked directory is outside the animation library",
+            ));
+        }
+        fs::create_dir_all(directory)?;
+        if !directory.canonicalize()?.starts_with(root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Animation directory escaped the library",
+            ));
+        }
+        Ok(())
     }
 
     pub fn toggle_dance(&mut self, key: &str) -> io::Result<()> {
@@ -200,7 +238,7 @@ impl AnimationRegistry {
             ));
         }
         let directory = self.root.join("Bookmarks");
-        fs::create_dir_all(&directory)?;
+        self.create_owned_directory(&directory)?;
         let filename = source.file_name().unwrap().to_string_lossy();
         let stem = source.file_stem().unwrap().to_string_lossy();
         let mut destination = directory.join(filename.as_ref());
@@ -250,7 +288,7 @@ impl AnimationRegistry {
         }
         let destination = self.root.join(&origin);
         let directory = destination.parent().unwrap();
-        fs::create_dir_all(directory)?;
+        self.create_owned_directory(directory)?;
         if file_name_exists_case_insensitive(
             directory,
             destination.file_name().unwrap().to_str().unwrap(),
@@ -376,7 +414,7 @@ impl AnimationRegistry {
             ));
         }
         let directory = self.root.join("Imported");
-        fs::create_dir_all(&directory)?;
+        self.create_owned_directory(&directory)?;
         let destination = directory.join(name);
         let mut input = fs::File::open(source)?;
         let mut output = OpenOptions::new()
@@ -454,18 +492,38 @@ fn ensure_editable(key: &str) -> io::Result<()> {
 }
 
 fn collect_vrma(directory: &Path, paths: &mut Vec<PathBuf>) {
-    let Ok(items) = fs::read_dir(directory) else {
+    let Ok(root) = directory.canonicalize() else {
         return;
     };
-    for item in items.flatten() {
-        let path = item.path();
-        if path.is_dir() {
-            collect_vrma(&path, paths);
-        } else if path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("vrma"))
-        {
-            paths.push(path);
+    let mut pending = vec![directory.to_owned()];
+    let mut visited = BTreeSet::new();
+    while let Some(directory) = pending.pop() {
+        let Ok(actual) = directory.canonicalize() else {
+            continue;
+        };
+        if !actual.starts_with(&root) || !visited.insert(actual) {
+            continue;
+        }
+        let Ok(items) = fs::read_dir(directory) else {
+            continue;
+        };
+        for item in items.flatten() {
+            let Ok(kind) = item.file_type() else { continue };
+            // Linked collections are not owned imports; never recursively
+            // traverse them or expose their originals to rename/delete.
+            if kind.is_symlink() {
+                continue;
+            }
+            let path = item.path();
+            if kind.is_dir() {
+                pending.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("vrma"))
+                && path.canonicalize().is_ok_and(|p| p.starts_with(&root))
+            {
+                paths.push(path);
+            }
         }
     }
 }
@@ -509,6 +567,54 @@ pub(super) fn validated_vrma_name(proposed: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn junctions_cannot_expose_or_modify_originals_outside_the_library() {
+        let base = std::env::temp_dir().join(format!("nera-junction-audit-{}", std::process::id()));
+        let root = base.join("assets");
+        let outside = base.join("originals");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let original = outside.join("keep.vrma");
+        fs::write(&original, b"original bytes").unwrap();
+        let link = root.join("Imported");
+        let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "''"));
+        let command = format!(
+            "New-Item -ItemType Junction -Path {} -Target {} | Out-Null",
+            quote(&link),
+            quote(&outside)
+        );
+        let status = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "Native NTFS junction fixture must be created"
+        );
+        let mut registry = AnimationRegistry::new(root.clone(), base.join("bookmarks.txt"));
+        assert!(
+            registry.entries.is_empty(),
+            "Linked originals must not enter the mutable catalogue"
+        );
+        registry.entries.push(AnimationEntry {
+            key: "Imported/keep.vrma".into(),
+            display_name: "keep".into(),
+            source: "Imported".into(),
+            emotion: "Neutral",
+        });
+        assert!(registry.delete("Imported/keep.vrma").is_err());
+        assert!(registry.rename("Imported/keep.vrma", "renamed").is_err());
+        registry.entries.clear();
+        assert!(registry.import(&original).is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"original bytes");
+        fs::remove_dir(link).unwrap(); // Remove the junction itself, never its target.
+        fs::remove_file(original).unwrap();
+        fs::remove_dir(outside).unwrap();
+        fs::remove_dir(root).unwrap();
+        fs::remove_dir(base).unwrap();
+    }
 
     #[test]
     fn dance_pool_references_existing_files_and_follows_bookmark_rename_delete() {

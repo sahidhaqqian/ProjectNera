@@ -3,6 +3,12 @@ name = "nera"
 version = "0.1.0"
 edition = "2024"
 default-run = "nera"
+description = "Project Nera - Windows desktop companion"
+authors = ["Sahid Haqqi"]
+license-file = "LICENSE"
+
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = [
@@ -59,6 +65,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_WinRT",
+    "Win32_System_Threading",
 ] }
 
 # ============================================================
@@ -90,7 +97,14 @@ codegen-units = 256
 
 [profile.release]
 opt-level = 3
-lto = true
+# Full LTO's single whole-engine optimization exceeded practical headroom on
+# the audited 8 GiB Windows host. Thin LTO retains cross-crate optimization.
+lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# The application and opt-in audit binaries contain many ECS monomorphizations.
+# Partition this package's code generation; dependencies retain their profile.
+[profile.release.package.nera]
+codegen-units = 8

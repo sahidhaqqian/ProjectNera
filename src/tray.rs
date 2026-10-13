@@ -269,7 +269,7 @@ fn start_system_tray(mut commands: Commands) {
         .name("nera-tray".into())
         .spawn(move || {
             if let Err(error) = run_tray_thread(thread_hwnd) {
-                eprintln!("Nera tray error: {error:?}");
+                error!("Nera tray error: {error:?}");
             }
         });
 

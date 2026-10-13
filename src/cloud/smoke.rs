@@ -381,6 +381,11 @@ fn run(world: &mut World) {
         }
         9 if since > 0.3 => {
             release(world);
+            advance(world, 24);
+        }
+        // A semantic release emitted in Last is consumed next Update, then
+        // the production Last solver clamps it. Sample the evaluated result.
+        24 if since > 0.2 => {
             world
                 .run_system_once(
                     |cloud: Res<CloudRuntime>,
