@@ -140,6 +140,14 @@ impl NeraAnimationClips {
     pub(crate) fn focus_activity_ready(&self, preset: crate::focus::FocusPreset) -> bool {
         self.focus_activity(preset).is_some()
     }
+    pub(crate) fn focus_activity_playing(
+        &self,
+        preset: crate::focus::FocusPreset,
+        playback: &NeraAnimationPlayback,
+    ) -> bool {
+        self.focus_activity(preset)
+            .is_some_and(|clip| playback.current_clip == Some(clip.entity))
+    }
     fn focus_activity(&self, preset: crate::focus::FocusPreset) -> Option<ClipSlot> {
         match preset {
             crate::focus::FocusPreset::Study => self.praying,
@@ -1055,6 +1063,24 @@ pub(crate) fn apply_animation_state(
 mod touch_playback_tests {
     use super::*;
     use crate::animation::TemporaryAction;
+    #[test]
+    fn work_prop_waits_for_the_loaded_typing_clip_to_become_the_current_pose() {
+        let typing = Entity::from_raw_u32(92).unwrap();
+        let mut clips = NeraAnimationClips::default();
+        let mut playback = NeraAnimationPlayback::default();
+        let work = crate::focus::FocusPreset::Work;
+        assert!(!clips.focus_activity_playing(work, &playback));
+        clips.focus_typing = Some(ClipSlot {
+            entity: typing,
+            duration: Duration::from_secs(3),
+        });
+        assert!(clips.focus_activity_ready(work));
+        assert!(!clips.focus_activity_playing(work, &playback));
+        playback.current_clip = Some(typing);
+        assert!(clips.focus_activity_playing(work, &playback));
+        playback.current_clip = Some(Entity::PLACEHOLDER);
+        assert!(!clips.focus_activity_playing(work, &playback));
+    }
 
     #[derive(Resource, Default)]
     struct Played(Vec<(Entity, RepeatAnimation, Duration)>);

@@ -189,7 +189,9 @@ pub(crate) fn update_screensaver_animation(
         return;
     }
     if routine.pending.is_none() {
-        if state.visual_state() == VisualState::Screensaver(ScreensaverClip::Breathing) {
+        if state.visual_state() == VisualState::Screensaver(ScreensaverClip::Breathing)
+            || routine.unavailable[ScreensaverClip::Breathing.index()]
+        {
             if now < routine.next_variation {
                 return;
             }
@@ -200,9 +202,6 @@ pub(crate) fn update_screensaver_animation(
                 return;
             }
         } else {
-            if routine.unavailable[ScreensaverClip::Breathing.index()] {
-                return;
-            }
             routine.queue(ScreensaverClip::Breathing, now);
         }
     }
@@ -432,6 +431,28 @@ mod tests {
                 VisualState::Screensaver(ScreensaverClip::Breathing)
             );
         }
+    }
+    #[test]
+    fn missing_breathing_clip_still_allows_available_screensaver_variations() {
+        let mut app = fixture();
+        app.world_mut()
+            .resource_mut::<NeraAnimationClips>()
+            .screensaver[ScreensaverClip::Breathing.index()] = None;
+        step(&mut app, 2.0);
+        assert_eq!(visual(&app), VisualState::Idle);
+        step(&mut app, 21.0);
+        assert!(
+            app.world().resource::<ScreensaverRoutine>().unavailable
+                [ScreensaverClip::Breathing.index()]
+        );
+        step(&mut app, 61.0);
+        let pending = app.world().resource::<ScreensaverRoutine>().pending;
+        if pending == Some(ScreensaverClip::Dwarf2) {
+            step(&mut app, 2.1);
+        }
+        assert!(
+            matches!(visual(&app), VisualState::Screensaver(kind) if ScreensaverClip::VARIATIONS.contains(&kind))
+        );
     }
     #[test]
     fn accepted_headpat_interrupts_the_wave_and_returns_to_breathing_without_exiting() {

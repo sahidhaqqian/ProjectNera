@@ -458,9 +458,7 @@ fn audio_worker(control: Arc<Control>, latest: Arc<Mutex<Latest>>) {
                 Ok(received) if !changed => {
                     // WASAPI emits no packets when the endpoint goes silent.
                     if !received {
-                        for _ in 0..400 {
-                            analyzer.push(0.0, 8000);
-                        }
+                        analyzer.silence(capture.rate, Duration::from_millis(50));
                     }
                     audio = analyzer.evidence();
                 }

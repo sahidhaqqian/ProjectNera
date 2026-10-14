@@ -175,8 +175,8 @@ fn open_manager(
     mut gate: ResMut<AnimationManagerInputGate>,
     character: Option<Res<crate::character::ActiveCharacter>>,
 ) {
-    let character_panel = characters.read().next().is_some();
-    if requests.read().next().is_none() && !character_panel {
+    let character_panel = characters.read().count() > 0;
+    if requests.read().count() == 0 && !character_panel {
         return;
     }
     if let Some(child) = &mut process.child {

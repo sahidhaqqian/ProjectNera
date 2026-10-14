@@ -26,6 +26,9 @@ pub(crate) mod touch;
 mod walking_loop;
 
 pub(crate) use library::{LibraryAnimationError, LibraryPlayback, PlayLibraryAnimation};
+pub(crate) use library::{
+    validate_asset as validate_library_asset, validate_import as validate_vrma_import,
+};
 pub(crate) use library_motion::LibraryMotion;
 #[cfg(debug_assertions)]
 pub(crate) use library_motion::smoke::install as install_library_motion_smoke;

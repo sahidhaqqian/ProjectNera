@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -193,9 +193,58 @@ impl AnimationRegistry {
         Ok(())
     }
     fn remap_dance(&mut self, old: &str, new: &str) -> io::Result<()> {
+        let previous = self.dance_pool.clone();
         if self.dance_pool.contains(old) {
             self.dance_pool.remap(old, new);
-            self.dance_pool.save(&self.dance_file)?;
+            if let Err(error) = self.dance_pool.save(&self.dance_file) {
+                self.dance_pool = previous;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compensate an already-completed file move when metadata cannot be saved.
+    fn persist_move(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        old_key: &str,
+        new_key: &str,
+        old_bookmarks: BTreeSet<String>,
+        old_origins: BTreeMap<String, String>,
+    ) -> io::Result<()> {
+        let old_dance = self.dance_pool.clone();
+        let bookmarks_changed = self.bookmarks != old_bookmarks || self.origins != old_origins;
+        let saved = if bookmarks_changed {
+            self.save_bookmarks()
+        } else {
+            Ok(())
+        }
+        .and_then(|_| self.remap_dance(old_key, new_key));
+        if let Err(error) = saved {
+            match fs::rename(destination, source) {
+                Ok(()) => {
+                    self.bookmarks = old_bookmarks;
+                    self.origins = old_origins;
+                    self.dance_pool = old_dance;
+                    if bookmarks_changed && let Err(recovery) = self.save_bookmarks() {
+                        bevy::log::warn!(
+                            "Animation move rolled back, but bookmark metadata recovery failed: {recovery}"
+                        );
+                    }
+                }
+                Err(recovery) => {
+                    // The actual moved file remains authoritative. Reflect it
+                    // in the live catalog even if the disk is no longer writable.
+                    self.dance_pool.remap(old_key, new_key);
+                    bevy::log::warn!(
+                        "Animation metadata failed: {error}; file rollback also failed: {recovery}"
+                    );
+                }
+            }
+            self.refresh();
+            return Err(error);
         }
         Ok(())
     }
@@ -260,13 +309,14 @@ impl AnimationRegistry {
         self.bookmarks.remove(key);
         self.bookmarks.insert(new_key.clone());
         self.origins.insert(new_key.clone(), key.to_owned());
-        if let Err(error) = self.save_bookmarks() {
-            self.bookmarks = old_bookmarks;
-            self.origins = old_origins;
-            let _ = fs::rename(&destination, &source);
-            return Err(error);
-        }
-        self.remap_dance(key, &new_key)?;
+        self.persist_move(
+            &source,
+            &destination,
+            key,
+            &new_key,
+            old_bookmarks,
+            old_origins,
+        )?;
         self.refresh();
         Ok(new_key)
     }
@@ -303,13 +353,14 @@ impl AnimationRegistry {
         let old_origins = self.origins.clone();
         self.bookmarks.remove(key);
         self.origins.remove(key);
-        if let Err(error) = self.save_bookmarks() {
-            self.bookmarks = old_bookmarks;
-            self.origins = old_origins;
-            let _ = fs::rename(&destination, &source);
-            return Err(error);
-        }
-        self.remap_dance(key, &origin)?;
+        self.persist_move(
+            &source,
+            &destination,
+            key,
+            &origin,
+            old_bookmarks,
+            old_origins,
+        )?;
         self.refresh();
         Ok(origin)
     }
@@ -352,6 +403,8 @@ impl AnimationRegistry {
             ));
         }
         fs::rename(&old, &destination)?;
+        let old_bookmarks = self.bookmarks.clone();
+        let old_origins = self.origins.clone();
         let new_key = destination
             .strip_prefix(&self.root)
             .unwrap()
@@ -367,9 +420,15 @@ impl AnimationRegistry {
                     .replace('\\', "/");
                 self.origins.insert(new_key.clone(), updated_origin);
             }
-            self.save_bookmarks()?;
         }
-        self.remap_dance(key, &new_key)?;
+        self.persist_move(
+            &old,
+            &destination,
+            key,
+            &new_key,
+            old_bookmarks,
+            old_origins,
+        )?;
         self.refresh();
         Ok(new_key)
     }
@@ -381,12 +440,12 @@ impl AnimationRegistry {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Animation not found"))?;
         fs::remove_file(path)?;
         self.dance_pool.remove(key);
-        self.dance_pool.save(&self.dance_file)?;
         self.bookmarks.remove(key);
         self.origins.remove(key);
-        self.save_bookmarks()?;
+        let dance_saved = self.dance_pool.save(&self.dance_file);
+        let bookmarks_saved = self.save_bookmarks();
         self.refresh();
-        Ok(())
+        dance_saved.and(bookmarks_saved)
     }
 
     pub fn import(&mut self, source: &Path) -> io::Result<String> {
@@ -400,6 +459,18 @@ impl AnimationRegistry {
                 "Choose a .vrma file",
             ));
         }
+        let mut bytes = Vec::new();
+        fs::File::open(source)?
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "VRMA exceeds the 16 MiB playback limit",
+            ));
+        }
+        crate::animation::validate_vrma_import(&bytes)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?;
         let name = validated_vrma_name(&source.file_name().unwrap().to_string_lossy())?;
         if self.entries.iter().any(|entry| {
             entry
@@ -416,12 +487,11 @@ impl AnimationRegistry {
         let directory = self.root.join("Imported");
         self.create_owned_directory(&directory)?;
         let destination = directory.join(name);
-        let mut input = fs::File::open(source)?;
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&destination)?;
-        if let Err(error) = io::copy(&mut input, &mut output) {
+        if let Err(error) = output.write_all(&bytes).and_then(|_| output.sync_all()) {
             drop(output);
             let _ = fs::remove_file(&destination);
             return Err(error);
@@ -645,6 +715,73 @@ mod tests {
         fs::remove_dir(root.join("assets/Bookmarks")).unwrap();
         fs::remove_dir(root.join("assets")).unwrap();
         fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_write_failure_rolls_back_moves_and_refreshes_an_irreversible_delete() {
+        for operation in ["rename", "bookmark", "unbookmark", "delete"] {
+            let root = std::env::temp_dir().join(format!(
+                "nera-metadata-failure-{}-{operation}",
+                std::process::id()
+            ));
+            fs::create_dir_all(root.join("assets")).unwrap();
+            fs::write(root.join("assets/choice.vrma"), b"fixture").unwrap();
+            let mut registry =
+                AnimationRegistry::new(root.join("assets"), root.join("bookmarks.txt"));
+            let key = if operation == "bookmark" {
+                "choice.vrma".to_owned()
+            } else {
+                registry.toggle_bookmark("choice.vrma").unwrap()
+            };
+            registry.toggle_dance(&key).unwrap();
+            let bookmarks = registry.bookmarks.clone();
+            let pool = registry.dance_pool.clone();
+            fs::write(root.join("blocked"), b"not a directory").unwrap();
+            registry.dance_file = root.join("blocked/dance.json");
+            let result = match operation {
+                "rename" => registry.rename(&key, "renamed").map(|_| ()),
+                "bookmark" | "unbookmark" => registry.toggle_bookmark(&key).map(|_| ()),
+                _ => registry.delete(&key),
+            };
+            assert!(result.is_err());
+            if operation == "delete" {
+                assert!(registry.entries.is_empty());
+                assert!(!registry.bookmarks.contains(&key));
+                assert!(!registry.dance_pool.contains(&key));
+                assert!(!root.join("assets").join(&key).exists());
+            } else {
+                assert!(root.join("assets").join(&key).is_file());
+                assert_eq!(registry.entries[0].key, key);
+                assert_eq!(registry.bookmarks, bookmarks);
+                assert_eq!(registry.dance_pool, pool);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn import_rejects_invalid_vrma_and_preserves_the_original_source() {
+        let root =
+            std::env::temp_dir().join(format!("nera-import-preflight-{}", std::process::id()));
+        fs::create_dir_all(root.join("assets")).unwrap();
+        let source = root.join("wrong.vrma");
+        fs::write(&source, b"not a VRMA").unwrap();
+        let mut registry = AnimationRegistry::new(root.join("assets"), root.join("bookmarks.txt"));
+        assert!(registry.import(&source).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"not a VRMA");
+        assert!(registry.entries.is_empty());
+        let valid = root.join("valid.vrma");
+        fs::copy(
+            crate::nera_asset_file("animations/animasi_basic/idle.vrma"),
+            &valid,
+        )
+        .unwrap();
+        assert_eq!(registry.import(&valid).unwrap(), "Imported/valid.vrma");
+        assert_eq!(
+            fs::read(&valid).unwrap(),
+            fs::read(root.join("assets/Imported/valid.vrma")).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -94,7 +94,7 @@ pub(crate) fn sync_interaction_animation_actions(
             .as_ref()
             .is_some_and(|pose| pose.is_ready_for(cloud))
     });
-    let dragging_started = drag_started.read().next().is_some();
+    let dragging_started = drag_started.read().count() > 0;
     let touch_blocked = touch.blocked() || resting || dragging_started;
     let now = touch
         .time
@@ -256,7 +256,10 @@ pub(crate) fn sync_interaction_animation_actions(
         }
     }
 
-    if released.read().any(|event| event.was_dragging) {
+    if released
+        .read()
+        .fold(false, |dragged, event| dragged | event.was_dragging)
+    {
         state.finish_action(TemporaryAction::Floating);
     }
 }
@@ -385,4 +388,50 @@ pub(crate) fn sync_action_menu_animation(
 
 pub(crate) fn tick_animation_actions(time: Res<Time>, mut state: ResMut<NeraAnimationState>) {
     state.advance(time.delta());
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::*;
+    #[test]
+    fn multiple_drag_and_release_messages_are_consumed_in_the_same_frame() {
+        let mut app = App::new();
+        app.init_resource::<NeraAnimationState>()
+            .init_resource::<DesktopEnvironment>()
+            .add_message::<NeraDragStarted>()
+            .add_message::<NeraClicked>()
+            .add_message::<NeraHeadPatted>()
+            .add_message::<NeraReleased>()
+            .add_systems(Update, sync_interaction_animation_actions);
+        let clips = crate::animation::head_stroke_test_clips(app.world_mut());
+        app.insert_resource(clips);
+        for _ in 0..2 {
+            app.world_mut().write_message(NeraDragStarted {
+                screen: IVec2::ZERO,
+                body_part: BodyPart::LeftHand,
+            });
+            app.world_mut().write_message(NeraReleased {
+                pointer: crate::interaction::NeraPointerPosition {
+                    screen: IVec2::ZERO,
+                    local: Vec2::ZERO,
+                },
+                body_part: BodyPart::LeftHand,
+                was_dragging: true,
+            });
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            super::super::VisualState::Idle
+        );
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .start_persistent_action(TemporaryAction::Floating);
+        app.update();
+        assert_eq!(
+            app.world().resource::<NeraAnimationState>().visual_state(),
+            super::super::VisualState::Floating,
+            "no old release may cancel a new drag"
+        );
+    }
 }

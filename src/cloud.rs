@@ -209,6 +209,13 @@ impl Plugin for CloudPlugin {
             PreUpdate,
             (pose::restore_sleep_direction, sleep_arms::restore),
         )
+        // Chibi removes its contribution in PreUpdate. Restore the cloud layer
+        // afterward, before any new animation evaluation, including sparse clips.
+        .add_systems(
+            Update,
+            pose::restore_raw_seat_pose
+                .before(crate::animation::sync_interaction_animation_actions),
+        )
         .add_systems(
             PostUpdate,
             pose::orient_sleeping_hips

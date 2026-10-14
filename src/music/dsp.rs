@@ -21,6 +21,12 @@ pub(super) struct Analyzer {
 }
 
 impl Analyzer {
+    pub(super) fn silence(&mut self, source_rate: u32, duration: std::time::Duration) {
+        let frames = (duration.as_secs_f64() * f64::from(source_rate)).round() as usize;
+        for _ in 0..frames {
+            self.push(0.0, source_rate);
+        }
+    }
     pub(super) fn push(&mut self, sample: f32, source_rate: u32) {
         if source_rate < 8000 {
             return;
@@ -114,6 +120,26 @@ impl Analyzer {
             available: true,
             active,
             probability: probability.clamp(0.0, 1.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod silence_tests {
+    use super::*;
+    #[test]
+    fn packet_gap_preserves_source_rate_and_decimation_phase() {
+        for rate in [44_100, 48_000] {
+            let mut analyzer = Analyzer::default();
+            analyzer.push(0.25, rate);
+            let alpha = analyzer.alpha;
+            let phase = analyzer.phase;
+            analyzer.silence(rate, std::time::Duration::from_millis(50));
+            assert_eq!(analyzer.source_rate, rate);
+            assert_eq!(analyzer.alpha, alpha);
+            assert_eq!(analyzer.phase, phase);
+            assert_eq!(analyzer.energy.len(), 1);
+            assert_eq!(analyzer.samples.len(), 144);
         }
     }
 }

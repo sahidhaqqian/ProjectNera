@@ -45,11 +45,11 @@ pub(crate) fn clear_for_character_change(world: &mut World) {
             .get_resource::<crate::cloud::CloudRuntime>()
             .is_none_or(|c| !c.owns_placement())
     {
-        let expected = world
-            .get_resource::<WalkingRuntime>()
-            .and_then(|w| w.expected_x())
-            .map(|x| x + edge.work.left)
-            .unwrap_or(edge.expected);
+        let expected = edge.expected_from(
+            world
+                .get_resource::<WalkingRuntime>()
+                .and_then(|w| w.expected_x()),
+        );
         world.resource_scope(|world, mut physics: Mut<DesktopPhysicsState>| {
             let mut env = world.resource_mut::<DesktopEnvironment>();
             if env
@@ -207,6 +207,7 @@ enum EdgePhase {
 #[derive(Clone, Copy)]
 struct EdgeRoutine {
     monitor: NativeMonitorHandle,
+    origin_x: i32,
     home: i32,
     hidden: i32,
     visible: i32,
@@ -217,6 +218,11 @@ struct EdgeRoutine {
     width: i32,
     work: PhysicalRect,
     check_in: f32,
+}
+impl EdgeRoutine {
+    fn expected_from(self, local_x: Option<i32>) -> i32 {
+        local_x.map_or(self.expected, |x| self.origin_x + x)
+    }
 }
 
 pub(crate) struct LivingBehavior {
@@ -323,10 +329,7 @@ impl LivingBehavior {
         let Some(rect) = env.nera_rect else {
             return;
         };
-        let expected = walking
-            .expected_x()
-            .map(|x| x + edge.work.left)
-            .unwrap_or(edge.expected);
+        let expected = edge.expected_from(walking.expected_x());
         walking.cancel(animation);
         if context.interaction.state != InteractionState::Dragging
             && env.placement == PlacementState::Free
@@ -498,10 +501,7 @@ impl LivingBehavior {
             self.interrupt(animation);
             return false;
         };
-        let expected = walking
-            .expected_x()
-            .map(|x| edge.work.left + x)
-            .unwrap_or(edge.expected);
+        let expected = edge.expected_from(walking.expected_x());
         if env
             .monitor
             .is_none_or(|m| m.handle != edge.monitor || m.work_area != edge.work)
@@ -641,6 +641,7 @@ fn plan_edge(
     .map(|(hidden, visible, _)| (hidden, visible))?;
     Some(EdgeRoutine {
         monitor: monitor.handle,
+        origin_x: surface.origin_x,
         home: rect.left.clamp(normal.bounds.0, normal.bounds.1),
         hidden,
         visible,

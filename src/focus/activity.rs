@@ -83,6 +83,8 @@ fn update_props(
     time: Res<Time<Real>>,
     focus: Res<FocusSession>,
     animation: Res<NeraAnimationState>,
+    clips: Res<crate::animation::NeraAnimationClips>,
+    playback: Res<crate::animation::NeraAnimationPlayback>,
     assets: Res<ActivityAssets>,
     scenes: Res<Assets<WorldAsset>>,
     avatars: Query<(Entity, &GlobalTransform), With<NeraAvatar>>,
@@ -110,6 +112,9 @@ fn update_props(
         }
         _ => None,
     };
+    let active = active.filter(|preset| {
+        *preset != FocusPreset::Work || clips.focus_activity_playing(*preset, &playback)
+    });
     if settling.0 != active {
         *settling = (active, 0.0);
     }

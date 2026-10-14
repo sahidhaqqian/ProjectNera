@@ -757,7 +757,7 @@ fn build_combined(sources: &[Source], ranges: &[(f32, f32)]) -> io::Result<Sourc
                 .count()
         })
         .ok_or_else(|| input_error("No source clips"))?;
-    let targets: BTreeSet<Target> = sources
+    let mut targets: BTreeSet<Target> = sources
         .iter()
         .flat_map(|source| source.curves.keys().cloned())
         .collect();
@@ -830,6 +830,30 @@ fn build_combined(sources: &[Source], ranges: &[(f32, f32)]) -> io::Result<Sourc
         .iter()
         .map(|source| rest_transforms(&source.json))
         .collect::<io::Result<_>>()?;
+    // Exporters often write constant rest translation/scale channels. They
+    // carry no motion and need no retargeting; dynamic ones remain rejected.
+    targets.retain(|target| {
+        let rest_only = target.role.starts_with("bone:")
+            && (target.path == "scale"
+                || (target.path == "translation" && target.role != "bone:hips"))
+            && sources.iter().enumerate().all(|(index, source)| {
+                let Some(curve) = source.curves.get(target) else {
+                    return true;
+                };
+                let Some(&node) = source.roles.get(&target.role) else {
+                    return false;
+                };
+                let rest = resting_value(source_rests[index][node], &target.path);
+                curve.values.iter().enumerate().all(|(index, value)| {
+                    let tangent =
+                        matches!(curve.interpolation, Interpolation::CubicSpline) && index % 3 != 1;
+                    value.iter().zip(&rest).all(|(value, rest)| {
+                        (*value - if tangent { 0.0 } else { *rest }).abs() < 1e-6
+                    })
+                })
+            });
+        !rest_only
+    });
     let mut times = Vec::new();
     let mut samples = Vec::new();
     let mut offset = 0.0_f32;
@@ -892,7 +916,33 @@ fn build_combined(sources: &[Source], ranges: &[(f32, f32)]) -> io::Result<Sourc
         ));
     }
 
-    let mut bin = template.bin.clone();
+    // Plain animation rigs reference binary data only from their channels.
+    // Rebuild that data rather than retaining every previous combine payload.
+    // Mesh/skin/image or foreign-extension buffers keep their original indices.
+    let animation_only = ["meshes", "skins", "images"].iter().all(|name| {
+        json.get(*name)
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    }) && json
+        .get("extensions")
+        .and_then(Value::as_object)
+        .is_some_and(|extensions| extensions.keys().all(|name| name == "VRMC_vrm_animation"))
+        && ["extensionsUsed", "extensionsRequired"].iter().all(|name| {
+            json.get(*name)
+                .and_then(Value::as_array)
+                .is_none_or(|extensions| {
+                    extensions
+                        .iter()
+                        .all(|name| name.as_str() == Some("VRMC_vrm_animation"))
+                })
+        });
+    let mut bin = if animation_only {
+        json["bufferViews"] = json!([]);
+        json["accessors"] = json!([]);
+        Vec::new()
+    } else {
+        template.bin.clone()
+    };
     let input = append_accessor(&mut json, &mut bin, &times, 1, true)?;
     let mut channels = Vec::new();
     let mut samplers = Vec::new();
@@ -989,6 +1039,101 @@ mod tests {
         }]);
         json["buffers"][0]["byteLength"] = json!(bin.len());
         fs::write(path, write_glb(&json, &bin).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn import_preflight_rejects_missing_hips_missing_extension_and_invalid_keyframe_times() {
+        let root = TestDirectory::new();
+        let path = root.0.join("valid.vrma");
+        fixture(&path, 0.0);
+        let bytes = fs::read(&path).unwrap();
+        assert!(crate::animation::validate_vrma_import(&bytes).is_ok());
+        let (json, bin) = read_glb(&bytes).unwrap();
+        let mut missing = json.clone();
+        missing["extensions"]["VRMC_vrm_animation"]["humanoid"]["humanBones"] =
+            json!({"spine": {"node": 0}});
+        assert!(
+            crate::animation::validate_vrma_import(&write_glb(&missing, &bin).unwrap()).is_err()
+        );
+        missing = json.clone();
+        missing["extensions"] = json!({});
+        missing["extensionsUsed"] = json!([]);
+        assert!(
+            crate::animation::validate_vrma_import(&write_glb(&missing, &bin).unwrap()).is_err()
+        );
+        for invalid_time in [f32::NAN, f32::INFINITY, f32::MAX, 0.0] {
+            let mut broken = bin.clone();
+            // This fixture's first buffer view holds [0,1,2] seconds.
+            broken[8..12].copy_from_slice(&invalid_time.to_le_bytes());
+            assert!(
+                crate::animation::validate_vrma_import(&write_glb(&json, &broken).unwrap())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_combines_do_not_retain_old_animation_buffers() {
+        let root = TestDirectory::new();
+        let path = root.0.join("source.vrma");
+        fixture(&path, 0.0);
+        for _ in 0..8 {
+            let sources = [read_source(&path).unwrap(), read_source(&path).unwrap()];
+            let output = build_combined(&sources, &[(0.0, 1.0), (0.0, 1.0)]).unwrap();
+            assert_eq!(output.json["bufferViews"].as_array().unwrap().len(), 2);
+            assert_eq!(output.json["accessors"].as_array().unwrap().len(), 2);
+            assert!(output.bin.len() < 3_000);
+            fs::write(&path, write_glb(&output.json, &output.bin).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn constant_rest_channels_are_ignored_but_dynamic_non_hips_translation_still_fails() {
+        let root = TestDirectory::new();
+        let path = root.0.join("source.vrma");
+        fixture(&path, 0.0);
+        let mut source = read_source(&path).unwrap();
+        source.json["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name": "spine", "translation": [0.0, 2.0, 0.0]}));
+        source.json["nodes"][0]["children"] = json!([1]);
+        source.json["extensions"]["VRMC_vrm_animation"]["humanoid"]["humanBones"]["spine"] =
+            json!({"node": 1});
+        source.roles.insert("bone:spine".into(), 1);
+        let translation = Target {
+            role: "bone:spine".into(),
+            path: "translation".into(),
+        };
+        source.curves.insert(
+            translation.clone(),
+            Curve {
+                times: vec![0.0, 2.0],
+                values: vec![vec![0.0, 2.0, 0.0]; 2],
+                interpolation: Interpolation::Linear,
+            },
+        );
+        source.curves.insert(
+            Target {
+                role: "bone:hips".into(),
+                path: "scale".into(),
+            },
+            Curve {
+                times: vec![0.0, 2.0],
+                values: vec![vec![1.0; 3]; 2],
+                interpolation: Interpolation::Linear,
+            },
+        );
+        let output = build_combined(std::slice::from_ref(&source), &[(0.0, 1.0)]).unwrap();
+        assert_eq!(
+            output.json["animations"][0]["channels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        source.curves.get_mut(&translation).unwrap().values[1][1] = 2.5;
+        assert!(build_combined(&[source], &[(0.0, 1.0)]).is_err());
     }
 
     #[test]

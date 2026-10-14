@@ -579,6 +579,7 @@ impl NeraAnimationState {
                     TemporaryAction::TouchReaction(_)
                         | TemporaryAction::Treat
                         | TemporaryAction::FocusCelebrate
+                        | TemporaryAction::LibraryAnimation(_)
                 )
             });
         }
@@ -631,6 +632,7 @@ impl NeraAnimationState {
                     TemporaryAction::TouchReaction(_)
                         | TemporaryAction::Treat
                         | TemporaryAction::FocusCelebrate
+                        | TemporaryAction::LibraryAnimation(_)
                 )
             });
         }
@@ -1234,6 +1236,40 @@ impl NeraAnimationState {
 #[cfg(test)]
 mod touch_reaction_tests {
     use super::*;
+    #[test]
+    fn higher_priority_actions_cancel_manual_clips_and_owned_reactions_permanently() {
+        for persistent in [false, true] {
+            for higher in [
+                TemporaryAction::Praying,
+                TemporaryAction::Floating,
+                TemporaryAction::Falling,
+                TemporaryAction::Death,
+                TemporaryAction::AlarmWave,
+            ] {
+                for reaction in [
+                    TemporaryAction::LibraryAnimation(Entity::PLACEHOLDER),
+                    TemporaryAction::TouchReaction(TouchReactionClip::Wave1),
+                    TemporaryAction::Treat,
+                ] {
+                    let mut state = NeraAnimationState::default();
+                    state.request_one_shot(reaction, Duration::from_secs(30));
+                    if persistent {
+                        state.start_persistent_action(higher);
+                    } else {
+                        state.request_one_shot(higher, Duration::from_secs(1));
+                    }
+                    assert!(
+                        !state
+                            .active_actions
+                            .iter()
+                            .any(|active| active.action == reaction)
+                    );
+                    state.finish_action(higher);
+                    assert_eq!(state.visual_state(), VisualState::Idle);
+                }
+            }
+        }
+    }
     #[test]
     fn focus_activity_yields_to_touch_drag_alarm_and_never_leaves_a_stale_owner() {
         use crate::focus::FocusPreset;

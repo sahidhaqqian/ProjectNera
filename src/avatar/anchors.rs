@@ -325,6 +325,9 @@ pub(crate) fn preserve_grounded_pose(
 fn seated_fidget_or_dodge(visual: VisualState) -> bool {
     match visual {
         VisualState::DodgeWhileSitting
+        | VisualState::HeadStroke
+        | VisualState::Treat
+        | VisualState::FocusCelebrate
         | VisualState::TouchReaction(_)
         | VisualState::FocusActivity(_) => true,
         VisualState::IdleMicro(action) => action.base_pose() == BasePose::Sitting,
@@ -882,6 +885,10 @@ mod tests {
             .map(VisualState::IdleMicro)
             .chain([
                 VisualState::DodgeWhileSitting,
+                VisualState::HeadStroke,
+                VisualState::Treat,
+                VisualState::FocusCelebrate,
+                VisualState::FocusActivity(crate::focus::FocusPreset::Study),
                 VisualState::FocusActivity(crate::focus::FocusPreset::Work),
             ])
         {

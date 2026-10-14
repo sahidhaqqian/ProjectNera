@@ -231,7 +231,10 @@ impl AlarmSoundLibrary {
             self.cache.push(cached);
             return Some(handle);
         }
-        validate_audio(&bytes).ok()?;
+        // Imports already passed full decoding; the content hash above proves
+        // those exact bytes. Keep the cheap header guard for edited catalogs,
+        // without decoding up to five minutes again on the render thread.
+        validate_container_metadata(&bytes).ok()?;
         let handle = audio.add(AudioSource {
             bytes: bytes.into(),
         });
@@ -389,6 +392,7 @@ fn validate_container_metadata(bytes: &[u8]) -> Result<(), String> {
                         || word(offset + 10).is_none_or(|channels| !(1..=2).contains(&channels))
                         || dword(offset + 12).is_none_or(|rate| !(1..=192_000).contains(&rate))
                         || word(offset + 20).is_none_or(|align| align == 0)
+                        || word(offset + 22).is_none_or(|bits| bits == 0 || bits % 8 != 0)
                     {
                         return Err(invalid());
                     }
@@ -423,6 +427,20 @@ fn validate_container_metadata(bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_wav_sample_width_is_rejected_before_decoder_construction() {
+        let original = fs::read(crate::nera_asset_file("sound/clock_beeps.wav")).unwrap();
+        assert!(validate_container_metadata(&original).is_ok());
+        let at = original
+            .windows(4)
+            .position(|chunk| chunk == b"fmt ")
+            .unwrap();
+        for bits in [0_u16, 7, 33] {
+            let mut bytes = original.clone();
+            bytes[at + 22..at + 24].copy_from_slice(&bits.to_le_bytes());
+            assert!(validate_container_metadata(&bytes).is_err());
+        }
+    }
     use std::sync::atomic::{AtomicU32, Ordering};
 
     struct TestDirectory(PathBuf);

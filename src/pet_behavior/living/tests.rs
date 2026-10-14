@@ -218,6 +218,7 @@ fn drag_alarm_and_library_playback_preempt_and_never_resume_cursor_tail() {
 fn edge() -> EdgeRoutine {
     EdgeRoutine {
         monitor: NativeMonitorHandle::from_raw(1),
+        origin_x: 0,
         home: 160,
         hidden: -288,
         visible: 8,
@@ -234,6 +235,21 @@ fn edge() -> EdgeRoutine {
         },
         check_in: 0.25,
     }
+}
+#[test]
+fn edge_expected_position_uses_walking_origin_on_offset_monitors_and_left_taskbars() {
+    let mut routine = edge();
+    for (work_left, origin, local, expected) in [
+        (1920, 0, 2100, 2100),
+        (-1920, 0, -1500, -1500),
+        (48, 0, 150, 150),
+        (1920, 1920, 180, 2100),
+    ] {
+        routine.work.left = work_left;
+        routine.origin_x = origin;
+        assert_eq!(routine.expected_from(Some(local)), expected);
+    }
+    assert_eq!(routine.expected_from(None), routine.expected);
 }
 fn recovery_app() -> App {
     let mut app = app();

@@ -128,7 +128,7 @@ impl LibraryPlayback {
         Some(clip.entity)
     }
 
-    fn evict_for(&mut self, source_bytes: u64, protected: Option<Entity>) -> Vec<Entity> {
+    fn evict_for(&mut self, source_bytes: u64, protected: &[Entity]) -> Vec<Entity> {
         let mut evicted = Vec::new();
         while self.clips.len() >= MAX_LIBRARY_CLIPS
             || self.source_bytes.saturating_add(source_bytes) > MAX_LIBRARY_SOURCE_BYTES
@@ -136,7 +136,7 @@ impl LibraryPlayback {
             let candidate = self
                 .clips
                 .iter()
-                .filter(|(_, clip)| Some(clip.entity) != protected)
+                .filter(|(_, clip)| !protected.contains(&clip.entity))
                 .min_by(|(path_a, clip_a), (path_b, clip_b)| {
                     clip_a
                         .last_used
@@ -160,10 +160,14 @@ impl LibraryPlayback {
         errors: &mut MessageWriter<LibraryAnimationError>,
     ) {
         warn!("Could not play gallery animation {path}: {reason}");
+        let automatic = self.requested.as_ref() == Some(&path) && self.requested_auto;
         if self.requested.as_ref() == Some(&path) {
             self.requested = None;
+            self.requested_auto = false;
         }
-        errors.write(LibraryAnimationError { path, reason });
+        if !automatic {
+            errors.write(LibraryAnimationError { path, reason });
+        }
     }
 }
 
@@ -214,6 +218,10 @@ fn validate_bone_mapping(
     model_extension: Option<&serde_json::Value>,
     node_count: usize,
 ) -> Result<(), &'static str> {
+    if let Some(model) = model_extension {
+        validate_bone_mapping(animation_extension, None, node_count)?;
+        return validate_bone_mapping(model, None, node_count);
+    }
     // The dependency prefers VRMC_vrm when both extensions are present. Check
     // the mapping it will actually deserialize, including its required hips.
     let extension = model_extension.unwrap_or(animation_extension);
@@ -237,7 +245,64 @@ fn validate_bone_mapping(
     Ok(())
 }
 
-fn validate_asset(asset: &VrmaAsset, clips: &Assets<AnimationClip>) -> Result<(), &'static str> {
+/// Preflight self-contained user imports before publishing them in the library.
+/// Preview/runtime still validate the actual Bevy clip before attaching VrmaHandle.
+pub(crate) fn validate_import(bytes: &[u8]) -> Result<(), &'static str> {
+    let gltf = bevy::gltf::gltf::Gltf::from_slice(bytes).map_err(|_| "Invalid glTF/VRMA file.")?;
+    let document = &gltf.document;
+    let extension = document
+        .extension_value("VRMC_vrm_animation")
+        .ok_or("Missing VRMC_vrm_animation extension.")?;
+    validate_bone_mapping(
+        extension,
+        document.extension_value("VRMC_vrm"),
+        document.nodes().len(),
+    )?;
+    if document.scenes().next().is_none() {
+        return Err("VRMA has no scene.");
+    }
+    let blob = gltf
+        .blob
+        .as_deref()
+        .ok_or("Use a self-contained binary VRMA file.")?;
+    if document.buffers().len() != 1 {
+        return Err("VRMA must have one embedded buffer.");
+    }
+    let mut first_playable = false;
+    for (index, animation) in document.animations().enumerate() {
+        let mut duration = 0.0_f32;
+        for channel in animation.channels() {
+            let reader = channel.reader(|buffer| (buffer.index() == 0).then_some(blob));
+            let input = reader.read_inputs().ok_or("Invalid animation input.")?;
+            let mut previous = None;
+            for time in input {
+                if !time.is_finite() || time < 0.0 || previous.is_some_and(|last| time <= last) {
+                    return Err("Invalid animation keyframe times.");
+                }
+                previous = Some(time);
+                duration = duration.max(time);
+            }
+            if reader.read_outputs().is_none() {
+                return Err("Invalid animation output.");
+            }
+        }
+        if Duration::try_from_secs_f64(f64::from(duration)).is_err() {
+            return Err("Invalid animation duration.");
+        }
+        if index == 0 {
+            first_playable = duration > 0.0;
+        }
+    }
+    if !first_playable {
+        return Err("VRMA has no playable keyframes.");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_asset(
+    asset: &VrmaAsset,
+    clips: &Assets<AnimationClip>,
+) -> Result<(), &'static str> {
     let source = asset
         .gltf
         .source
@@ -401,14 +466,21 @@ pub(super) fn sync_library_animation(
     let Some(path) = runtime.requested.clone() else {
         return;
     };
-    if let Some(entity) = runtime.cached_entity(&path) {
-        let Ok((_, loaded)) = ready.get(entity) else {
-            return;
-        };
+    let cached = runtime.cached_entity(&path).and_then(|entity| {
+        if ready.get(entity).is_ok() {
+            Some(entity)
+        } else {
+            if let Some(stale) = runtime.clips.remove(&path) {
+                runtime.source_bytes = runtime.source_bytes.saturating_sub(stale.source_bytes);
+            }
+            None
+        }
+    });
+    if let Some(entity) = cached {
+        let (_, loaded) = ready.get(entity).expect("cached entity checked above");
         if loaded.warmup != 0 {
             return;
         }
-        runtime.requested = None;
         if loaded.duration.is_zero() {
             runtime.reject(
                 path,
@@ -417,11 +489,14 @@ pub(super) fn sync_library_animation(
             );
             return;
         }
+        let automatic = runtime.requested_auto;
+        runtime.requested = None;
+        runtime.requested_auto = false;
         clips.library = Some(ClipSlot {
             entity,
             duration: loaded.duration,
         });
-        if runtime.requested_auto {
+        if automatic {
             if state.request_auto_dance(entity, loaded.duration) {
                 info!(
                     "AutoDance playing {path} duration={:.2}s",
@@ -464,11 +539,17 @@ pub(super) fn sync_library_animation(
         runtime.reject(path, reason.into(), &mut errors);
         return;
     }
-    let protected = match state.visual_state() {
-        super::VisualState::LibraryAnimation(entity) => Some(entity),
-        _ => None,
-    };
-    for entity in runtime.evict_for(source_bytes, protected) {
+    let protected: Vec<_> = state
+        .active_actions
+        .iter()
+        .filter_map(|active| match active.action {
+            TemporaryAction::LibraryAnimation(entity) | TemporaryAction::AutoDance(entity) => {
+                Some(entity)
+            }
+            _ => None,
+        })
+        .collect();
+    for entity in runtime.evict_for(source_bytes, &protected) {
         commands.entity(entity).despawn();
     }
     runtime.loading = Some(LoadingClip {
@@ -484,6 +565,64 @@ pub(super) fn sync_library_animation(
 mod tests {
     use super::*;
     use crate::animation::{BasePose, VisualState, playback::clip_for_visual};
+    #[test]
+    fn stale_cached_entity_is_removed_and_the_pending_selection_can_load_again() {
+        let mut app = library_app(crate::nera_asset_path());
+        app.finish();
+        app.cleanup();
+        let entity = app
+            .world_mut()
+            .spawn(LibraryClipReady {
+                duration: Duration::from_secs(2),
+                warmup: 0,
+            })
+            .id();
+        let path = "animations/animasi_basic/idle.vrma";
+        app.world_mut()
+            .resource_mut::<LibraryPlayback>()
+            .cache_clip(path.into(), entity, 100);
+        app.world_mut().despawn(entity);
+        app.world_mut()
+            .write_message(PlayLibraryAnimation { path: path.into() });
+        app.update();
+        let runtime = app.world().resource::<LibraryPlayback>();
+        assert!(runtime.clips.is_empty());
+        assert_eq!(runtime.source_bytes, 0);
+        assert_eq!(
+            runtime
+                .loading
+                .as_ref()
+                .map(|loading| loading.path.as_str()),
+            Some(path)
+        );
+    }
+    #[test]
+    fn rejected_auto_dance_releases_request_flags_without_a_manual_ui_error() {
+        for automatic in [false, true] {
+            let mut app = library_app(crate::nera_asset_path());
+            app.finish();
+            app.cleanup();
+            let path = "animations/nera-missing-audit-fixture.vrma";
+            if automatic {
+                app.world_mut()
+                    .resource_mut::<LibraryPlayback>()
+                    .request_auto_dance(path.into());
+            } else {
+                app.world_mut()
+                    .write_message(PlayLibraryAnimation { path: path.into() });
+            }
+            app.update();
+            let runtime = app.world().resource::<LibraryPlayback>();
+            assert!(runtime.requested.is_none());
+            assert!(!runtime.requested_auto);
+            assert_eq!(
+                app.world()
+                    .resource::<Messages<LibraryAnimationError>>()
+                    .is_empty(),
+                automatic
+            );
+        }
+    }
 
     #[test]
     fn body_contact_aliases_require_identical_contents_not_a_filename() {
@@ -750,7 +889,7 @@ mod tests {
                 runtime.cache_clip(path.clone(), *entity, 1024);
             }
             assert_eq!(runtime.cached_entity("cached-0.vrma"), Some(retained[0].1));
-            let evicted = runtime.evict_for(1024, Some(retained[1].1));
+            let evicted = runtime.evict_for(1024, &[retained[1].1]);
             assert_eq!(evicted, vec![retained[2].1]);
             assert!(runtime.clips.contains_key("cached-0.vrma"));
             assert!(runtime.clips.contains_key("cached-1.vrma"));
@@ -813,7 +952,7 @@ mod tests {
             );
         }
         assert_eq!(runtime.source_bytes, MAX_LIBRARY_SOURCE_BYTES);
-        let evicted = runtime.evict_for(MAX_CLIP_SOURCE_BYTES, None);
+        let evicted = runtime.evict_for(MAX_CLIP_SOURCE_BYTES, &[]);
         assert_eq!(evicted.len(), 1);
         assert_eq!(
             runtime.source_bytes,

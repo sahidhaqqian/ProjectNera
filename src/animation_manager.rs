@@ -299,7 +299,7 @@ impl Plugin for AnimationManagerPlugin {
                     ui::sync_gallery_rows,
                     ui::sync_gallery_count,
                     preview::sync_visible_previews,
-                    preview::prepare_preview_rigs,
+                    (preview::prepare_preview_rigs, preview::admit_preview_clips).chain(),
                     (
                         preview::start_ready_previews,
                         preview::sync_expression_previews,

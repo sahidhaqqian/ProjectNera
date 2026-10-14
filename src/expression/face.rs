@@ -220,15 +220,19 @@ fn update_blush(
             NeraExpressionPreset::Timid => intensity * 0.6,
             _ => 0.0,
         });
-        *visibility = if strength > 0.0 {
+        visibility.set_if_neq(if strength > 0.0 {
             Visibility::Inherited
         } else {
             Visibility::Hidden
-        };
-        if let Some(mut material) = materials.get_mut(&material.0) {
-            material
-                .base_color
-                .set_alpha(cheek.opacity * strength.clamp(0.0, 1.0));
+        });
+        let alpha = cheek.opacity * strength.clamp(0.0, 1.0);
+        if strength > 0.0
+            && materials
+                .get(&material.0)
+                .is_some_and(|m| m.base_color.alpha() != alpha)
+            && let Some(mut material) = materials.get_mut(&material.0)
+        {
+            material.base_color.set_alpha(alpha);
         }
     }
 }
@@ -562,6 +566,60 @@ pub(crate) fn assert_treat_mouth_smoke(world: &mut World, open: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hidden_and_unchanged_blush_do_not_emit_material_modifications() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<StandardMaterial>();
+        app.add_systems(Update, update_blush);
+        let root = app.world_mut().spawn(FacePose(None)).id();
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::srgba(1.0, 0.0, 0.0, 0.2),
+                ..default()
+            });
+        let cheek = app
+            .world_mut()
+            .spawn((
+                FaceBlush { root, opacity: 0.2 },
+                MeshMaterial3d(material),
+                Visibility::Hidden,
+            ))
+            .id();
+        app.finish();
+        app.cleanup();
+        app.update();
+        for selection in [None, Some((NeraExpressionPreset::Embarrassed, 0.5)), None] {
+            app.world_mut().get_mut::<FacePose>(root).unwrap().0 = selection;
+            app.update();
+            app.world_mut()
+                .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                .clear();
+            for _ in 0..3 {
+                app.update();
+                let events: Vec<_> = app
+                    .world_mut()
+                    .resource_mut::<Messages<AssetEvent<StandardMaterial>>>()
+                    .drain()
+                    .collect();
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, AssetEvent::Modified { .. }))
+                );
+            }
+            assert_eq!(
+                *app.world().get::<Visibility>(cheek).unwrap(),
+                if selection.is_some() {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                }
+            );
+        }
+    }
     #[test]
     fn automatic_bite_mouth_reaches_morphs_respects_preview_and_clears_afterward() {
         let mut app = App::new();

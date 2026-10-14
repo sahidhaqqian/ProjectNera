@@ -58,6 +58,18 @@ pub(crate) struct CloudSeatPose {
     settling: f32,
     bones: Vec<(Entity, Transform)>,
     base_clip: Option<Entity>,
+    raw: Vec<(Entity, Transform)>,
+}
+
+pub(super) fn restore_raw_seat_pose(
+    mut pose: ResMut<CloudSeatPose>,
+    mut bones: Query<&mut Transform, With<NeraLiveBone>>,
+) {
+    for (entity, raw) in pose.raw.drain(..) {
+        if let Ok(mut transform) = bones.get_mut(entity) {
+            *transform = raw;
+        }
+    }
 }
 impl CloudSeatPose {
     pub(crate) fn is_ready_for(&self, cloud: &CloudRuntime) -> bool {
@@ -100,10 +112,24 @@ pub(crate) fn stabilize_cloud_pose(
     if owner.is_none() {
         return;
     }
+    let visual = animation.visual_state();
     let seated = matches!(
-        animation.visual_state(),
+        visual,
         VisualState::SittingLoop | VisualState::FocusActivity(crate::focus::FocusPreset::Work)
     );
+    let upper_body = matches!(
+        visual,
+        VisualState::HeadStroke
+            | VisualState::TouchReaction(_)
+            | VisualState::Treat
+            | VisualState::FocusCelebrate
+            | VisualState::FocusActivity(crate::focus::FocusPreset::Study)
+    );
+    if !seated && !upper_body {
+        // Dodge, dragging and other full-body owners keep their authored pose.
+        pose.settling = SETTLE_SECONDS;
+        return;
+    }
     let base_clip = cloud
         .as_ref()
         .filter(|cloud| cloud.is_lying_rest())
@@ -131,8 +157,10 @@ pub(crate) fn stabilize_cloud_pose(
     } else {
         pose.settling = SETTLE_SECONDS;
     }
-    for &(entity, base) in &pose.bones {
+    for index in 0..pose.bones.len() {
+        let (entity, base) = pose.bones[index];
         if let Ok((_, _, mut transform)) = bones.get_mut(entity) {
+            pose.raw.push((entity, *transform));
             *transform = base;
         }
     }
@@ -151,6 +179,47 @@ mod tests {
         },
     };
     use std::time::Duration;
+    #[test]
+    fn cloud_overlay_yields_to_dodge_and_restores_raw_transforms_for_sparse_clips() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        let avatar = world.spawn_empty().id();
+        let visual = world.spawn_empty().id();
+        world.insert_resource(CloudRuntime::for_test(CloudMode::Ride, avatar, visual));
+        let raw = Transform::from_xyz(0.2, 0.8, 0.1).with_rotation(Quat::from_rotation_z(0.4));
+        let hips = world.spawn((NeraLiveBone, VrmBone::from("hips"), raw)).id();
+        let seated = Transform::from_xyz(0.0, 0.5, 0.0);
+        world.insert_resource(CloudSeatPose {
+            owner: Some(visual),
+            bones: vec![(hips, seated)],
+            ..default()
+        });
+        let mut state = NeraAnimationState::default();
+        state.enter_cloud_seat(SittingPose::Default);
+        state.request_action_for_test(
+            crate::animation::TemporaryAction::DodgeWhileSitting,
+            Duration::from_secs(2),
+        );
+        world.insert_resource(state);
+        world.run_system_once(stabilize_cloud_pose).unwrap();
+        assert_eq!(*world.get::<Transform>(hips).unwrap(), raw);
+        world
+            .resource_mut::<NeraAnimationState>()
+            .request_action_for_test(
+                crate::animation::TemporaryAction::HeadStroke,
+                Duration::from_secs(2),
+            );
+        for _ in 0..10 {
+            world.run_system_once(stabilize_cloud_pose).unwrap();
+            assert_eq!(*world.get::<Transform>(hips).unwrap(), seated);
+            world.run_system_once(restore_raw_seat_pose).unwrap();
+            assert_eq!(*world.get::<Transform>(hips).unwrap(), raw);
+        }
+        world.resource_mut::<CloudRuntime>().dismiss();
+        world.run_system_once(stabilize_cloud_pose).unwrap();
+        assert_eq!(*world.get::<Transform>(hips).unwrap(), raw);
+    }
     #[test]
     fn ride_samples_authored_work_typing_instead_of_overwriting_it() {
         use bevy::ecs::system::RunSystemOnce;

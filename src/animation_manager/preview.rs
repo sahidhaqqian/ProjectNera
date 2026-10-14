@@ -37,6 +37,9 @@ pub(super) struct PreviewAvatarRoot;
 pub(super) struct PreviewClipReady;
 
 #[derive(Component)]
+pub(super) struct PendingPreviewVrma(Handle<VrmaAsset>);
+
+#[derive(Component)]
 pub(super) struct PreviewExpressionSelection(
     Option<(crate::expression::NeraExpressionPreset, f32)>,
 );
@@ -315,8 +318,51 @@ pub(super) fn prepare_preview_rigs(
         };
         commands
             .entity(scene.clip)
-            .insert(VrmaHandle(assets.load(path)));
+            .insert(PendingPreviewVrma(assets.load(path)));
         scene.prepared = true;
+    }
+}
+
+pub(super) fn admit_preview_clips(
+    server: Res<AssetServer>,
+    assets: Res<Assets<VrmaAsset>>,
+    clips: Res<Assets<AnimationClip>>,
+    pending: Query<(Entity, &PendingPreviewVrma)>,
+    mut commands: Commands,
+) {
+    for (entity, pending) in &pending {
+        let failed = server
+            .get_load_state(pending.0.id())
+            .is_some_and(|state| state.is_failed())
+            || server
+                .get_recursive_dependency_load_state(pending.0.id())
+                .is_some_and(|state| state.is_failed());
+        if failed {
+            warn!(
+                "Animation preview could not load {:?}; skipping",
+                pending.0.path()
+            );
+            commands.entity(entity).remove::<PendingPreviewVrma>();
+            continue;
+        }
+        if !server.is_loaded_with_dependencies(pending.0.id()) {
+            continue;
+        }
+        let Some(asset) = assets.get(&pending.0) else {
+            continue;
+        };
+        commands.entity(entity).remove::<PendingPreviewVrma>();
+        match crate::animation::validate_library_asset(asset, &clips) {
+            Ok(()) => {
+                commands
+                    .entity(entity)
+                    .insert(VrmaHandle(pending.0.clone()));
+            }
+            Err(reason) => warn!(
+                "Animation preview rejected {:?}: {reason}",
+                pending.0.path()
+            ),
+        }
     }
 }
 
@@ -833,6 +879,56 @@ pub(super) fn frame_expression_heads(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn malformed_gallery_assets_never_reach_vrma_initialization() {
+        use bevy::{
+            gltf::GltfPlugin, mesh::MeshPlugin, world_serialization::WorldSerializationPlugin,
+        };
+        let folder =
+            std::env::temp_dir().join(format!("nera-preview-preflight-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        for missing_hips in [false, true] {
+            let mut json = serde_json::json!({"asset":{"version":"2.0"},"nodes":[{}],"scenes":[{"nodes":[0]}],"scene":0});
+            if missing_hips {
+                json["extensionsUsed"] = serde_json::json!(["VRMC_vrm_animation"]);
+                json["extensions"] = serde_json::json!({"VRMC_vrm_animation":{"specVersion":"1.0","humanoid":{"humanBones":{"spine":{"node":0}}}}});
+            }
+            let name = format!("bad-{missing_hips}.vrma");
+            std::fs::write(folder.join(&name), serde_json::to_vec(&json).unwrap()).unwrap();
+            let mut app = App::new();
+            app.add_plugins((
+                MinimalPlugins,
+                AssetPlugin {
+                    file_path: folder.to_string_lossy().into_owned(),
+                    ..default()
+                },
+                WorldSerializationPlugin,
+                MeshPlugin,
+                GltfPlugin::default(),
+            ))
+            .init_asset::<AnimationClip>()
+            .init_asset::<AnimationGraph>()
+            .add_message::<bevy::window::RequestRedraw>()
+            .add_plugins(VrmaPlugin)
+            .add_systems(Update, admit_preview_clips);
+            app.finish();
+            app.cleanup();
+            let handle = app.world().resource::<AssetServer>().load(name);
+            let entity = app.world_mut().spawn(PendingPreviewVrma(handle)).id();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while app.world().get::<PendingPreviewVrma>(entity).is_some() {
+                app.update();
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "preview admission must finish"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(app.world().get::<VrmaHandle>(entity).is_none());
+            assert!(app.world().get::<Vrma>(entity).is_none());
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
 
     fn model_test_app() -> App {
         let mut app = App::new();

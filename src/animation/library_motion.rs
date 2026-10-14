@@ -386,7 +386,10 @@ fn extract_motion(world: &mut World) {
                 return;
             }
             if session.returning.is_none() {
-                let rect = world.resource::<DesktopEnvironment>().nera_rect.unwrap();
+                let Some(rect) = world.resource::<DesktopEnvironment>().nera_rect else {
+                    motion.session = None;
+                    return;
+                };
                 session.returning = Some((IVec2::new(rect.left, rect.top), 0.0));
                 info!("Library animation ended; returning to checkpoint");
             }
@@ -409,7 +412,10 @@ fn extract_motion(world: &mut World) {
         } else { raw };
         // Desktop X moves the HWND once. Depth is part of the 3D pose: replacing
         // it with a screen Y offset changes the view/contact of a backward fall.
-        let rest = world.get::<RestTransform>(entity).unwrap().0.translation;
+        let Some(rest) = world.get::<RestTransform>(entity).map(|rest| rest.0.translation) else {
+            motion.session = None;
+            return;
+        };
         let Some(mut hips) = world.get_mut::<Transform>(entity) else {
             return;
         };
@@ -984,6 +990,24 @@ mod tests {
             ..default()
         });
         (world, root, hips, entity)
+    }
+    #[test]
+    fn checkpoint_releases_safely_when_desktop_rect_or_rest_bone_disappears() {
+        for missing_rect in [false, true] {
+            let (mut world, _, hips, clip) = fixture();
+            world.run_system_once(extract_motion).unwrap();
+            assert!(world.resource::<LibraryMotion>().session.is_some());
+            if missing_rect {
+                world
+                    .resource_mut::<NeraAnimationState>()
+                    .finish_action(TemporaryAction::LibraryAnimation(clip));
+                world.resource_mut::<DesktopEnvironment>().nera_rect = None;
+            } else {
+                world.entity_mut(hips).remove::<RestTransform>();
+            }
+            world.run_system_once(extract_motion).unwrap();
+            assert!(world.resource::<LibraryMotion>().session.is_none());
+        }
     }
     #[test]
     fn rest_height_ratio_is_independent_of_world_origin_and_rejects_degenerate_rigs() {

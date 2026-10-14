@@ -771,7 +771,14 @@ pub(super) fn follow_sitting_attachment(
         }
 
         PlacementState::Taskbar(attachment) => {
-            follow_taskbar_attachment(&mut environment, attachment, refresh_z_order);
+            let always_on_top = window_query
+                .single()
+                .is_ok_and(|window| window.window_level == bevy::window::WindowLevel::AlwaysOnTop);
+            follow_taskbar_attachment(
+                &mut environment,
+                attachment,
+                refresh_z_order && always_on_top,
+            );
         }
     }
 }

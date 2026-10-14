@@ -242,12 +242,7 @@ impl Player {
         }
         let desired = (((now - start).max(0.0) * FPS).floor() as usize) % self.frames.len();
         let mut image = None;
-        if desired != self.displayed
-            && self
-                .next
-                .as_ref()
-                .is_some_and(|(index, _)| *index == desired)
-        {
+        if desired != self.displayed && self.next.is_some() {
             let (index, ready) = self.next.take().unwrap();
             self.displayed = index;
             image = Some(ready);
@@ -271,6 +266,24 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decoder_that_finishes_after_its_deadline_still_advances_the_preview() {
+        IoTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let frames = Frames::for_test();
+        let mut player = Player::new(frames.clone());
+        player.start = Some(0.0);
+        player.next = Some((1, frames.decode(1).unwrap()));
+        assert!(player.update(2.0 / FPS).is_some());
+        assert_eq!(
+            player.index(),
+            1,
+            "late frame is displayed instead of dropped"
+        );
+        assert!(
+            player.pending.is_some(),
+            "current desired frame is requested next"
+        );
+    }
     #[test]
     fn recording_covers_thirty_seconds_and_whole_idle_cycles() {
         assert_eq!(recording_seconds(12.0), 36.0);

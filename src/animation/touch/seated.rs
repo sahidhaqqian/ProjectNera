@@ -187,7 +187,8 @@ fn preserve_touch_seat(
     let visual = animation.visual_state();
     let touch = matches!(
         visual,
-        VisualState::TouchReaction(_)
+        VisualState::HeadStroke
+            | VisualState::TouchReaction(_)
             | VisualState::Treat
             | VisualState::FocusCelebrate
             | VisualState::FocusActivity(crate::focus::FocusPreset::Study)
@@ -398,6 +399,32 @@ mod tests {
         assert_eq!(*app.world().get::<Transform>(hips).unwrap(), typed_hips);
         assert_eq!(*app.world().get::<Transform>(knee).unwrap(), typed_knee);
         assert!(app.world().resource::<TouchSeatPose>().raw.is_empty());
+    }
+
+    #[test]
+    fn headpat_preserves_seated_legs_and_restores_the_authored_pose() {
+        let (mut app, hips, knee, head) = fixture();
+        let seated = *app.world().get::<Transform>(hips).unwrap();
+        let bent = *app.world().get::<Transform>(knee).unwrap();
+        app.world_mut()
+            .resource_mut::<NeraAnimationState>()
+            .request_one_shot(TemporaryAction::HeadStroke, Duration::from_secs(2));
+        let raw = Transform::from_xyz(0.0, 1.1, 0.0);
+        *app.world_mut().get_mut::<Transform>(hips).unwrap() = raw;
+        *app.world_mut().get_mut::<Transform>(knee).unwrap() = Transform::IDENTITY;
+        *app.world_mut().get_mut::<Transform>(head).unwrap() = raw;
+        app.world_mut()
+            .run_system_once(preserve_touch_seat)
+            .unwrap();
+        assert_eq!(*app.world().get::<Transform>(hips).unwrap(), seated);
+        assert_eq!(*app.world().get::<Transform>(knee).unwrap(), bent);
+        assert_eq!(*app.world().get::<Transform>(head).unwrap(), raw);
+        app.world_mut().run_system_once(restore_raw_pose).unwrap();
+        assert_eq!(*app.world().get::<Transform>(hips).unwrap(), raw);
+        assert_eq!(
+            *app.world().get::<Transform>(knee).unwrap(),
+            Transform::IDENTITY
+        );
     }
 
     #[test]
